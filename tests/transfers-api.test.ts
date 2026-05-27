@@ -10,6 +10,7 @@ import { GET as readTransferRoute } from "../app/api/transfers/[orderId]/route";
 import { POST as claimTransferRoute } from "../app/api/transfers/[orderId]/claim/route";
 import { POST as devPayRoute } from "../app/api/transfers/[orderId]/dev-pay/route";
 import { GET as fileRoute } from "../app/api/transfers/[orderId]/file/route";
+import { POST as nymSessionRoute } from "../app/api/transfers/[orderId]/nym-session/route";
 import { POST as paymentIntentRoute } from "../app/api/transfers/[orderId]/payment-intent/route";
 import { POST as cipherPayWebhookRoute } from "../app/api/webhooks/cipherpay/route";
 import { resetRateLimitStateForTesting } from "../lib/server/rate-limit";
@@ -19,6 +20,10 @@ interface TransferPublicOrder {
   status: string;
   sellerPayoutAddress: string;
   payment: { provider: string; invoiceId: string; status: string } | null;
+  delivery: {
+    requiredTransport: string;
+    nymSession: { status: string; buyerNymAddress: string } | null;
+  };
 }
 
 interface ErrorEnvelope {
@@ -77,6 +82,8 @@ describe("/api/transfers", () => {
     expect(readBody.order.orderId).toBe(createBody.order.orderId);
     expect(readBody.order.sellerPayoutAddress).toBe(testSellerPayoutAddress());
     expect(readBody.order.timestamp?.commitment).toBe("aa".repeat(32));
+    expect(readBody.order.delivery.requiredTransport).toBe("nym-claim-v1");
+    expect(readBody.order.delivery.nymSession).toBeNull();
     expect(JSON.stringify(readBody)).not.toContain("fileKey");
     expect(JSON.stringify(readBody)).not.toContain("doc_hash");
   });
@@ -100,6 +107,16 @@ describe("/api/transfers", () => {
     expect(paymentBody.payment.provider).toBe("dev");
     expect(paymentBody.payment.paymentAddress).toBe(testSellerPayoutAddress());
     expect(paymentBody.order.status).toBe("payment_pending");
+
+    const nymSessionResponse = await nymSessionRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/nym-session`, {
+        buyerNymAddress: testBuyerNymAddress(),
+        buyerPublicKeyJwk: keyPair.publicJwk,
+        transport: "nym-claim-v1",
+      }),
+      routeContext(order.orderId),
+    );
+    expect(nymSessionResponse.status).toBe(200);
 
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -137,6 +154,7 @@ describe("/api/transfers", () => {
       manifest: { timestampReceipt: { doc_hash_sha256: string } | null };
       keyEnvelope: { scheme: string; ciphertext: string };
       download: { url: string };
+      nymDelivery: { transport: string; status: string };
     };
     expect(claimBody.order.status).toBe("claimed");
     expect(claimBody.order.sellerPayoutAddress).toBe(testSellerPayoutAddress());
@@ -144,6 +162,8 @@ describe("/api/transfers", () => {
       "ee".repeat(32),
     );
     expect(claimBody.keyEnvelope.scheme).toBe("p256-ecdh-aes-gcm-v1");
+    expect(claimBody.nymDelivery.transport).toBe("nym-claim-v1");
+    expect(claimBody.nymDelivery.status).toBe("queued_local_outbox");
 
     const fileResponse = await fileRoute(
       new Request(`http://localhost${claimBody.download.url}`),
@@ -180,6 +200,40 @@ describe("/api/transfers", () => {
       order: TransferPublicOrder;
     };
     expect(webhookBody.order.status).toBe("paid");
+  });
+
+  it("requires a Nym session before releasing a paid file key", async () => {
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(
+        `http://localhost/api/transfers/${order.orderId}/dev-pay`,
+        { method: "POST" },
+      ),
+      routeContext(order.orderId),
+    );
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const claimResponse = await claimTransferRoute(
+        jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
+          buyerPublicKeyJwk: keyPair.publicJwk,
+        }),
+        routeContext(order.orderId),
+      );
+      expect(claimResponse.status).toBe(402);
+      const body = (await claimResponse.json()) as ErrorEnvelope;
+      expect(body.error.message).toContain("Nym delivery session");
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 });
 
@@ -260,6 +314,10 @@ function encryptedFixture(): Uint8Array {
 
 function testSellerPayoutAddress(): string {
   return "u1sellerpayoutaddress000000000000000000000000000000000";
+}
+
+function testBuyerNymAddress(): string {
+  return "nym1buyerprivateaddress000000000000000000000000000000";
 }
 
 function sha256Hex(bytes: Uint8Array): string {

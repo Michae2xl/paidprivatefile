@@ -61,6 +61,17 @@ interface TransferPublicOrder {
   } | null;
   manifestRoot: string;
   payment: TransferPayment | null;
+  delivery: {
+    requiredTransport: "nym-claim-v1" | "nym-transfer-v1";
+    fallbackHttpDownload: false;
+    nymSession: {
+      transport: "nym-claim-v1" | "nym-transfer-v1";
+      buyerNymAddress: string;
+      status: "waiting_for_payment" | "ready_for_delivery" | "queued";
+      createdAt: string;
+      updatedAt: string;
+    } | null;
+  };
 }
 
 interface TransferPayment {
@@ -90,6 +101,12 @@ interface ClaimResponse {
   download: {
     url: string;
     expiresAt: string;
+  };
+  nymDelivery: {
+    deliveryId: string;
+    transport: "nym-claim-v1" | "nym-transfer-v1";
+    status: "queued_local_outbox";
+    queuedAt: string;
   };
 }
 
@@ -123,6 +140,7 @@ export function PaidPrivateFilePanel({
     null,
   );
   const [payment, setPayment] = useState<TransferPayment | null>(null);
+  const [buyerNymAddress, setBuyerNymAddress] = useState("");
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFileName, setDownloadFileName] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
@@ -251,6 +269,21 @@ export function PaidPrivateFilePanel({
     setBusyAction("payment");
     try {
       const keyPair = await getOrCreateBuyerKeyPair(loadedOrder.orderId);
+      if (!buyerNymAddress.trim()) {
+        throw new Error(copy.errors.missingNymAddress);
+      }
+      await postJson<{ order: TransferPublicOrder }>(
+        `/api/transfers/${encodeURIComponent(loadedOrder.orderId)}/nym-session`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            buyerNymAddress: buyerNymAddress.trim(),
+            buyerPublicKeyJwk: keyPair.publicJwk,
+            transport: loadedOrder.delivery.requiredTransport,
+          }),
+        },
+      );
       const body = await postJson<PaymentIntentResponse>(
         `/api/transfers/${encodeURIComponent(
           loadedOrder.orderId,
@@ -539,6 +572,20 @@ export function PaidPrivateFilePanel({
                   placeholder={copy.receive.orderPlaceholder}
                   disabled={isBusy}
                 />
+                </label>
+              <label className="zk-hub-form-field">
+                <span className="zk-hub-form-label">
+                  {copy.receive.nymAddressLabel}
+                </span>
+                <input
+                  value={buyerNymAddress}
+                  onChange={(event) => setBuyerNymAddress(event.target.value)}
+                  placeholder={copy.receive.nymAddressPlaceholder}
+                  disabled={isBusy}
+                />
+                <span className="zk-hub-form-hint">
+                  {copy.receive.nymAddressHint}
+                </span>
               </label>
               <button className="button-secondary" type="submit" disabled={isBusy}>
                 {busyAction === "loading"
@@ -651,6 +698,14 @@ function OrderDetails({
       <div>
         <dt>{copy.details.status}</dt>
         <dd>{order.status}</dd>
+      </div>
+      <div>
+        <dt>{copy.details.privateDelivery}</dt>
+        <dd>{order.delivery.requiredTransport}</dd>
+      </div>
+      <div>
+        <dt>{copy.details.nymSession}</dt>
+        <dd>{order.delivery.nymSession?.status ?? "required"}</dd>
       </div>
       <div className="zectime-paid-details-wide">
         <dt>{copy.details.digest}</dt>

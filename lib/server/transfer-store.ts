@@ -15,6 +15,11 @@ import {
   type CipherPayProvider,
 } from "./cipherpay-client";
 import { ServerError } from "./error-kinds";
+import {
+  queueNymDelivery,
+  type NymDeliveryReceipt,
+  type NymTransportMode,
+} from "./nym-transport";
 import { resolveWebRuntimeRoot } from "./web-session";
 
 export type TransferStatus =
@@ -34,6 +39,22 @@ export interface TransferPaymentState {
   createdAt: string;
   confirmedAt: string | null;
   raw?: unknown;
+}
+
+export interface TransferNymSession {
+  transport: NymTransportMode;
+  buyerNymAddress: string;
+  buyerPublicKeyHash: string;
+  status: "waiting_for_payment" | "ready_for_delivery" | "queued";
+  createdAt: string;
+  updatedAt: string;
+  lastDelivery?: NymDeliveryReceipt;
+}
+
+export interface TransferDeliveryState {
+  requiredTransport: NymTransportMode;
+  fallbackHttpDownload: false;
+  nymSession: TransferNymSession | null;
 }
 
 export interface TransferOrder {
@@ -62,6 +83,7 @@ export interface TransferOrder {
   timestampReceipt: TransferTimestampReceipt | null;
   manifestRoot: string;
   payment: TransferPaymentState | null;
+  delivery: TransferDeliveryState;
   claims: Array<{
     claimedAt: string;
     buyerPublicKeyHash: string;
@@ -103,6 +125,9 @@ export interface TransferPublicOrder {
   } | null;
   manifestRoot: string;
   payment: Omit<TransferPaymentState, "buyerPublicKeyHash" | "raw"> | null;
+  delivery: Omit<TransferDeliveryState, "nymSession"> & {
+    nymSession: Omit<TransferNymSession, "buyerPublicKeyHash"> | null;
+  };
 }
 
 export interface CreateTransferOrderInput {
@@ -128,6 +153,7 @@ export interface TransferClaim {
     url: string;
     expiresAt: string;
   };
+  nymDelivery: NymDeliveryReceipt;
 }
 
 export interface TransferManifest {
@@ -221,6 +247,11 @@ export async function createTransferOrder(
     timestampReceipt,
     manifestRoot,
     payment: null,
+    delivery: {
+      requiredTransport: "nym-claim-v1",
+      fallbackHttpDownload: false,
+      nymSession: null,
+    },
     claims: [],
   };
 
@@ -303,6 +334,52 @@ export async function createPaymentIntentForOrder(
   });
 }
 
+export async function registerNymSessionForOrder(
+  orderId: string,
+  input: {
+    buyerNymAddress: string;
+    transport?: NymTransportMode;
+    buyerPublicKeyJwk: JsonWebKey;
+  },
+): Promise<{ order: TransferPublicOrder; nymSession: TransferPublicOrder["delivery"]["nymSession"] }> {
+  validateBuyerPublicKeyJwk(input.buyerPublicKeyJwk);
+  const buyerPublicKeyHash = hashBuyerPublicKey(input.buyerPublicKeyJwk);
+  const buyerNymAddress = normalizeNymAddress(input.buyerNymAddress);
+  const transport = normalizeNymTransport(input.transport);
+
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    if (
+      order.payment &&
+      order.payment.buyerPublicKeyHash !== buyerPublicKeyHash
+    ) {
+      throw new ServerError(
+        "flow_conflict",
+        "This order already has a payment session for another buyer key",
+      );
+    }
+
+    const now = new Date().toISOString();
+    order.delivery = normalizeDeliveryState(order.delivery);
+    order.delivery.nymSession = {
+      transport,
+      buyerNymAddress,
+      buyerPublicKeyHash,
+      status: order.payment?.status === "paid" ? "ready_for_delivery" : "waiting_for_payment",
+      createdAt: order.delivery.nymSession?.createdAt ?? now,
+      updatedAt: now,
+      lastDelivery: order.delivery.nymSession?.lastDelivery,
+    };
+    order.updatedAt = now;
+    await writeOrder(order);
+
+    return {
+      order: publicOrder(order),
+      nymSession: publicOrder(order).delivery.nymSession,
+    };
+  });
+}
+
 export async function markTransferPaidForDev(
   orderId: string,
 ): Promise<TransferPublicOrder> {
@@ -372,14 +449,42 @@ export async function claimTransfer(
         "This buyer key is not bound to the confirmed payment",
       );
     }
+    order.delivery = normalizeDeliveryState(order.delivery);
+    if (
+      !order.delivery.nymSession ||
+      order.delivery.nymSession.buyerPublicKeyHash !== buyerPublicKeyHash
+    ) {
+      throw new ServerError(
+        "payment_required",
+        "A Nym delivery session must be registered before the file key is released",
+      );
+    }
 
     const token = signDownloadToken({
       orderId,
       expiresAtMs: expiresAt.getTime(),
     });
     const keyEnvelope = await wrapFileKey(order, buyerPublicKeyJwk);
+    const nymDelivery = await queueNymDelivery({
+      orderId,
+      buyerNymAddress: order.delivery.nymSession.buyerNymAddress,
+      transport: order.delivery.nymSession.transport,
+      payload: {
+        schema: "paidprivatefile.nym.claim.v1",
+        orderId,
+        manifest: manifestForOrder(order),
+        keyEnvelope,
+        devHttpFallback: {
+          url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
+          expiresAt: expiresAt.toISOString(),
+        },
+      },
+    });
     order.status = "claimed";
     order.updatedAt = now.toISOString();
+    order.delivery.nymSession.status = "queued";
+    order.delivery.nymSession.updatedAt = now.toISOString();
+    order.delivery.nymSession.lastDelivery = nymDelivery;
     order.claims.push({
       claimedAt: now.toISOString(),
       buyerPublicKeyHash,
@@ -396,6 +501,7 @@ export async function claimTransfer(
         url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
         expiresAt: expiresAt.toISOString(),
       },
+      nymDelivery,
     };
   });
 }
@@ -426,12 +532,18 @@ function markOrderPaid(order: TransferOrder, raw?: unknown): void {
   order.updatedAt = now;
   order.payment.status = "paid";
   order.payment.confirmedAt = order.payment.confirmedAt ?? now;
+  order.delivery = normalizeDeliveryState(order.delivery);
+  if (order.delivery.nymSession) {
+    order.delivery.nymSession.status = "ready_for_delivery";
+    order.delivery.nymSession.updatedAt = now;
+  }
   if (raw !== undefined) {
     order.payment.raw = raw;
   }
 }
 
 function publicOrder(order: TransferOrder): TransferPublicOrder {
+  const delivery = normalizeDeliveryState(order.delivery);
   return {
     orderId: order.orderId,
     status: order.status,
@@ -469,6 +581,20 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
           confirmedAt: order.payment.confirmedAt,
         }
       : null,
+    delivery: {
+      requiredTransport: delivery.requiredTransport,
+      fallbackHttpDownload: delivery.fallbackHttpDownload,
+      nymSession: delivery.nymSession
+        ? {
+            transport: delivery.nymSession.transport,
+            buyerNymAddress: delivery.nymSession.buyerNymAddress,
+            status: delivery.nymSession.status,
+            createdAt: delivery.nymSession.createdAt,
+            updatedAt: delivery.nymSession.updatedAt,
+            lastDelivery: delivery.nymSession.lastDelivery,
+          }
+        : null,
+    },
   };
 }
 
@@ -691,6 +817,40 @@ function validateCreateTransferInput(input: CreateTransferOrderInput): void {
   }
   decodeBase64(input.encryptionIv, 12);
   decodeBase64(input.fileKey, 32);
+}
+
+function normalizeDeliveryState(
+  value: TransferDeliveryState | undefined,
+): TransferDeliveryState {
+  return {
+    requiredTransport: normalizeNymTransport(value?.requiredTransport),
+    fallbackHttpDownload: false,
+    nymSession: value?.nymSession
+      ? {
+          transport: normalizeNymTransport(value.nymSession.transport),
+          buyerNymAddress: normalizeNymAddress(value.nymSession.buyerNymAddress),
+          buyerPublicKeyHash: value.nymSession.buyerPublicKeyHash,
+          status: value.nymSession.status,
+          createdAt: value.nymSession.createdAt,
+          updatedAt: value.nymSession.updatedAt,
+          lastDelivery: value.nymSession.lastDelivery,
+        }
+      : null,
+  };
+}
+
+function normalizeNymTransport(
+  value: NymTransportMode | undefined,
+): NymTransportMode {
+  return value === "nym-transfer-v1" ? "nym-transfer-v1" : "nym-claim-v1";
+}
+
+function normalizeNymAddress(value: string): string {
+  const cleaned = value.trim();
+  if (cleaned.length < 16 || cleaned.length > 512) {
+    throw new ServerError("validation", "Buyer Nym address is invalid");
+  }
+  return cleaned;
 }
 
 function validateOrderId(orderId: string): void {

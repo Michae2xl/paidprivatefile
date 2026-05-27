@@ -1,12 +1,12 @@
 # Nym Integration
 
-Nym is the private transport layer for Paid Private File.
+Nym is the core private transport layer for Paid Private File.
 
 It should not handle payment and it should not be treated as permanent storage. Zcash/CipherPay handles payment confirmation. Paid Private File handles encryption, order state, and key-release policy. Nym hides network metadata when the claim payload or encrypted file is delivered.
 
-## Phase B Target
+## Core Target
 
-The first integration should be `nym-claim-v1`.
+The first required transport mode is `nym-claim-v1`.
 
 ```txt
 Buyer
@@ -26,9 +26,9 @@ Buyer
   decrypts file locally
 ```
 
-This keeps bandwidth low and makes the product usable before full file transport over Nym is mature.
+This keeps bandwidth low and makes the product usable before full file transport over Nym is mature. HTTP delivery is only a development fallback; the product privacy model is Nym delivery.
 
-## Later Target
+## Maximum-Privacy Target
 
 `nym-transfer-v1` sends encrypted file chunks through Nym:
 
@@ -47,8 +47,8 @@ This mode gives better metadata privacy but needs:
 
 ## Product Copy Boundary
 
-The user-facing product should stay simple:
+The user-facing product should be stronger than a paid download:
 
-> Send a private file. The recipient pays in ZEC. Then they download and open it locally.
+> ZEC payment unlocks a private Nym delivery session. The file opens only on the buyer's machine.
 
-Nym belongs in advanced details and architecture docs unless the user explicitly asks how private delivery works.
+Nym is part of the core promise. Advanced details can explain claim mode, transfer mode, chunking, and reliability.

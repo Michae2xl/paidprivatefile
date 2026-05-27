@@ -36,6 +36,9 @@ export interface PaidPrivateFileCopy {
     body: string;
     orderLabel: string;
     orderPlaceholder: string;
+    nymAddressLabel: string;
+    nymAddressPlaceholder: string;
+    nymAddressHint: string;
     loadLabel: string;
     payLabel: string;
     checkoutLabel: string;
@@ -56,12 +59,15 @@ export interface PaidPrivateFileCopy {
     paymentAddress: string;
     paymentMemo: string;
     invoice: string;
+    privateDelivery: string;
+    nymSession: string;
   };
   errors: {
     missingFile: string;
     invalidPrice: string;
     invalidPayoutAddress: string;
     missingOrder: string;
+    missingNymAddress: string;
     serverError: string;
     paymentRequired: string;
   };
@@ -71,8 +77,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
   pt: {
     shell: {
       eyebrow: "Paid Private File",
-      title: "Envie um arquivo privado. A pessoa paga em ZEC. Depois baixa e abre localmente.",
-      body: "O arquivo e cifrado no browser antes do upload. CipherPay confirma o pagamento shielded e a API libera a chave apenas para o comprador que iniciou o checkout.",
+      title: "Pagamento em ZEC. Entrega privada via Nym. Arquivo abre so localmente.",
+      body: "O arquivo e cifrado antes do upload. O pagamento em ZEC desbloqueia uma sessao privada Nym para entregar a chave ao comprador, sem expor o conteudo do arquivo.",
       backLabel: "Paid Private File",
     },
     tabs: {
@@ -81,7 +87,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     send: {
       title: "Criar arquivo privado pago",
-      body: "Escolha o arquivo, defina o preco em ZEC e compartilhe acesso privado. O servidor guarda ciphertext; o comprador abre localmente depois do pagamento.",
+      body: "Escolha o arquivo, defina o preco em ZEC e compartilhe acesso privado. O servidor guarda ciphertext; a entrega da chave e tratada como sessao Nym.",
       fileLabel: "Arquivo privado",
       chooseFileLabel: "Escolher arquivo",
       emptyFileLabel: "Nenhum arquivo selecionado",
@@ -102,9 +108,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     receive: {
       title: "Pagar e abrir localmente",
-      body: "Carregue o link, pague o invoice em ZEC e clique para baixar. A chave chega pela API, embrulhada para este browser.",
+      body: "Carregue o link, registre sua sessao Nym, pague o invoice em ZEC e abra o arquivo localmente.",
       orderLabel: "Paid Private File",
       orderPlaceholder: "Cole o link do arquivo ou order id",
+      nymAddressLabel: "Endereco Nym do comprador",
+      nymAddressPlaceholder: "nym...",
+      nymAddressHint:
+        "A chave do arquivo deve ser entregue por uma sessao Nym apos o pagamento.",
       loadLabel: "Carregar",
       payLabel: "Criar pagamento",
       checkoutLabel: "Abrir checkout CipherPay",
@@ -125,12 +135,15 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       paymentAddress: "Endereco de pagamento",
       paymentMemo: "Memo",
       invoice: "Invoice",
+      privateDelivery: "Entrega privada",
+      nymSession: "Sessao Nym",
     },
     errors: {
       missingFile: "Escolha um arquivo antes de criar o link.",
       invalidPrice: "Informe um preco valido em ZEC.",
       invalidPayoutAddress: "Informe uma Unified Address Zcash valida para receber.",
       missingOrder: "Cole um link ou order id valido.",
+      missingNymAddress: "Informe um endereco Nym para receber a chave privada.",
       serverError: "Falha no paid link: ",
       paymentRequired: "Pagamento ainda nao confirmado. Aguarde o webhook ou tente novamente depois do checkout.",
     },
@@ -138,8 +151,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
   en: {
     shell: {
       eyebrow: "Paid Private File",
-      title: "Send a private file. The recipient pays in ZEC. Then they download and open it locally.",
-      body: "The browser encrypts the file before upload. CipherPay confirms the shielded payment and the API releases the key only to the buyer that started checkout.",
+      title: "ZEC payment. Private Nym delivery. Local-only file opening.",
+      body: "The file is encrypted before upload. The ZEC payment unlocks a private Nym delivery session for the buyer key, without exposing the file content.",
       backLabel: "Paid Private File",
     },
     tabs: {
@@ -148,7 +161,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     send: {
       title: "Create paid private file",
-      body: "Pick a file, set the ZEC price, and share private access. The server stores ciphertext; the buyer opens it locally after payment.",
+      body: "Pick a file, set the ZEC price, and share private access. The server stores ciphertext; key delivery is treated as a Nym session.",
       fileLabel: "Private file",
       chooseFileLabel: "Choose file",
       emptyFileLabel: "No file selected",
@@ -169,9 +182,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     receive: {
       title: "Pay and open locally",
-      body: "Load the link, pay the ZEC invoice, and unlock the download. The key is returned by API, wrapped for this browser.",
+      body: "Load the link, register your Nym session, pay the ZEC invoice, and open the file locally.",
       orderLabel: "Paid Private File",
       orderPlaceholder: "Paste file link or order id",
+      nymAddressLabel: "Buyer Nym address",
+      nymAddressPlaceholder: "nym...",
+      nymAddressHint:
+        "The file key should be delivered through a Nym session after payment.",
       loadLabel: "Load",
       payLabel: "Create payment",
       checkoutLabel: "Open CipherPay checkout",
@@ -192,12 +209,15 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       paymentAddress: "Payment address",
       paymentMemo: "Memo",
       invoice: "Invoice",
+      privateDelivery: "Private delivery",
+      nymSession: "Nym session",
     },
     errors: {
       missingFile: "Choose a file before creating the link.",
       invalidPrice: "Enter a valid ZEC price.",
       invalidPayoutAddress: "Enter a valid Zcash Unified Address to receive.",
       missingOrder: "Paste a valid link or order id.",
+      missingNymAddress: "Enter a Nym address to receive the private key.",
       serverError: "Paid link failed: ",
       paymentRequired: "Payment is not confirmed yet. Wait for the webhook or try again after checkout.",
     },

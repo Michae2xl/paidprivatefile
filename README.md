@@ -1,10 +1,10 @@
 # Paid Private File
 
-Send a private file. The recipient pays in ZEC. Then they download and open it locally.
+ZEC payment unlocks private Nym delivery. The file opens only locally.
 
-Paid Private File is a Zcash-native private file delivery system. A seller encrypts a file locally, sets a ZEC price and payout address, and shares a private access link. A buyer pays in ZEC, then receives a wrapped file key through the API and decrypts the file locally.
+Paid Private File is a private commerce protocol for files: local encryption, ZEC payment, and Nym delivery. A seller encrypts a file locally, sets a ZEC price and payout address, and shares a private access link. A buyer pays in ZEC, opens a Nym delivery session, receives a wrapped file key, and decrypts locally.
 
-Nym is the private transport layer for the next phase. Zcash handles payment, the app handles encryption and key-release policy, and Nym hides delivery metadata when the key or encrypted file is delivered to the buyer.
+Nym is core, not an add-on. Zcash handles payment, the app handles encryption and key-release policy, and Nym is the required private delivery layer for the key and, in the stronger mode, the encrypted file chunks.
 
 ## Why It Exists
 
@@ -12,7 +12,7 @@ Most file-transfer tools separate payment, access control, and privacy. Paid Pri
 
 - private file upload
 - direct ZEC payment gating
-- API-based key release after payment
+- Nym-based key release after payment
 - local decryption by the buyer
 - no plaintext file storage on the server
 
@@ -34,7 +34,7 @@ Most file-transfer tools separate payment, access control, and privacy. Paid Pri
 3. Pays in ZEC.
 4. Waits for confirmation.
 5. Downloads the encrypted file.
-6. Receives the wrapped file key through the API.
+6. Receives the wrapped file key through a Nym delivery session.
 7. Decrypts and opens the file locally.
 
 ## Architecture
@@ -44,10 +44,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md).
 High-level flow:
 
 ```txt
-Seller browser -> encrypted file + order -> API/storage
-Buyer browser  -> payment intent -> CipherPay/Zcash
-CipherPay      -> webhook -> API marks paid
-Buyer browser  -> claim -> wrapped key + ciphertext -> local decrypt
+Seller browser    -> encrypted file + order -> API/storage
+Buyer local client -> Nym session + payment intent -> CipherPay/Zcash
+CipherPay         -> webhook -> API marks paid
+Nym               -> wrapped key delivery -> local decrypt
 ```
 
 Nym transport flow:
@@ -55,10 +55,10 @@ Nym transport flow:
 ```txt
 Buyer local client -> Nym address/session -> API
 API after payment  -> wrapped key over Nym
-Buyer browser      -> ciphertext download -> local decrypt
+Buyer local client -> ciphertext retrieval -> local decrypt
 ```
 
-For the MVP, Nym should carry the key-release message first (`nym-claim-v1`). Full ciphertext transfer over Nym (`nym-transfer-v1`) is the stronger privacy mode, but should be added after size limits and reliability are tested.
+The core transport is `nym-claim-v1`: payment unlocks private Nym delivery of the wrapped file key. `nym-transfer-v1` extends this to encrypted file chunks after size limits and reliability are tested.
 
 ## Local Development
 
@@ -89,6 +89,7 @@ PAID_PRIVATE_FILE_ENABLE_DEV_PAY
 PAID_PRIVATE_FILE_TRUST_PROXY_HEADERS
 NYM_CLIENT_ENDPOINT
 NYM_SERVICE_PROVIDER_ADDRESS
+NYM_TRANSPORT_MODE
 ```
 
 If CipherPay credentials are not configured, the app uses the local development payment provider. Use the dev payment endpoint only in local development or explicitly enabled production test environments.
@@ -103,9 +104,7 @@ npm run build
 
 ## Current Status
 
-Prototype. The system supports local encrypted-file order creation, payment intent creation, dev payment confirmation, CipherPay webhook parsing, gated key release, signed encrypted-file download URLs, and browser-side decryption.
-
-Nym is documented as the private delivery layer but is not wired into the current prototype yet. Current claim and file delivery use the HTTP API.
+Prototype. The system supports local encrypted-file order creation, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, Nym delivery outbox creation, signed development download URLs, and browser-side decryption.
 
 Before production, harden:
 
@@ -117,6 +116,9 @@ Before production, harden:
 - seller payout address validation
 - buyer key recovery UX
 - operational monitoring
+- Nym client/service-provider deployment
+- Nym message retry and delivery receipts
+- encrypted chunk delivery for `nym-transfer-v1`
 
 ## License
 

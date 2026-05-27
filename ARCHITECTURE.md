@@ -4,9 +4,9 @@
 
 Paid Private File is a paid private file-delivery system:
 
-> Send a private file. The recipient pays in ZEC. Then they download and open it locally.
+> ZEC payment unlocks private Nym delivery. The file opens only locally.
 
-The core invariant is simple: the server may store ciphertext and payment metadata, but it must not serve a decryption key until the payment is confirmed.
+The core invariant is simple: payment unlocks a private Nym delivery session. The server may store ciphertext and payment metadata, but it must not release key material outside a buyer-bound Nym session after payment confirmation.
 
 ## Components
 
@@ -14,14 +14,16 @@ The core invariant is simple: the server may store ciphertext and payment metada
 Browser client
   - encrypts seller file before upload
   - generates buyer key pair
-  - decrypts file locally after claim
+  - registers buyer Nym delivery address
+  - decrypts file locally after Nym delivery
 
 Transfer API
   - creates file orders
   - stores ciphertext
   - exposes public order metadata
   - creates payment intents
-  - releases wrapped file keys after payment
+  - requires Nym delivery session before claim
+  - queues wrapped key delivery after payment
 
 Transfer store
   - persists order JSON
@@ -35,7 +37,7 @@ Payment adapter
   - parses payment webhook payloads
 
 Nym transport adapter
-  - phase B component
+  - core component
   - receives buyer Nym address/session
   - sends wrapped key over Nym after payment
   - optionally transfers encrypted file chunks over Nym
@@ -48,7 +50,7 @@ CipherPay webhook
 
 ## Where Nym Enters
 
-Nym is not a payment rail and not a storage layer. It enters as the private delivery transport after the ZEC payment is confirmed.
+Nym is not a payment rail and not a storage layer. It is the private delivery transport after the ZEC payment is confirmed.
 
 The architecture has three layers:
 
@@ -63,9 +65,9 @@ Nym
   private delivery of the wrapped key or encrypted file chunks
 ```
 
-### MVP: Nym Claim Mode
+### Core MVP: Nym Claim Mode
 
-In the first Nym integration, the encrypted file can still be stored and downloaded through normal object storage or the existing signed file URL. Nym carries the sensitive claim payload:
+In the core MVP, the encrypted file can still be stored in object storage, but the sensitive claim payload is delivered through Nym:
 
 ```txt
 buyer Nym address
@@ -76,7 +78,7 @@ buyer Nym address
   -> buyer decrypts file locally
 ```
 
-This mode hides the key-release delivery metadata while keeping the MVP practical.
+This mode hides the key-release delivery metadata while keeping the MVP practical. Signed HTTP file URLs are treated as development fallback, not the product privacy model.
 
 Transport label:
 
@@ -154,11 +156,12 @@ The seller submits:
 Private link
   -> GET /api/transfers/:orderId
   -> generate buyer P-256 key pair
+  -> register buyer Nym address/session
   -> POST /api/transfers/:orderId/payment-intent
   -> pay invoice
   -> POST /api/transfers/:orderId/claim
-  -> receive wrapped file key + signed file URL
-  -> download ciphertext
+  -> receive wrapped file key over Nym
+  -> retrieve ciphertext
   -> decrypt locally
 ```
 
@@ -212,16 +215,11 @@ The dev payment endpoint is blocked in production unless explicitly enabled.
 POST /api/transfers
 GET  /api/transfers/:orderId
 POST /api/transfers/:orderId/payment-intent
+POST /api/transfers/:orderId/nym-session
 POST /api/transfers/:orderId/claim
 GET  /api/transfers/:orderId/file?token=...
 POST /api/transfers/:orderId/dev-pay
 POST /api/webhooks/cipherpay
-```
-
-Planned Nym API:
-
-```txt
-POST /api/transfers/:orderId/nym-session
 ```
 
 Request:
