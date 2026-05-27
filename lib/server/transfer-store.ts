@@ -1,0 +1,880 @@
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+  webcrypto,
+} from "node:crypto";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
+
+import {
+  createCipherPayInvoice,
+  type CipherPayInvoice,
+  type CipherPayProvider,
+} from "./cipherpay-client";
+import { ServerError } from "./error-kinds";
+import { resolveWebRuntimeRoot } from "./web-session";
+
+export type TransferStatus =
+  | "created"
+  | "payment_pending"
+  | "paid"
+  | "claimed";
+
+export interface TransferPaymentState {
+  provider: CipherPayProvider;
+  invoiceId: string;
+  checkoutUrl: string | null;
+  paymentAddress: string | null;
+  memo: string | null;
+  status: "pending" | "paid";
+  buyerPublicKeyHash: string;
+  createdAt: string;
+  confirmedAt: string | null;
+  raw?: unknown;
+}
+
+export interface TransferOrder {
+  schema: "zectime.paid-link.order.v1";
+  orderId: string;
+  status: TransferStatus;
+  createdAt: string;
+  updatedAt: string;
+  fileName: string;
+  mimeType: string;
+  originalSizeBytes: number;
+  encryptedSizeBytes: number;
+  encryptedFileSha256: string;
+  encryption: {
+    scheme: "aes-256-gcm-v1";
+    iv: string;
+    fileKey: string;
+  };
+  price: {
+    asset: "ZEC";
+    amountZats: number;
+    displayZec: string;
+  };
+  sellerPayoutAddress: string;
+  sellerNote: string | null;
+  timestampReceipt: TransferTimestampReceipt | null;
+  manifestRoot: string;
+  payment: TransferPaymentState | null;
+  claims: Array<{
+    claimedAt: string;
+    buyerPublicKeyHash: string;
+    tokenExpiresAt: string;
+  }>;
+}
+
+export interface TransferTimestampReceipt {
+  commitment_scheme?: string;
+  commitment: string;
+  block_height: number;
+  nonce: string;
+  doc_hash_lo: string;
+  doc_hash_hi: string;
+  doc_hash_sha256?: string;
+}
+
+export interface TransferPublicOrder {
+  orderId: string;
+  status: TransferStatus;
+  createdAt: string;
+  updatedAt: string;
+  file: {
+    fileName: string;
+    mimeType: string;
+    originalSizeBytes: number;
+    encryptedSizeBytes: number;
+    encryptedFileSha256: string;
+    encryptionScheme: "aes-256-gcm-v1";
+    encryptionIv: string;
+  };
+  price: TransferOrder["price"];
+  sellerPayoutAddress: string;
+  sellerNote: string | null;
+  timestamp: {
+    commitmentScheme: string | null;
+    commitment: string;
+    blockHeight: number;
+  } | null;
+  manifestRoot: string;
+  payment: Omit<TransferPaymentState, "buyerPublicKeyHash" | "raw"> | null;
+}
+
+export interface CreateTransferOrderInput {
+  encryptedFile: Uint8Array;
+  fileName: string;
+  mimeType: string;
+  originalSizeBytes: number;
+  encryptedFileSha256: string;
+  encryptionIv: string;
+  fileKey: string;
+  amountZats: number;
+  sellerPayoutAddress: string;
+  sellerNote?: string | null;
+  timestampReceipt?: TransferTimestampReceipt | null;
+}
+
+export interface TransferClaim {
+  order: TransferPublicOrder;
+  manifest: TransferManifest;
+  keyEnvelope: TransferKeyEnvelope;
+  download: {
+    token: string;
+    url: string;
+    expiresAt: string;
+  };
+}
+
+export interface TransferManifest {
+  schema: "zectime.paid-link.manifest.v1";
+  orderId: string;
+  fileName: string;
+  mimeType: string;
+  originalSizeBytes: number;
+  encryptedSizeBytes: number;
+  encryptedFileSha256: string;
+  encryptionScheme: "aes-256-gcm-v1";
+  encryptionIv: string;
+  price: TransferOrder["price"];
+  sellerPayoutAddress: string;
+  sellerNote: string | null;
+  timestampReceipt: TransferTimestampReceipt | null;
+  manifestRoot: string;
+}
+
+export interface TransferKeyEnvelope {
+  scheme: "p256-ecdh-aes-gcm-v1";
+  ephemeralPublicKeyJwk: JsonWebKey;
+  iv: string;
+  ciphertext: string;
+}
+
+const ORDER_ID_PATTERN = /^pl_[a-f0-9]{24}$/u;
+const HEX_SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const MAX_TRANSFER_BYTES = 50 * 1024 * 1024;
+const DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
+const locks = new Map<string, Promise<void>>();
+
+export async function createTransferOrder(
+  input: CreateTransferOrderInput,
+): Promise<TransferPublicOrder> {
+  validateCreateTransferInput(input);
+
+  const orderId = createOrderId();
+  const createdAt = new Date().toISOString();
+  const fileName = normalizeFileName(input.fileName);
+  const mimeType = normalizeMimeType(input.mimeType);
+  const sellerPayoutAddress = normalizeZcashUnifiedAddress(
+    input.sellerPayoutAddress,
+  );
+  const timestampReceipt = normalizeTimestampReceipt(input.timestampReceipt);
+  const encryptedFileSha256 = sha256Hex(input.encryptedFile);
+  if (encryptedFileSha256 !== input.encryptedFileSha256.toLowerCase()) {
+    throw new ServerError(
+      "validation",
+      "Encrypted file digest did not match the uploaded payload",
+    );
+  }
+
+  const manifestRoot = sha256Json({
+    orderId,
+    fileName,
+    mimeType,
+    originalSizeBytes: input.originalSizeBytes,
+    encryptedSizeBytes: input.encryptedFile.byteLength,
+    encryptedFileSha256,
+    encryptionScheme: "aes-256-gcm-v1",
+    encryptionIv: input.encryptionIv,
+    timestampCommitment: timestampReceipt?.commitment ?? null,
+    sellerPayoutAddress,
+    amountZats: input.amountZats,
+  });
+
+  const order: TransferOrder = {
+    schema: "zectime.paid-link.order.v1",
+    orderId,
+    status: "created",
+    createdAt,
+    updatedAt: createdAt,
+    fileName,
+    mimeType,
+    originalSizeBytes: input.originalSizeBytes,
+    encryptedSizeBytes: input.encryptedFile.byteLength,
+    encryptedFileSha256,
+    encryption: {
+      scheme: "aes-256-gcm-v1",
+      iv: input.encryptionIv,
+      fileKey: input.fileKey,
+    },
+    price: {
+      asset: "ZEC",
+      amountZats: input.amountZats,
+      displayZec: formatZec(input.amountZats),
+    },
+    sellerPayoutAddress,
+    sellerNote: normalizeSellerNote(input.sellerNote),
+    timestampReceipt,
+    manifestRoot,
+    payment: null,
+    claims: [],
+  };
+
+  const dir = orderDir(orderId);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await writeFile(encryptedFilePath(orderId), input.encryptedFile, {
+    mode: 0o600,
+  });
+  await writeOrder(order);
+
+  return publicOrder(order);
+}
+
+export async function getTransferPublicOrder(
+  orderId: string,
+): Promise<TransferPublicOrder> {
+  return publicOrder(await readOrder(orderId));
+}
+
+export async function createPaymentIntentForOrder(
+  orderId: string,
+  buyerPublicKeyJwk: JsonWebKey,
+  successUrl?: string,
+): Promise<{ order: TransferPublicOrder; payment: CipherPayInvoice }> {
+  validateBuyerPublicKeyJwk(buyerPublicKeyJwk);
+  const buyerPublicKeyHash = hashBuyerPublicKey(buyerPublicKeyJwk);
+
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    if (order.payment) {
+      if (order.payment.buyerPublicKeyHash !== buyerPublicKeyHash) {
+        throw new ServerError(
+          "flow_conflict",
+          "This paid link already has a payment session for another buyer key",
+        );
+      }
+
+      return {
+        order: publicOrder(order),
+        payment: {
+          provider: order.payment.provider,
+          invoiceId: order.payment.invoiceId,
+          checkoutUrl: order.payment.checkoutUrl,
+          paymentAddress: order.payment.paymentAddress,
+          memo: order.payment.memo,
+          status: order.payment.status,
+        },
+      };
+    }
+
+    const invoice = await createCipherPayInvoice({
+      orderId,
+      amountZats: order.price.amountZats,
+      sellerPayoutAddress: order.sellerPayoutAddress,
+      buyerPublicKeyHash,
+      manifestRoot: order.manifestRoot,
+      successUrl,
+    });
+    const now = new Date().toISOString();
+
+    order.status = "payment_pending";
+    order.updatedAt = now;
+    order.payment = {
+      provider: invoice.provider,
+      invoiceId: invoice.invoiceId,
+      checkoutUrl: invoice.checkoutUrl,
+      paymentAddress: invoice.paymentAddress,
+      memo: invoice.memo,
+      status: "pending",
+      buyerPublicKeyHash,
+      createdAt: now,
+      confirmedAt: null,
+      raw: invoice.raw,
+    };
+
+    await writeOrder(order);
+    await writeInvoiceIndex(invoice.invoiceId, order.orderId);
+
+    return { order: publicOrder(order), payment: invoice };
+  });
+}
+
+export async function markTransferPaidForDev(
+  orderId: string,
+): Promise<TransferPublicOrder> {
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    if (order.payment?.provider !== "dev") {
+      throw new ServerError(
+        "validation",
+        "Dev payment confirmation is only available for dev invoices",
+      );
+    }
+    markOrderPaid(order);
+    await writeOrder(order);
+    return publicOrder(order);
+  });
+}
+
+export async function markTransferPaidFromInvoice(input: {
+  invoiceId?: string | null;
+  orderId?: string | null;
+  raw?: unknown;
+}): Promise<TransferPublicOrder> {
+  const orderId = input.orderId ?? (await findOrderIdByInvoice(input.invoiceId));
+  if (!orderId) {
+    throw new ServerError("validation", "CipherPay webhook did not map to an order");
+  }
+
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    if (
+      input.invoiceId &&
+      order.payment &&
+      order.payment.invoiceId !== input.invoiceId
+    ) {
+      throw new ServerError(
+        "validation",
+        "CipherPay webhook invoice did not match this order",
+      );
+    }
+
+    markOrderPaid(order, input.raw);
+    await writeOrder(order);
+    return publicOrder(order);
+  });
+}
+
+export async function claimTransfer(
+  orderId: string,
+  buyerPublicKeyJwk: JsonWebKey,
+): Promise<TransferClaim> {
+  validateBuyerPublicKeyJwk(buyerPublicKeyJwk);
+  const buyerPublicKeyHash = hashBuyerPublicKey(buyerPublicKeyJwk);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + DOWNLOAD_TOKEN_TTL_MS);
+
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    if (order.status !== "paid" && order.status !== "claimed") {
+      throw new ServerError(
+        "payment_required",
+        "Payment must be confirmed before the file key is released",
+      );
+    }
+    if (!order.payment || order.payment.buyerPublicKeyHash !== buyerPublicKeyHash) {
+      throw new ServerError(
+        "payment_required",
+        "This buyer key is not bound to the confirmed payment",
+      );
+    }
+
+    const token = signDownloadToken({
+      orderId,
+      expiresAtMs: expiresAt.getTime(),
+    });
+    const keyEnvelope = await wrapFileKey(order, buyerPublicKeyJwk);
+    order.status = "claimed";
+    order.updatedAt = now.toISOString();
+    order.claims.push({
+      claimedAt: now.toISOString(),
+      buyerPublicKeyHash,
+      tokenExpiresAt: expiresAt.toISOString(),
+    });
+    await writeOrder(order);
+
+    return {
+      order: publicOrder(order),
+      manifest: manifestForOrder(order),
+      keyEnvelope,
+      download: {
+        token,
+        url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
+        expiresAt: expiresAt.toISOString(),
+      },
+    };
+  });
+}
+
+export async function readEncryptedTransferFile(
+  orderId: string,
+  token: string,
+): Promise<{ order: TransferPublicOrder; bytes: Uint8Array }> {
+  const payload = verifyDownloadToken(token);
+  if (payload.orderId !== orderId) {
+    throw new ServerError("validation", "Download token does not match order");
+  }
+
+  const order = await readOrder(orderId);
+  const bytes = new Uint8Array(await readFile(encryptedFilePath(orderId)));
+  return { order: publicOrder(order), bytes };
+}
+
+function markOrderPaid(order: TransferOrder, raw?: unknown): void {
+  const now = new Date().toISOString();
+  if (!order.payment) {
+    throw new ServerError(
+      "validation",
+      "Order does not have a payment session yet",
+    );
+  }
+  order.status = order.status === "claimed" ? "claimed" : "paid";
+  order.updatedAt = now;
+  order.payment.status = "paid";
+  order.payment.confirmedAt = order.payment.confirmedAt ?? now;
+  if (raw !== undefined) {
+    order.payment.raw = raw;
+  }
+}
+
+function publicOrder(order: TransferOrder): TransferPublicOrder {
+  return {
+    orderId: order.orderId,
+    status: order.status,
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+    file: {
+      fileName: order.fileName,
+      mimeType: order.mimeType,
+      originalSizeBytes: order.originalSizeBytes,
+      encryptedSizeBytes: order.encryptedSizeBytes,
+      encryptedFileSha256: order.encryptedFileSha256,
+      encryptionScheme: order.encryption.scheme,
+      encryptionIv: order.encryption.iv,
+    },
+    price: order.price,
+    sellerPayoutAddress: order.sellerPayoutAddress,
+    sellerNote: order.sellerNote,
+    timestamp: order.timestampReceipt
+      ? {
+          commitmentScheme: order.timestampReceipt.commitment_scheme ?? null,
+          commitment: order.timestampReceipt.commitment,
+          blockHeight: order.timestampReceipt.block_height,
+        }
+      : null,
+    manifestRoot: order.manifestRoot,
+    payment: order.payment
+      ? {
+          provider: order.payment.provider,
+          invoiceId: order.payment.invoiceId,
+          checkoutUrl: order.payment.checkoutUrl,
+          paymentAddress: order.payment.paymentAddress,
+          memo: order.payment.memo,
+          status: order.payment.status,
+          createdAt: order.payment.createdAt,
+          confirmedAt: order.payment.confirmedAt,
+        }
+      : null,
+  };
+}
+
+function manifestForOrder(order: TransferOrder): TransferManifest {
+  return {
+    schema: "zectime.paid-link.manifest.v1",
+    orderId: order.orderId,
+    fileName: order.fileName,
+    mimeType: order.mimeType,
+    originalSizeBytes: order.originalSizeBytes,
+    encryptedSizeBytes: order.encryptedSizeBytes,
+    encryptedFileSha256: order.encryptedFileSha256,
+    encryptionScheme: order.encryption.scheme,
+    encryptionIv: order.encryption.iv,
+    price: order.price,
+    sellerPayoutAddress: order.sellerPayoutAddress,
+    sellerNote: order.sellerNote,
+    timestampReceipt: order.timestampReceipt,
+    manifestRoot: order.manifestRoot,
+  };
+}
+
+async function wrapFileKey(
+  order: TransferOrder,
+  buyerPublicKeyJwk: JsonWebKey,
+): Promise<TransferKeyEnvelope> {
+  const buyerPublicKey = await webcrypto.subtle.importKey(
+    "jwk",
+    buyerPublicKeyJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    [],
+  );
+  const ephemeral = await webcrypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveKey"],
+  );
+  const wrappingKey = await webcrypto.subtle.deriveKey(
+    { name: "ECDH", public: buyerPublicKey },
+    ephemeral.privateKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt"],
+  );
+  const iv = randomBytes(12);
+  const fileKeyBytes = decodeBase64(order.encryption.fileKey, 32);
+  const ciphertext = await webcrypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    wrappingKey,
+    fileKeyBytes,
+  );
+
+  return {
+    scheme: "p256-ecdh-aes-gcm-v1",
+    ephemeralPublicKeyJwk: await webcrypto.subtle.exportKey(
+      "jwk",
+      ephemeral.publicKey,
+    ),
+    iv: Buffer.from(iv).toString("base64"),
+    ciphertext: Buffer.from(ciphertext).toString("base64"),
+  };
+}
+
+function signDownloadToken(input: {
+  orderId: string;
+  expiresAtMs: number;
+}): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      orderId: input.orderId,
+      exp: input.expiresAtMs,
+      nonce: randomBytes(12).toString("base64url"),
+    }),
+  ).toString("base64url");
+  const signature = createHmac("sha256", downloadTokenSecret())
+    .update(payload)
+    .digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function verifyDownloadToken(token: string): { orderId: string; exp: number } {
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) {
+    throw new ServerError("validation", "Invalid download token");
+  }
+  const expected = createHmac("sha256", downloadTokenSecret())
+    .update(payload)
+    .digest("base64url");
+  if (!safeEqual(signature, expected)) {
+    throw new ServerError("validation", "Invalid download token");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    throw new ServerError("validation", "Invalid download token");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("orderId" in parsed) ||
+    !("exp" in parsed) ||
+    typeof parsed.orderId !== "string" ||
+    typeof parsed.exp !== "number"
+  ) {
+    throw new ServerError("validation", "Invalid download token");
+  }
+  if (parsed.exp < Date.now()) {
+    throw new ServerError("validation", "Download token expired");
+  }
+  validateOrderId(parsed.orderId);
+  return { orderId: parsed.orderId, exp: parsed.exp };
+}
+
+async function readOrder(orderId: string): Promise<TransferOrder> {
+  validateOrderId(orderId);
+  try {
+    const raw = await readFile(orderPath(orderId), "utf8");
+    return JSON.parse(raw) as TransferOrder;
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      throw new ServerError("validation", "Paid link not found");
+    }
+    throw error;
+  }
+}
+
+async function writeOrder(order: TransferOrder): Promise<void> {
+  await mkdir(orderDir(order.orderId), { recursive: true, mode: 0o700 });
+  await atomicWriteJson(orderPath(order.orderId), order);
+}
+
+async function writeInvoiceIndex(
+  invoiceId: string,
+  orderId: string,
+): Promise<void> {
+  await mkdir(invoiceIndexDir(), { recursive: true, mode: 0o700 });
+  await atomicWriteJson(invoiceIndexPath(invoiceId), { orderId });
+}
+
+async function findOrderIdByInvoice(
+  invoiceId: string | null | undefined,
+): Promise<string | null> {
+  if (!invoiceId) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(
+      await readFile(invoiceIndexPath(invoiceId), "utf8"),
+    ) as { orderId?: unknown };
+    return typeof parsed.orderId === "string" ? parsed.orderId : null;
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function atomicWriteJson(path: string, value: unknown): Promise<void> {
+  const tempPath = `${path}.${randomUUID()}.tmp`;
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  await rename(tempPath, path);
+}
+
+async function withOrderLock<T>(
+  orderId: string,
+  callback: () => Promise<T>,
+): Promise<T> {
+  validateOrderId(orderId);
+  const previous = locks.get(orderId) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const queue = previous.then(() => current);
+  locks.set(orderId, queue);
+  await previous;
+
+  try {
+    return await callback();
+  } finally {
+    releaseCurrent();
+    if (locks.get(orderId) === queue) {
+      locks.delete(orderId);
+    }
+  }
+}
+
+function validateCreateTransferInput(input: CreateTransferOrderInput): void {
+  if (input.encryptedFile.byteLength < 1) {
+    throw new ServerError("validation", "Encrypted file is required");
+  }
+  if (input.encryptedFile.byteLength > MAX_TRANSFER_BYTES) {
+    throw new ServerError(
+      "validation",
+      `Encrypted file cannot exceed ${MAX_TRANSFER_BYTES} bytes`,
+    );
+  }
+  if (
+    !Number.isSafeInteger(input.originalSizeBytes) ||
+    input.originalSizeBytes < 1
+  ) {
+    throw new ServerError("validation", "Original file size is invalid");
+  }
+  if (!Number.isSafeInteger(input.amountZats) || input.amountZats < 1) {
+    throw new ServerError("validation", "Amount must be at least 1 zatoshi");
+  }
+  normalizeZcashUnifiedAddress(input.sellerPayoutAddress);
+  if (!HEX_SHA256_PATTERN.test(input.encryptedFileSha256.toLowerCase())) {
+    throw new ServerError(
+      "validation",
+      "Encrypted file digest must be a SHA-256 hex string",
+    );
+  }
+  decodeBase64(input.encryptionIv, 12);
+  decodeBase64(input.fileKey, 32);
+}
+
+function validateOrderId(orderId: string): void {
+  if (!ORDER_ID_PATTERN.test(orderId)) {
+    throw new ServerError("validation", "Invalid paid link id");
+  }
+}
+
+function validateBuyerPublicKeyJwk(value: JsonWebKey): void {
+  if (
+    value.kty !== "EC" ||
+    value.crv !== "P-256" ||
+    typeof value.x !== "string" ||
+    typeof value.y !== "string"
+  ) {
+    throw new ServerError("validation", "Buyer public key must be P-256 JWK");
+  }
+}
+
+function createOrderId(): string {
+  return `pl_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+}
+
+function normalizeFileName(value: string): string {
+  const cleaned = basename(value || "private-file")
+    .replace(/[\u0000-\u001f\u007f]/gu, "")
+    .trim()
+    .slice(0, 160);
+  return cleaned || "private-file";
+}
+
+function normalizeMimeType(value: string): string {
+  const cleaned = value.trim().slice(0, 120);
+  return cleaned || "application/octet-stream";
+}
+
+function normalizeZcashUnifiedAddress(value: string): string {
+  const cleaned = value.trim();
+  if (
+    cleaned.length > 512 ||
+    !/^(u1|utest|uregtest)[a-z0-9]{16,}$/iu.test(cleaned)
+  ) {
+    throw new ServerError(
+      "validation",
+      "Seller payout address must be a Zcash unified address",
+    );
+  }
+  return cleaned;
+}
+
+function normalizeSellerNote(value: string | null | undefined): string | null {
+  const cleaned = value?.trim().slice(0, 500);
+  return cleaned ? cleaned : null;
+}
+
+function normalizeTimestampReceipt(
+  value: TransferTimestampReceipt | null | undefined,
+): TransferTimestampReceipt | null {
+  if (!value) {
+    return null;
+  }
+  const commitment = normalizeHex(value.commitment, 64, "timestamp commitment");
+  return {
+    commitment_scheme:
+      typeof value.commitment_scheme === "string"
+        ? value.commitment_scheme.slice(0, 80)
+        : undefined,
+    commitment,
+    block_height: Number.isSafeInteger(value.block_height)
+      ? value.block_height
+      : 0,
+    nonce: normalizeHex(value.nonce, 32, "timestamp nonce"),
+    doc_hash_lo: normalizeHex(value.doc_hash_lo, 32, "timestamp doc_hash_lo"),
+    doc_hash_hi: normalizeHex(value.doc_hash_hi, 32, "timestamp doc_hash_hi"),
+    ...(typeof value.doc_hash_sha256 === "string"
+      ? {
+          doc_hash_sha256: normalizeHex(
+            value.doc_hash_sha256,
+            64,
+            "timestamp SHA-256",
+          ),
+        }
+      : {}),
+  };
+}
+
+function normalizeHex(value: string, length: number, label: string): string {
+  const normalized = value.trim().replace(/^0x/iu, "").toLowerCase();
+  const pattern = new RegExp(`^[0-9a-f]{${length}}$`, "u");
+  if (!pattern.test(normalized)) {
+    throw new ServerError("validation", `Invalid ${label}`);
+  }
+  return normalized;
+}
+
+function hashBuyerPublicKey(value: JsonWebKey): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function sha256Json(value: unknown): string {
+  return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function decodeBase64(value: string, expectedLength: number): Uint8Array {
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.byteLength !== expectedLength) {
+    throw new ServerError(
+      "validation",
+      `Expected base64 value with ${expectedLength} bytes`,
+    );
+  }
+  return new Uint8Array(bytes);
+}
+
+function formatZec(amountZats: number): string {
+  const whole = Math.floor(amountZats / 100_000_000);
+  const fractional = String(amountZats % 100_000_000).padStart(8, "0");
+  return `${whole}.${fractional}`.replace(/\.?0+$/u, "");
+}
+
+function safeEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.byteLength === rightBytes.byteLength &&
+    timingSafeEqual(leftBytes, rightBytes)
+  );
+}
+
+function downloadTokenSecret(): string {
+  return (
+    process.env.PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET ??
+    process.env.ZECTIME_TRANSFER_TOKEN_SECRET ??
+    process.env.ZKCGZ_TRANSFER_TOKEN_SECRET ??
+    "paidprivatefile-dev-secret"
+  );
+}
+
+function transferRoot(): string {
+  return join(resolveWebRuntimeRoot(), "paid-transfers");
+}
+
+function orderDir(orderId: string): string {
+  return join(transferRoot(), "orders", orderId);
+}
+
+function orderPath(orderId: string): string {
+  return join(orderDir(orderId), "order.json");
+}
+
+function encryptedFilePath(orderId: string): string {
+  return join(orderDir(orderId), "encrypted.bin");
+}
+
+function invoiceIndexDir(): string {
+  return join(transferRoot(), "invoice-index");
+}
+
+function invoiceIndexPath(invoiceId: string): string {
+  return join(invoiceIndexDir(), `${sha256Hex(Buffer.from(invoiceId))}.json`);
+}
+
+function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
