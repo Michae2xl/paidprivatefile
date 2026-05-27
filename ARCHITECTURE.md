@@ -34,11 +34,76 @@ Payment adapter
   - falls back to local dev invoices otherwise
   - parses payment webhook payloads
 
+Nym transport adapter
+  - phase B component
+  - receives buyer Nym address/session
+  - sends wrapped key over Nym after payment
+  - optionally transfers encrypted file chunks over Nym
+
 CipherPay webhook
   - verifies optional webhook signature
   - maps invoice id to order id
   - marks order paid
 ```
+
+## Where Nym Enters
+
+Nym is not a payment rail and not a storage layer. It enters as the private delivery transport after the ZEC payment is confirmed.
+
+The architecture has three layers:
+
+```txt
+Zcash / CipherPay
+  payment confirmation
+
+Paid Private File API
+  order state, ciphertext metadata, key-release policy
+
+Nym
+  private delivery of the wrapped key or encrypted file chunks
+```
+
+### MVP: Nym Claim Mode
+
+In the first Nym integration, the encrypted file can still be stored and downloaded through normal object storage or the existing signed file URL. Nym carries the sensitive claim payload:
+
+```txt
+buyer Nym address
+  -> API stores claim session
+  -> payment confirmed
+  -> API wraps file key to buyer public key
+  -> API sends wrapped key envelope over Nym
+  -> buyer decrypts file locally
+```
+
+This mode hides the key-release delivery metadata while keeping the MVP practical.
+
+Transport label:
+
+```txt
+nym-claim-v1
+```
+
+### Stronger Mode: Nym Transfer Mode
+
+In a later phase, Nym can carry the encrypted file itself:
+
+```txt
+payment confirmed
+  -> encrypted file split into chunks
+  -> chunks sent over Nym service-provider session
+  -> buyer reassembles ciphertext
+  -> buyer unwraps key
+  -> local decrypt
+```
+
+Transport label:
+
+```txt
+nym-transfer-v1
+```
+
+This gives stronger network metadata privacy but needs file-size limits, retries, chunk integrity checks, and reliability testing.
 
 ## Order State Machine
 
@@ -153,6 +218,32 @@ POST /api/transfers/:orderId/dev-pay
 POST /api/webhooks/cipherpay
 ```
 
+Planned Nym API:
+
+```txt
+POST /api/transfers/:orderId/nym-session
+```
+
+Request:
+
+```json
+{
+  "buyerNymAddress": "nym...",
+  "transport": "nym-claim-v1",
+  "buyerPublicKeyJwk": {}
+}
+```
+
+Response:
+
+```json
+{
+  "orderId": "pl_...",
+  "transport": "nym-claim-v1",
+  "status": "waiting_for_payment"
+}
+```
+
 ## Storage Layout
 
 Default local runtime root:
@@ -196,6 +287,8 @@ Server should not see:
 
 Important caveat: the prototype stores the raw file key server-side until claim so it can wrap the key after payment. A hardened design should move toward seller-side key escrow, threshold encryption, or buyer pre-key negotiation that avoids long-lived server access to unwrapped file keys.
 
+Nym improves transport privacy, but it does not remove the need to harden key custody. The clean long-term design is buyer pre-key negotiation plus seller-side wrapping before upload, with Nym used to deliver the encrypted key material privately.
+
 ## Production Hardening
 
 Required before real production:
@@ -211,6 +304,9 @@ Required before real production:
 - audit logs without leaking file metadata
 - key escrow redesign or short-lived key handling
 - buyer recovery UX for lost local browser key
+- Nym client/service-provider deployment
+- Nym message retry and delivery receipts
+- Nym transfer size limits and chunk integrity
 
 ## Extraction Boundary
 
