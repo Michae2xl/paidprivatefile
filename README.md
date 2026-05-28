@@ -1,10 +1,10 @@
 # Paid Private File
 
-ZEC payment unlocks private Nym delivery. The file opens only locally.
+Send a private file. The buyer pays in ZEC. Then the file opens locally.
 
-Paid Private File is a private commerce protocol for files: local encryption, ZEC payment, and Nym delivery. A seller encrypts a file locally, sets a ZEC price and payout address, and shares a private access link. A buyer pays in ZEC, opens a Nym delivery session, receives a wrapped file key, and decrypts locally.
+Paid Private File is a private commerce protocol for files: local encryption, ZEC payment, private key delivery, and local decryption. A seller encrypts a file locally, sets a ZEC price and payout address, and shares a private access link. A buyer opens the link, pays in ZEC, receives a wrapped file key through Nym, and decrypts on their own machine.
 
-Nym is core, not an add-on. Zcash handles payment, the app handles encryption and key-release policy, and Nym is the required private delivery layer for the key and, in the stronger mode, the encrypted file chunks.
+Zcash is the payment rail. Nym is the private delivery rail. The server can store ciphertext and order state, but the product direction is seller-held keys and buyer-local opening.
 
 ## Why It Exists
 
@@ -12,7 +12,8 @@ Most file-transfer tools separate payment, access control, and privacy. Paid Pri
 
 - private file upload
 - direct ZEC payment gating
-- Nym-based key release after payment
+- automatic private receiver setup in the buyer flow
+- Nym-based wrapped-key release after payment
 - local decryption by the buyer
 - no plaintext file storage on the server
 
@@ -30,12 +31,12 @@ Most file-transfer tools separate payment, access control, and privacy. Paid Pri
 ### Buyer
 
 1. Opens the private file link.
-2. Creates a payment intent.
-3. Pays in ZEC.
-4. Waits for confirmation.
-5. Downloads the encrypted file.
-6. Receives the wrapped file key through a Nym delivery session.
-7. Decrypts and opens the file locally.
+2. The order loads automatically.
+3. The app detects the local private receiver automatically.
+4. Pays in ZEC.
+5. Downloads and opens locally after payment confirmation.
+
+The buyer should not need to understand or paste a Nym address in the normal path. Manual receiver entry is only a fallback when the local receiver helper is not running.
 
 ## Architecture
 
@@ -44,18 +45,32 @@ See [ARCHITECTURE.md](ARCHITECTURE.md).
 High-level flow:
 
 ```txt
-Seller browser    -> encrypted file + order -> API/storage
-Buyer local client -> Nym session + payment intent -> CipherPay/Zcash
-CipherPay         -> webhook -> API marks paid
-Nym               -> wrapped key delivery -> local decrypt
+Seller browser
+  -> encrypt file locally
+  -> create paid order
+  -> share private link
+
+Buyer browser
+  -> auto-detect local private receiver
+  -> pay ZEC invoice
+  -> download ciphertext
+  -> open locally
+
+CipherPay/Zcash
+  -> confirm payment
+  -> seller receives ZEC
+
+Nym
+  -> deliver wrapped key privately
 ```
 
 Nym transport flow:
 
 ```txt
-Buyer local client -> Nym address/session -> API
-API after payment  -> wrapped key over Nym
-Buyer local client -> ciphertext retrieval -> local decrypt
+buyer local receiver -> /address -> buyer page
+buyer page           -> payment intent -> CipherPay/Zcash
+payment confirmed   -> wrapped key envelope -> Nym
+buyer local app      -> unwrap key -> decrypt local file
 ```
 
 The core transport is `nym-claim-v1`: payment unlocks private Nym delivery of the wrapped file key. `nym-transfer-v1` extends this to encrypted file chunks after size limits and reliability are tested.
@@ -88,8 +103,16 @@ PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET
 PAID_PRIVATE_FILE_ENABLE_DEV_PAY
 PAID_PRIVATE_FILE_TRUST_PROXY_HEADERS
 NYM_CLIENT_ENDPOINT
-NYM_SERVICE_PROVIDER_ADDRESS
+NYM_CLIENT_SEND_PATH
+NYM_CLIENT_API_KEY
+NYM_DELIVERY_REQUIRED
 NYM_TRANSPORT_MODE
+NEXT_PUBLIC_NYM_LOCAL_BRIDGE_URL
+NYM_BRIDGE_HOST
+NYM_BRIDGE_PORT
+NYM_BRIDGE_WS_URL
+NYM_BRIDGE_ADDRESS_AUTH
+NYM_BRIDGE_ALLOWED_ORIGINS
 ```
 
 If CipherPay credentials are not configured, the app uses the local development payment provider. Use the dev payment endpoint only in local development or explicitly enabled production test environments.
@@ -104,19 +127,19 @@ npm run build
 
 ## Current Status
 
-Prototype. The system supports local encrypted-file order creation, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, Nym delivery outbox creation, signed development download URLs, and browser-side decryption.
+Prototype. The integrated `zkglobalcredit.tech` implementation now uses a lower-friction buyer flow: open link, auto-detect private receiver, pay in ZEC, then open locally. This standalone repo tracks the same product direction and should stay aligned with the integrated site implementation.
 
 Before production, harden:
 
-- storage backend
-- webhook signature policy
+- real CipherPay account configuration and webhook signatures
+- native Nym client / local receiver packaging
+- seller-held key release in every deployment path
 - payment confirmation depth / finality semantics
 - file retention and deletion
 - abuse prevention
 - seller payout address validation
 - buyer key recovery UX
 - operational monitoring
-- Nym client/service-provider deployment
 - Nym message retry and delivery receipts
 - encrypted chunk delivery for `nym-transfer-v1`
 

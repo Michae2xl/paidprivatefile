@@ -10,7 +10,8 @@ The first required transport mode is `nym-claim-v1`.
 
 ```txt
 Buyer
-  creates or provides Nym address
+  runs local receiver helper
+  page detects Nym address automatically
   creates buyer public key
   sends both to /api/transfers/:orderId/nym-session
 
@@ -27,6 +28,21 @@ Buyer
 ```
 
 This keeps bandwidth low and makes the product usable before full file transport over Nym is mature. HTTP delivery is only a development fallback; the product privacy model is Nym delivery.
+
+## Buyer UX
+
+The buyer should not need to understand Nym during the normal path:
+
+```txt
+Open private link
+  -> local receiver detected
+  -> Pay in ZEC
+  -> Download and open locally
+```
+
+Manual Nym address entry is a fallback only. In the integrated site
+implementation, the page calls the local bridge `/address` endpoint to fill the
+receiver before creating the ZEC payment.
 
 ## Maximum-Privacy Target
 

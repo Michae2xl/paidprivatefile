@@ -14,7 +14,7 @@ The core invariant is simple: payment unlocks a private Nym delivery session. Th
 Browser client
   - encrypts seller file before upload
   - generates buyer key pair
-  - registers buyer Nym delivery address
+  - auto-detects buyer Nym/local receiver when available
   - decrypts file locally after Nym delivery
 
 Transfer API
@@ -38,7 +38,7 @@ Payment adapter
 
 Nym transport adapter
   - core component
-  - receives buyer Nym address/session
+  - receives or detects buyer Nym address/session
   - sends wrapped key over Nym after payment
   - optionally transfers encrypted file chunks over Nym
 
@@ -70,7 +70,8 @@ Nym
 In the core MVP, the encrypted file can still be stored in object storage, but the sensitive claim payload is delivered through Nym:
 
 ```txt
-buyer Nym address
+buyer local receiver
+  -> browser reads receiver address automatically when helper is available
   -> API stores claim session
   -> payment confirmed
   -> API wraps file key to buyer public key
@@ -144,7 +145,8 @@ The seller submits:
 - original size
 - ciphertext hash
 - encryption IV
-- file key for server-side wrapping after payment
+- file key for server-side wrapping in older prototype deployments
+- release_secret_hash in seller-held deployments
 - ZEC amount in zatoshis
 - seller payout Unified Address
 - optional seller note
@@ -156,7 +158,7 @@ The seller submits:
 Private link
   -> GET /api/transfers/:orderId
   -> generate buyer P-256 key pair
-  -> register buyer Nym address/session
+  -> auto-detect or register buyer Nym address/session
   -> POST /api/transfers/:orderId/payment-intent
   -> pay invoice
   -> POST /api/transfers/:orderId/claim
@@ -179,8 +181,8 @@ Key release:
 
 ```txt
 buyer public key
-  -> server derives wrapping key through ECDH
-  -> server wraps file key
+  -> seller or server derives wrapping key through ECDH
+  -> seller or server wraps file key
   -> buyer unwraps locally
 ```
 
@@ -283,9 +285,9 @@ Server should not see:
 - buyer decrypted output
 - buyer private key
 
-Important caveat: the prototype stores the raw file key server-side until claim so it can wrap the key after payment. A hardened design should move toward seller-side key escrow, threshold encryption, or buyer pre-key negotiation that avoids long-lived server access to unwrapped file keys.
+Important caveat: older prototype deployments store the raw file key server-side until claim so they can wrap the key after payment. The preferred current design is seller-held key release: the API stores `release_secret_hash`, the seller client keeps `file_key` and `release_secret`, and after payment the seller releases only a buyer-wrapped key envelope.
 
-Nym improves transport privacy, but it does not remove the need to harden key custody. The clean long-term design is buyer pre-key negotiation plus seller-side wrapping before upload, with Nym used to deliver the encrypted key material privately.
+Nym improves transport privacy, but it does not remove the need to harden key custody. The clean long-term design is buyer pre-key negotiation plus seller-side wrapping, with Nym used to deliver the encrypted key material privately.
 
 ## Production Hardening
 
