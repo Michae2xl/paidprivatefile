@@ -17,9 +17,12 @@ import { basename, join } from "node:path";
 
 import {
   createCipherPayInvoice,
-  type CipherPayInvoice,
   type CipherPayProvider,
 } from "./cipherpay-client";
+import {
+  assignDepositAddress,
+  findOrderIdByDepositAddress,
+} from "./deposit-pool";
 import { ServerError } from "./error-kinds";
 import {
   queueNymDelivery,
@@ -30,8 +33,17 @@ import { resolveWebRuntimeRoot } from "./web-session";
 
 export type TransferStatus = "created" | "payment_pending" | "paid" | "claimed";
 
+export type TransferPaymentProvider = CipherPayProvider | "zcash-onchain";
+
+export interface TransferOnchainPayment {
+  txid: string;
+  amountZats: number;
+  confirmations: number;
+  paidAt: string;
+}
+
 export interface TransferPaymentState {
-  provider: CipherPayProvider;
+  provider: TransferPaymentProvider;
   invoiceId: string;
   checkoutUrl: string | null;
   paymentAddress: string | null;
@@ -41,6 +53,8 @@ export interface TransferPaymentState {
   buyerPublicKeyJwk: JsonWebKey;
   createdAt: string;
   confirmedAt: string | null;
+  receivingAddress: string | null;
+  onchain: TransferOnchainPayment | null;
   raw?: unknown;
 }
 
@@ -366,7 +380,7 @@ export async function createPaymentIntentForOrder(
   orderId: string,
   buyerPublicKeyJwk: JsonWebKey,
   successUrl?: string,
-): Promise<{ order: TransferPublicOrder; payment: CipherPayInvoice }> {
+): Promise<{ order: TransferPublicOrder; payment: TransferPaymentIntent }> {
   validateBuyerPublicKeyJwk(buyerPublicKeyJwk);
   const buyerPublicKeyHash = hashBuyerPublicKey(buyerPublicKeyJwk);
 
@@ -389,16 +403,14 @@ export async function createPaymentIntentForOrder(
           paymentAddress: order.payment.paymentAddress,
           memo: order.payment.memo,
           status: order.payment.status,
+          receivingAddress: order.payment.receivingAddress,
         },
       };
     }
 
-    const invoice = await createCipherPayInvoice({
-      orderId,
-      amountZats: order.price.amountZats,
-      sellerPayoutAddress: order.sellerPayoutAddress,
+    const invoice = await createOrderInvoice({
+      order,
       buyerPublicKeyHash,
-      manifestRoot: order.manifestRoot,
       successUrl,
     });
     const now = new Date().toISOString();
@@ -416,6 +428,8 @@ export async function createPaymentIntentForOrder(
       buyerPublicKeyJwk,
       createdAt: now,
       confirmedAt: null,
+      receivingAddress: invoice.receivingAddress ?? null,
+      onchain: null,
       raw: invoice.raw,
     };
 
@@ -424,6 +438,64 @@ export async function createPaymentIntentForOrder(
 
     return { order: publicOrder(order), payment: invoice };
   });
+}
+
+interface TransferPaymentIntent {
+  provider: TransferPaymentProvider;
+  invoiceId: string;
+  checkoutUrl: string | null;
+  paymentAddress: string | null;
+  memo: string | null;
+  status: "pending" | "paid";
+  receivingAddress?: string | null;
+  raw?: unknown;
+}
+
+function zcashOnchainEnabled(): boolean {
+  return process.env.PAID_PRIVATE_FILE_ZCASH_ONCHAIN === "1";
+}
+
+async function createOrderInvoice(input: {
+  order: TransferOrder;
+  buyerPublicKeyHash: string;
+  successUrl?: string;
+}): Promise<TransferPaymentIntent> {
+  const { order, buyerPublicKeyHash, successUrl } = input;
+
+  if (zcashOnchainEnabled()) {
+    const receivingAddress = await assignDepositAddress(order.orderId);
+    if (!receivingAddress) {
+      throw new ServerError(
+        "cli_unavailable",
+        "No deposit address available; try again shortly",
+      );
+    }
+    return {
+      provider: "zcash-onchain",
+      invoiceId: `zec_${order.orderId}_${randomUUID().replaceAll("-", "")}`,
+      checkoutUrl: null,
+      paymentAddress: receivingAddress,
+      receivingAddress,
+      memo: null,
+      status: "pending",
+      raw: {
+        mode: "zcash-onchain",
+        amount_zats: order.price.amountZats,
+        reference: order.orderId,
+        receiving_address: receivingAddress,
+      },
+    };
+  }
+
+  const invoice = await createCipherPayInvoice({
+    orderId: order.orderId,
+    amountZats: order.price.amountZats,
+    sellerPayoutAddress: order.sellerPayoutAddress,
+    buyerPublicKeyHash,
+    manifestRoot: order.manifestRoot,
+    successUrl,
+  });
+  return { ...invoice, receivingAddress: null };
 }
 
 export async function registerNymSessionForOrder(
@@ -526,6 +598,62 @@ export async function markTransferPaidFromInvoice(input: {
     await writeOrder(order);
     return publicOrder(order);
   });
+}
+
+export async function markTransferPaidOnchain(input: {
+  orderId: string;
+  txid: string;
+  amountZats: number;
+  confirmations: number;
+}): Promise<TransferPublicOrder> {
+  return withOrderLock(input.orderId, async () => {
+    const order = await readOrder(input.orderId);
+    if (!order.payment) {
+      throw new ServerError(
+        "validation",
+        "Order does not have a payment session yet",
+      );
+    }
+    if (order.payment.provider !== "zcash-onchain") {
+      throw new ServerError(
+        "validation",
+        "On-chain payment confirmation is only available for zcash-onchain orders",
+      );
+    }
+
+    const existing = order.payment.onchain;
+    if (
+      order.payment.status === "paid" &&
+      existing &&
+      existing.txid === input.txid
+    ) {
+      // Replay of the already-recorded deposit: no double processing.
+      return publicOrder(order);
+    }
+    if (existing && existing.txid !== input.txid) {
+      throw new ServerError(
+        "flow_conflict",
+        "This order was already settled by a different deposit transaction",
+      );
+    }
+
+    const now = new Date().toISOString();
+    order.payment.onchain = {
+      txid: input.txid,
+      amountZats: input.amountZats,
+      confirmations: input.confirmations,
+      paidAt: now,
+    };
+    markOrderPaid(order, order.payment.raw);
+    await writeOrder(order);
+    return publicOrder(order);
+  });
+}
+
+export async function findOrderIdForDeposit(
+  receivingAddress: string,
+): Promise<string | null> {
+  return findOrderIdByDepositAddress(receivingAddress);
 }
 
 export async function getTransferReleaseChallenge(
@@ -738,6 +866,8 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
           status: order.payment.status,
           createdAt: order.payment.createdAt,
           confirmedAt: order.payment.confirmedAt,
+          receivingAddress: order.payment.receivingAddress,
+          onchain: order.payment.onchain,
         }
       : null,
     delivery: {
@@ -941,7 +1071,24 @@ async function readOrder(orderId: string): Promise<TransferOrder> {
 function normalizeStoredOrder(order: TransferOrder): TransferOrder {
   order.delivery = normalizeDeliveryState(order.delivery);
   order.release = normalizeReleaseState(order.release);
+  order.payment = normalizePaymentState(order.payment);
   return order;
+}
+
+function normalizePaymentState(
+  value: TransferPaymentState | null,
+): TransferPaymentState | null {
+  if (!value) {
+    return null;
+  }
+  return {
+    ...value,
+    receivingAddress:
+      typeof value.receivingAddress === "string"
+        ? value.receivingAddress
+        : null,
+    onchain: value.onchain ?? null,
+  };
 }
 
 async function writeOrder(order: TransferOrder): Promise<void> {

@@ -209,6 +209,37 @@ The seller payout address is part of the transfer order. A payment intent uses t
 
 The app should present this as a ZEC payment flow. CipherPay is an internal payment rail for invoice creation and webhook confirmation, not user-facing product language.
 
+### Real on-chain ZEC mode (`zcash-onchain`)
+
+`PAID_PRIVATE_FILE_ZCASH_ONCHAIN=1` swaps the payment rail for real on-chain deposits. The flag-off path is byte-for-byte the existing dev/CipherPay behavior.
+
+Trust model and topology (same shape as the CipherPay webhook — an HMAC-authenticated local reporter):
+
+```txt
+local side (next to Zallet wallet, keys never leave)
+  - pool filler: generates unique Unified Addresses, registers them in prod
+  - payment watcher: detects an incoming deposit, signs a "paid" report
+
+prod (no wallet, no keys)
+  - holds an available pool of deposit addresses
+  - assigns one per order on payment-intent (payment.receivingAddress)
+  - on a signed, verified report -> marks the order paid
+```
+
+Two signed crossings, both HMAC-SHA256 over the raw request body in `x-zcash-signature` (optional `sha256=` prefix), timing-safe:
+
+- `POST /api/transfers/payments/zcash/addresses` — body `{ addresses: string[] }`, signed with `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`. Addresses are validated as Unified Addresses (`u1.../utest.../uregtest...`), deduped, and stored as available. Secret unset -> rejected.
+- `POST /api/webhooks/zcash` — body `{ receivingAddress, amountZats, txid, confirmations }`, signed with `PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET`. Secret unset -> rejected.
+
+Each payment intent pops one free address, binds it to the order as `payment.receivingAddress`, and returns it to the buyer with provider label `zcash-onchain`. Empty pool -> a clear error ("No deposit address available; try again shortly").
+
+Webhook settlement rules:
+
+- map `receivingAddress` -> order, confirm it matches `payment.receivingAddress` (else reject).
+- `amountZats >= order amountZats` AND `confirmations >= PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS` (default 10) -> mark paid, record `payment.onchain = { txid, amountZats, confirmations, paidAt }`, run the same nym-session readiness transition as the other paid paths.
+- under-payment or under-confirmation -> `200 { ok: true, ignored: true, reason }` without settling, so the watcher retries as confirmations grow (never an error).
+- replaying the same `txid` after paid is idempotent; a paid/claimed order never regresses.
+
 ## Seller Workspaces
 
 Seller accounts are intentionally no-email in the prototype:
@@ -251,7 +282,9 @@ POST /api/transfers/:orderId/key-release
 POST /api/transfers/:orderId/claim
 GET  /api/transfers/:orderId/file?token=...
 POST /api/transfers/:orderId/dev-pay
+POST /api/transfers/payments/zcash/addresses
 POST /api/webhooks/cipherpay
+POST /api/webhooks/zcash
 POST /api/sellers
 GET  /api/seller-session
 POST /api/seller-session
@@ -325,7 +358,11 @@ paid-transfers/
       encrypted-file.bin
   invoice-index/
     <invoiceId>.json
+  deposit-pool/
+    pool.json
 ```
+
+`deposit-pool/pool.json` (zcash-onchain mode only) holds the available/assigned Unified Address pool, written atomically under an in-process lock like the order store. It maps each deposit address to the order it was assigned to, which is how the webhook resolves an incoming deposit back to an order.
 
 This local file store is enough for prototype and testnet flows. Production should move this to durable object storage plus transactional metadata storage.
 

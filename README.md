@@ -100,6 +100,10 @@ CIPHERPAY_API_URL
 CIPHERPAY_API_KEY
 CIPHERPAY_CREATE_INVOICE_PATH
 CIPHERPAY_WEBHOOK_SECRET
+PAID_PRIVATE_FILE_ZCASH_ONCHAIN
+PAID_PRIVATE_FILE_ZCASH_POOL_SECRET
+PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET
+PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS
 PAID_PRIVATE_FILE_RUNTIME_DIR
 PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET
 PAID_PRIVATE_FILE_AUTH_SECRET
@@ -128,6 +132,19 @@ NEXT_PUBLIC_NYM_FORCE_TLS
 If CipherPay credentials are not configured, the app uses the local development payment provider. Use the dev payment endpoint only in local development or explicitly enabled production test environments.
 
 The user-facing payment flow is intentionally provider-neutral: sellers set a ZEC price and payout Unified Address, buyers see a ZEC checkout, and CipherPay remains a backend payment rail.
+
+### Real on-chain ZEC payment (`zcash-onchain` mode)
+
+Set `PAID_PRIVATE_FILE_ZCASH_ONCHAIN=1` to switch the payment rail from the dev/CipherPay provider to real on-chain Zcash deposits. With the flag off, the existing dev/CipherPay behavior is unchanged.
+
+The wallet and keys stay local. A local watcher runs next to the operator's Zallet wallet and never exposes its keys to production. Two signed reports cross to prod, both authenticated with HMAC-SHA256 over the raw request body, sent in the `x-zcash-signature` header (an optional `sha256=` prefix is accepted), and compared timing-safe:
+
+1. **Pool filler** — the local side generates a batch of unique Zcash Unified Addresses and registers them with `POST /api/transfers/payments/zcash/addresses` (body `{ "addresses": [...] }`, signed with `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`). Prod stores them as an available pool.
+2. **Payment watcher** — when a deposit lands, the local watcher reports it with `POST /api/webhooks/zcash` (body `{ "receivingAddress", "amountZats", "txid", "confirmations" }`, signed with `PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET`).
+
+Each payment intent in this mode pops one free address from the pool, binds it to the order as the per-order deposit Unified Address, and returns it to the buyer (provider label `zcash-onchain`). The webhook maps `receivingAddress` back to its order, then marks it paid only when `amountZats >= order price` and `confirmations >= PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS` (default 10). Under-paid or under-confirmed reports return `200 { ok: true, ignored: true, reason }` without settling, so the watcher can safely retry as confirmations grow. Replaying the same `txid` after settlement is idempotent.
+
+Both `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET` and `PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET` are required for their endpoints: if a secret is unset, the corresponding request is rejected (not silently accepted). This is the same trust model as the CipherPay webhook — an HMAC-authenticated local reporter — but it never sends the wallet, keys, or the file over the wire, only the signed "paid" report.
 
 ## Seller Workspaces
 
