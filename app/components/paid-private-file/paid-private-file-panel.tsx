@@ -3,6 +3,7 @@
 import Link from "next/link";
 import {
   useEffect,
+  useRef,
   useState,
   type ChangeEvent,
   type FormEvent,
@@ -54,6 +55,7 @@ interface TransferPublicOrder {
   };
   sellerPayoutAddress: string;
   sellerNote: string | null;
+  seller: SellerProfile | null;
   timestamp: {
     commitmentScheme: string | null;
     commitment: string;
@@ -85,6 +87,23 @@ interface TransferPayment {
   confirmedAt?: string | null;
 }
 
+interface SellerProfile {
+  sellerId: string;
+  handle: string;
+  displayName: string;
+  defaultPayoutAddress: string;
+  publicPath: string;
+}
+
+interface SellerCreateResponse {
+  seller: SellerProfile;
+  accessKey: string;
+}
+
+interface SellerSessionResponse {
+  seller: SellerProfile | null;
+}
+
 interface PaymentIntentResponse {
   order: TransferPublicOrder;
   payment: TransferPayment;
@@ -97,8 +116,9 @@ interface CreateTransferResponse {
 
 interface ClaimResponse {
   order: TransferPublicOrder;
-  keyEnvelope: PaidLinkKeyEnvelope;
-  download: {
+  deliveryMode: "http-dev-fallback" | "nym";
+  keyEnvelope?: PaidLinkKeyEnvelope;
+  download?: {
     url: string;
     expiresAt: string;
   };
@@ -110,13 +130,58 @@ interface ClaimResponse {
   };
 }
 
+interface TransferManifest {
+  orderId: string;
+  fileName: string;
+  mimeType: string;
+  encryptedFileSha256: string;
+  encryptionIv: string;
+}
+
+interface NymClaimPayload {
+  schema: "paidprivatefile.nym.claim.v1";
+  orderId: string;
+  manifest: TransferManifest;
+  keyEnvelope: PaidLinkKeyEnvelope;
+  encryptedFileDownload?: {
+    url: string;
+    expiresAt: string;
+  };
+  devHttpFallback?: {
+    url: string;
+    expiresAt: string;
+  };
+}
+
+interface BrowserNymClient {
+  client: {
+    start: (opts?: Record<string, unknown>) => Promise<void>;
+    stop: () => Promise<void>;
+    selfAddress: () => Promise<string | undefined>;
+  };
+  events: {
+    subscribeToTextMessageReceivedEvent: (
+      handler: (event: { args: { payload: string } }) => void | Promise<void>,
+    ) => () => void;
+  };
+}
+
 type Mode = "send" | "receive";
+type SellerAuthMode = "create" | "login";
+type FlowMotionStage = "transfer" | "payment" | "done";
 type BusyAction =
   | "idle"
   | "encrypting"
   | "loading"
   | "payment"
+  | "nym"
+  | "seller"
   | "unlocking";
+type BrowserNymStatus = "idle" | "starting" | "ready" | "waiting" | "error";
+
+const SELLER_PAYOUT_STORAGE_KEY = "paidprivatefile_seller_payout_address";
+const SELLER_PRICE_STORAGE_KEY = "paidprivatefile_seller_price_zec";
+const BUYER_NYM_CLIENT_ID_STORAGE_KEY = "paidprivatefile_buyer_nym_client_id";
 
 export function PaidPrivateFilePanel({
   locale,
@@ -131,6 +196,15 @@ export function PaidPrivateFilePanel({
   const [priceZec, setPriceZec] = useState("0.05");
   const [sellerPayoutAddress, setSellerPayoutAddress] = useState("");
   const [sellerNote, setSellerNote] = useState("");
+  const [seller, setSeller] = useState<SellerProfile | null>(null);
+  const [sellerAuthMode, setSellerAuthMode] =
+    useState<SellerAuthMode>("create");
+  const [sellerHandle, setSellerHandle] = useState("");
+  const [sellerDisplayName, setSellerDisplayName] = useState("");
+  const [sellerAccessKey, setSellerAccessKey] = useState("");
+  const [newSellerAccessKey, setNewSellerAccessKey] = useState("");
+  const [accessKeyCopied, setAccessKeyCopied] = useState(false);
+  const [accessKeyAcknowledged, setAccessKeyAcknowledged] = useState(false);
   const [createdOrder, setCreatedOrder] = useState<TransferPublicOrder | null>(
     null,
   );
@@ -141,9 +215,14 @@ export function PaidPrivateFilePanel({
   );
   const [payment, setPayment] = useState<TransferPayment | null>(null);
   const [buyerNymAddress, setBuyerNymAddress] = useState("");
+  const [showManualNymAddress, setShowManualNymAddress] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFileName, setDownloadFileName] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [nymStatus, setNymStatus] = useState<BrowserNymStatus>("idle");
+  const [nymMessage, setNymMessage] = useState("");
+  const browserNymClientRef = useRef<BrowserNymClient | null>(null);
+  const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (!initialOrderId) {
@@ -161,8 +240,132 @@ export function PaidPrivateFilePanel({
     };
   }, [downloadUrl]);
 
+  useEffect(() => {
+    const savedPayoutAddress = window.localStorage.getItem(
+      SELLER_PAYOUT_STORAGE_KEY,
+    );
+    const savedPrice = window.localStorage.getItem(SELLER_PRICE_STORAGE_KEY);
+    if (savedPayoutAddress) {
+      setSellerPayoutAddress(savedPayoutAddress);
+    }
+    if (savedPrice) {
+      setPriceZec(savedPrice);
+    }
+    void loadSellerSession();
+
+    return () => {
+      browserNymUnsubscribeRef.current?.();
+      browserNymUnsubscribeRef.current = null;
+      const client = browserNymClientRef.current;
+      browserNymClientRef.current = null;
+      void client?.client.stop();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isLikelyZcashUnifiedAddress(sellerPayoutAddress)) {
+      window.localStorage.setItem(
+        SELLER_PAYOUT_STORAGE_KEY,
+        sellerPayoutAddress.trim(),
+      );
+    }
+  }, [sellerPayoutAddress]);
+
+  useEffect(() => {
+    try {
+      parseZecToZats(priceZec);
+      window.localStorage.setItem(SELLER_PRICE_STORAGE_KEY, priceZec.trim());
+    } catch {
+      // Persist only valid prices.
+    }
+  }, [priceZec]);
+
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
     setFile(event.target.files?.[0] ?? null);
+  }
+
+  async function loadSellerSession() {
+    try {
+      const body = await postJson<SellerSessionResponse>("/api/seller-session", {
+        method: "GET",
+      });
+      if (body.seller) {
+        applySeller(body.seller);
+      }
+    } catch {
+      // Anonymous sellers can still create one-off local prototype links.
+    }
+  }
+
+  async function onCreateSeller() {
+    setErrorMessage("");
+    setNewSellerAccessKey("");
+    if (!isLikelyZcashUnifiedAddress(sellerPayoutAddress)) {
+      setErrorMessage(copy.errors.invalidPayoutAddress);
+      return;
+    }
+    setBusyAction("seller");
+    try {
+      const body = await postJson<SellerCreateResponse>("/api/sellers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          handle: sellerHandle,
+          displayName: sellerDisplayName,
+          defaultPayoutAddress: sellerPayoutAddress.trim(),
+        }),
+      });
+      applySeller(body.seller);
+      setNewSellerAccessKey(body.accessKey);
+      setAccessKeyCopied(false);
+      setAccessKeyAcknowledged(false);
+      setSellerAccessKey("");
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
+  async function onLoginSeller() {
+    setErrorMessage("");
+    setBusyAction("seller");
+    try {
+      const body = await postJson<{ seller: SellerProfile }>(
+        "/api/seller-session",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            handle: sellerHandle,
+            accessKey: sellerAccessKey,
+          }),
+        },
+      );
+      applySeller(body.seller);
+      setNewSellerAccessKey("");
+      setAccessKeyCopied(false);
+      setAccessKeyAcknowledged(false);
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
+  function applySeller(nextSeller: SellerProfile) {
+    setSeller(nextSeller);
+    setSellerHandle(nextSeller.handle);
+    setSellerDisplayName(nextSeller.displayName);
+    setSellerPayoutAddress(nextSeller.defaultPayoutAddress);
+  }
+
+  async function onCopyNewSellerAccessKey() {
+    if (!newSellerAccessKey) {
+      return;
+    }
+    await navigator.clipboard.writeText(newSellerAccessKey);
+    setAccessKeyCopied(true);
   }
 
   async function onCreateLink(event: FormEvent<HTMLFormElement>) {
@@ -173,6 +376,10 @@ export function PaidPrivateFilePanel({
 
     if (!file) {
       setErrorMessage(copy.errors.missingFile);
+      return;
+    }
+    if (newSellerAccessKey && !accessKeyAcknowledged) {
+      setErrorMessage(copy.seller.accessKeyBlocker);
       return;
     }
 
@@ -211,10 +418,7 @@ export function PaidPrivateFilePanel({
         body: form,
       });
       const href = new URL(
-        withProductLocale(
-          `/paid-private-file?order=${body.order.orderId}`,
-          locale,
-        ),
+        withProductLocale(body.sharePath, locale),
         window.location.origin,
       ).toString();
       setCreatedOrder(body.order);
@@ -269,16 +473,14 @@ export function PaidPrivateFilePanel({
     setBusyAction("payment");
     try {
       const keyPair = await getOrCreateBuyerKeyPair(loadedOrder.orderId);
-      if (!buyerNymAddress.trim()) {
-        throw new Error(copy.errors.missingNymAddress);
-      }
+      const nymAddress = buyerNymAddress.trim() || (await startBrowserNym());
       await postJson<{ order: TransferPublicOrder }>(
         `/api/transfers/${encodeURIComponent(loadedOrder.orderId)}/nym-session`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            buyerNymAddress: buyerNymAddress.trim(),
+            buyerNymAddress: nymAddress,
             buyerPublicKeyJwk: keyPair.publicJwk,
             transport: loadedOrder.delivery.requiredTransport,
           }),
@@ -342,6 +544,9 @@ export function PaidPrivateFilePanel({
       if (!keyPair) {
         throw new Error(copy.errors.paymentRequired);
       }
+      if (!browserNymClientRef.current && buyerNymAddress.trim().length === 0) {
+        await startBrowserNym();
+      }
 
       const claim = await postJson<ClaimResponse>(
         `/api/transfers/${encodeURIComponent(loadedOrder.orderId)}/claim`,
@@ -351,29 +556,30 @@ export function PaidPrivateFilePanel({
           body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
         },
       );
-      const encryptedResponse = await fetch(claim.download.url);
-      if (!encryptedResponse.ok) {
-        const body = await readResponseBody(encryptedResponse);
-        throw new Error(
-          extractServerErrorMessage(body, "Encrypted file download failed"),
-        );
-      }
-
-      const fileKey = await decryptPaidLinkFileKey(
-        claim.keyEnvelope,
-        keyPair.privateJwk,
-      );
-      const opened = await decryptPaidLinkFile(
-        await encryptedResponse.arrayBuffer(),
-        fileKey,
-        claim.order.file.encryptionIv,
-        claim.order.file.mimeType,
-      );
-      const objectUrl = window.URL.createObjectURL(opened);
       setLoadedOrder(claim.order);
       setPayment(claim.order.payment);
-      setDownloadUrl(objectUrl);
-      setDownloadFileName(claim.order.file.fileName);
+      if (claim.keyEnvelope && claim.download) {
+        await openClaimPayload(
+          {
+            schema: "paidprivatefile.nym.claim.v1",
+            orderId: claim.order.orderId,
+            manifest: {
+              orderId: claim.order.orderId,
+              fileName: claim.order.file.fileName,
+              mimeType: claim.order.file.mimeType,
+              encryptedFileSha256: claim.order.file.encryptedFileSha256,
+              encryptionIv: claim.order.file.encryptionIv,
+            },
+            keyEnvelope: claim.keyEnvelope,
+            encryptedFileDownload: claim.download,
+          },
+          keyPair,
+        );
+        return;
+      }
+
+      setNymStatus("waiting");
+      setNymMessage(copy.receive.nymWaitingLabel);
     } catch (error) {
       if (error instanceof ApiError && error.status === 402) {
         setErrorMessage(copy.errors.paymentRequired);
@@ -383,6 +589,108 @@ export function PaidPrivateFilePanel({
     } finally {
       setBusyAction("idle");
     }
+  }
+
+  async function startBrowserNym(): Promise<string> {
+    if (browserNymClientRef.current && buyerNymAddress.trim()) {
+      return buyerNymAddress.trim();
+    }
+
+    setErrorMessage("");
+    setNymStatus("starting");
+    setNymMessage(copy.receive.nymStartingLabel);
+    setBusyAction("nym");
+    try {
+      const nymModule = await import("@nymproject/sdk-full-fat");
+      const nym = (await nymModule.createNymMixnetClient({
+        autoConvertStringMimeTypes: [
+          nymModule.MimeTypes.ApplicationJson,
+          nymModule.MimeTypes.TextPlain,
+        ],
+      })) as BrowserNymClient;
+
+      browserNymUnsubscribeRef.current?.();
+      browserNymUnsubscribeRef.current =
+        nym.events.subscribeToTextMessageReceivedEvent((event) => {
+          void handleNymTextMessage(event.args.payload);
+        });
+
+      const clientId = getOrCreateBrowserNymClientId();
+      await nym.client.start({
+        clientId,
+        nymApiUrl:
+          process.env.NEXT_PUBLIC_NYM_API_URL ??
+          "https://validator.nymtech.net/api",
+        forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
+      });
+      const address = await nym.client.selfAddress();
+      if (!address) {
+        throw new Error("Nym client did not return an address");
+      }
+
+      browserNymClientRef.current = nym;
+      setBuyerNymAddress(address);
+      setNymStatus("ready");
+      setNymMessage(copy.receive.nymReadyLabel);
+      return address;
+    } catch (error) {
+      setNymStatus("error");
+      setNymMessage(copy.errors.nymUnavailable);
+      throw error;
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
+  async function handleNymTextMessage(payload: string): Promise<void> {
+    const parsed = parseNymClaimPayload(payload);
+    if (!parsed) {
+      return;
+    }
+    if (loadedOrder && parsed.orderId !== loadedOrder.orderId) {
+      return;
+    }
+    const keyPair = loadBuyerKeyPair(parsed.orderId);
+    if (!keyPair) {
+      setErrorMessage(copy.errors.paymentRequired);
+      return;
+    }
+    await openClaimPayload(parsed, keyPair);
+  }
+
+  async function openClaimPayload(
+    payload: NymClaimPayload,
+    keyPair: PaidLinkBuyerKeyPair,
+  ): Promise<void> {
+    const encryptedFileDownload =
+      payload.encryptedFileDownload ?? payload.devHttpFallback;
+    if (!encryptedFileDownload) {
+      throw new Error("Nym claim payload did not include a file URL");
+    }
+
+    const encryptedResponse = await fetch(encryptedFileDownload.url);
+    if (!encryptedResponse.ok) {
+      const body = await readResponseBody(encryptedResponse);
+      throw new Error(
+        extractServerErrorMessage(body, "Encrypted file download failed"),
+      );
+    }
+
+    const fileKey = await decryptPaidLinkFileKey(
+      payload.keyEnvelope,
+      keyPair.privateJwk,
+    );
+    const opened = await decryptPaidLinkFile(
+      await encryptedResponse.arrayBuffer(),
+      fileKey,
+      payload.manifest.encryptionIv,
+      payload.manifest.mimeType,
+    );
+    const objectUrl = window.URL.createObjectURL(opened);
+    setDownloadUrl(objectUrl);
+    setDownloadFileName(payload.manifest.fileName);
+    setNymStatus("ready");
+    setNymMessage(copy.receive.nymReadyLabel);
   }
 
   async function getOrCreateBuyerKeyPair(
@@ -398,6 +706,17 @@ export function PaidPrivateFilePanel({
   }
 
   const isBusy = busyAction !== "idle";
+  const mustAcknowledgeAccessKey =
+    Boolean(newSellerAccessKey) && !accessKeyAcknowledged;
+  const canPublishFile = Boolean(seller) && !mustAcknowledgeAccessKey;
+  const flowMotionStage = getFlowMotionStage({
+    busyAction,
+    createdOrder,
+    loadedOrder,
+    payment,
+    downloadUrl,
+    nymStatus,
+  });
 
   return (
     <main className="page-shell product-shell zk-hub-shell zk-timestamp-shell zectime-paid-link-shell">
@@ -416,6 +735,10 @@ export function PaidPrivateFilePanel({
           </Link>
         </div>
         <div className="zk-hub-topbar-tools">
+          <div className="zectime-topbar-logos" aria-label={copy.brand.railLabel}>
+            <BrandMark kind="zcash" label={copy.brand.zcash} />
+            <BrandMark kind="nym" label={copy.brand.nym} />
+          </div>
           <ProductLocaleToggle
             locale={locale}
             ariaLabel={copy.shell.eyebrow}
@@ -462,73 +785,250 @@ export function PaidPrivateFilePanel({
               <p className="eyebrow">{copy.tabs.send}</p>
               <h2>{copy.send.title}</h2>
               <p>{copy.send.body}</p>
+              <SellerShopArt copy={copy} authMode={sellerAuthMode} />
             </div>
 
-            <form className="zk-hub-form" onSubmit={onCreateLink}>
-              <label className="zk-hub-form-field">
-                <span className="zk-hub-form-label">{copy.send.fileLabel}</span>
-                <span className="zk-hub-file-picker">
+            <div className="zectime-paid-result zectime-seller-auth">
+              <div>
+                <p className="eyebrow">
+                  {seller ? copy.seller.loggedInLabel : copy.seller.title}
+                </p>
+                <p>{copy.seller.body}</p>
+              </div>
+
+              {seller ? (
+                <dl className="zectime-paid-details zectime-paid-payment-details">
+                  <div>
+                    <dt>{copy.seller.publicRouteLabel}</dt>
+                    <dd>
+                      <a href={withProductLocale(seller.publicPath, locale)}>
+                        {seller.publicPath}
+                      </a>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{copy.details.sellerPayoutAddress}</dt>
+                    <dd>{seller.defaultPayoutAddress}</dd>
+                  </div>
+                </dl>
+              ) : (
+                <>
+                  <div className="zectime-paid-tabs" role="tablist">
+                    <button
+                      type="button"
+                      className="zectime-paid-tab"
+                      data-active={sellerAuthMode === "create"}
+                      onClick={() => setSellerAuthMode("create")}
+                    >
+                      {copy.seller.createTab}
+                    </button>
+                    <button
+                      type="button"
+                      className="zectime-paid-tab"
+                      data-active={sellerAuthMode === "login"}
+                      onClick={() => setSellerAuthMode("login")}
+                    >
+                      {copy.seller.loginTab}
+                    </button>
+                  </div>
+
+                  <div className="zk-hub-form">
+                    <label className="zk-hub-form-field">
+                      <span className="zk-hub-form-label">
+                        {copy.seller.handleLabel}
+                      </span>
+                      <input
+                        value={sellerHandle}
+                        onChange={(event) => setSellerHandle(event.target.value)}
+                        placeholder={copy.seller.handlePlaceholder}
+                        disabled={isBusy}
+                      />
+                    </label>
+                    {sellerAuthMode === "create" ? (
+                      <>
+                        <label className="zk-hub-form-field">
+                          <span className="zk-hub-form-label">
+                            {copy.seller.displayNameLabel}
+                          </span>
+                          <input
+                            value={sellerDisplayName}
+                            onChange={(event) =>
+                              setSellerDisplayName(event.target.value)
+                            }
+                            placeholder={copy.seller.displayNamePlaceholder}
+                            disabled={isBusy}
+                          />
+                        </label>
+                        <label className="zk-hub-form-field">
+                          <span className="zk-hub-form-label">
+                            {copy.send.payoutAddressLabel}
+                          </span>
+                          <input
+                            value={sellerPayoutAddress}
+                            onChange={(event) =>
+                              setSellerPayoutAddress(event.target.value)
+                            }
+                            placeholder={copy.send.payoutAddressPlaceholder}
+                            autoComplete="off"
+                            disabled={isBusy}
+                          />
+                          <span className="zk-hub-form-hint">
+                            {copy.send.payoutAddressHint}
+                          </span>
+                        </label>
+                      </>
+                    ) : (
+                      <label className="zk-hub-form-field">
+                        <span className="zk-hub-form-label">
+                          {copy.seller.accessKeyLabel}
+                        </span>
+                        <input
+                          value={sellerAccessKey}
+                          onChange={(event) =>
+                            setSellerAccessKey(event.target.value)
+                          }
+                          placeholder={copy.seller.accessKeyPlaceholder}
+                          autoComplete="off"
+                          disabled={isBusy}
+                        />
+                      </label>
+                    )}
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      disabled={isBusy}
+                      onClick={() =>
+                        sellerAuthMode === "create"
+                          ? void onCreateSeller()
+                          : void onLoginSeller()
+                      }
+                    >
+                      {sellerAuthMode === "create"
+                        ? copy.seller.createLabel
+                        : copy.seller.loginLabel}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {newSellerAccessKey ? (
+                <div className="zectime-key-vault">
+                  <div>
+                    <p className="eyebrow">{copy.seller.accessKeySavedTitle}</p>
+                    <p>{copy.seller.accessKeySavedBody}</p>
+                  </div>
+                  <code>{newSellerAccessKey}</code>
+                  <div className="zectime-paid-actions">
+                    <button
+                      type="button"
+                      className="button-secondary"
+                      onClick={() => void onCopyNewSellerAccessKey()}
+                    >
+                      {accessKeyCopied
+                        ? copy.seller.accessKeyCopiedLabel
+                        : copy.seller.accessKeyCopyLabel}
+                    </button>
+                    <label className="zectime-key-confirm">
+                      <input
+                        type="checkbox"
+                        checked={accessKeyAcknowledged}
+                        onChange={(event) =>
+                          setAccessKeyAcknowledged(event.target.checked)
+                        }
+                      />
+                      <span>{copy.seller.accessKeyConfirmLabel}</span>
+                    </label>
+                  </div>
+                  {!accessKeyAcknowledged ? (
+                    <p className="zectime-key-lock">
+                      {copy.seller.accessKeyBlocker}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            <TransferMotion copy={copy} stage={flowMotionStage} />
+
+            {canPublishFile ? (
+              <form className="zk-hub-form" onSubmit={onCreateLink}>
+                <label className="zk-hub-form-field">
+                  <span className="zk-hub-form-label">
+                    {copy.send.fileLabel}
+                  </span>
+                  <span className="zk-hub-file-picker">
+                    <input
+                      className="zk-hub-file-input"
+                      type="file"
+                      onChange={onFileChange}
+                      disabled={isBusy}
+                    />
+                    <span className="zk-hub-file-button">
+                      {copy.send.chooseFileLabel}
+                    </span>
+                    <span className="zk-hub-file-name">
+                      {file ? file.name : copy.send.emptyFileLabel}
+                    </span>
+                  </span>
+                </label>
+
+                <label className="zk-hub-form-field">
+                  <span className="zk-hub-form-label">
+                    {copy.send.priceLabel}
+                  </span>
                   <input
-                    className="zk-hub-file-input"
-                    type="file"
-                    onChange={onFileChange}
+                    value={priceZec}
+                    onChange={(event) => setPriceZec(event.target.value)}
+                    inputMode="decimal"
                     disabled={isBusy}
                   />
-                  <span className="zk-hub-file-button">
-                    {copy.send.chooseFileLabel}
+                  <span className="zk-hub-form-hint">
+                    {copy.send.priceHint}
                   </span>
-                  <span className="zk-hub-file-name">
-                    {file ? file.name : copy.send.emptyFileLabel}
+                </label>
+
+                <label className="zk-hub-form-field">
+                  <span className="zk-hub-form-label">
+                    {copy.send.payoutAddressLabel}
                   </span>
-                </span>
-              </label>
+                  <input
+                    value={sellerPayoutAddress}
+                    onChange={(event) =>
+                      setSellerPayoutAddress(event.target.value)
+                    }
+                    placeholder={copy.send.payoutAddressPlaceholder}
+                    autoComplete="off"
+                    disabled={isBusy}
+                  />
+                  <span className="zk-hub-form-hint">
+                    {copy.send.payoutAddressHint}
+                  </span>
+                </label>
 
-              <label className="zk-hub-form-field">
-                <span className="zk-hub-form-label">{copy.send.priceLabel}</span>
-                <input
-                  value={priceZec}
-                  onChange={(event) => setPriceZec(event.target.value)}
-                  inputMode="decimal"
+                <label className="zk-hub-form-field">
+                  <span className="zk-hub-form-label">
+                    {copy.send.noteLabel}
+                  </span>
+                  <textarea
+                    value={sellerNote}
+                    onChange={(event) => setSellerNote(event.target.value)}
+                    placeholder={copy.send.notePlaceholder}
+                    disabled={isBusy}
+                    rows={3}
+                  />
+                </label>
+
+                <button
+                  className="button-primary"
+                  type="submit"
                   disabled={isBusy}
-                />
-                <span className="zk-hub-form-hint">{copy.send.priceHint}</span>
-              </label>
-
-              <label className="zk-hub-form-field">
-                <span className="zk-hub-form-label">
-                  {copy.send.payoutAddressLabel}
-                </span>
-                <input
-                  value={sellerPayoutAddress}
-                  onChange={(event) =>
-                    setSellerPayoutAddress(event.target.value)
-                  }
-                  placeholder={copy.send.payoutAddressPlaceholder}
-                  autoComplete="off"
-                  disabled={isBusy}
-                />
-                <span className="zk-hub-form-hint">
-                  {copy.send.payoutAddressHint}
-                </span>
-              </label>
-
-              <label className="zk-hub-form-field">
-                <span className="zk-hub-form-label">{copy.send.noteLabel}</span>
-                <textarea
-                  value={sellerNote}
-                  onChange={(event) => setSellerNote(event.target.value)}
-                  placeholder={copy.send.notePlaceholder}
-                  disabled={isBusy}
-                  rows={3}
-                />
-              </label>
-
-              <button className="button-primary" type="submit" disabled={isBusy}>
-                {busyAction === "encrypting"
-                  ? copy.send.busyLabel
-                  : copy.send.submitLabel}
-              </button>
-            </form>
+                >
+                  {busyAction === "encrypting"
+                    ? copy.send.busyLabel
+                    : copy.send.submitLabel}
+                </button>
+              </form>
+            ) : null}
 
             {createdOrder && shareUrl ? (
               <div className="zectime-paid-result">
@@ -559,6 +1059,7 @@ export function PaidPrivateFilePanel({
               <p className="eyebrow">{copy.tabs.receive}</p>
               <h2>{copy.receive.title}</h2>
               <p>{copy.receive.body}</p>
+              <BrandRail copy={copy} />
             </div>
 
             <form className="zk-hub-form" onSubmit={onLoadOrder}>
@@ -573,26 +1074,51 @@ export function PaidPrivateFilePanel({
                   disabled={isBusy}
                 />
                 </label>
-              <label className="zk-hub-form-field">
-                <span className="zk-hub-form-label">
-                  {copy.receive.nymAddressLabel}
-                </span>
-                <input
-                  value={buyerNymAddress}
-                  onChange={(event) => setBuyerNymAddress(event.target.value)}
-                  placeholder={copy.receive.nymAddressPlaceholder}
+              <div className="zectime-nym-receiver">
+                <div>
+                  <p className="eyebrow">{copy.receive.privateReceiverLabel}</p>
+                  <p>
+                    {nymMessage ||
+                      (buyerNymAddress
+                        ? copy.receive.nymReadyLabel
+                        : copy.receive.privateReceiverBody)}
+                  </p>
+                </div>
+                <button
+                  className="button-secondary"
+                  type="button"
+                  onClick={() => setShowManualNymAddress((current) => !current)}
                   disabled={isBusy}
-                />
-                <span className="zk-hub-form-hint">
-                  {copy.receive.nymAddressHint}
-                </span>
-              </label>
+                >
+                  {showManualNymAddress
+                    ? copy.receive.manualNymHideLabel
+                    : copy.receive.manualNymLabel}
+                </button>
+              </div>
+              {showManualNymAddress ? (
+                <label className="zk-hub-form-field">
+                  <span className="zk-hub-form-label">
+                    {copy.receive.nymAddressLabel}
+                  </span>
+                  <input
+                    value={buyerNymAddress}
+                    onChange={(event) => setBuyerNymAddress(event.target.value)}
+                    placeholder={copy.receive.nymAddressPlaceholder}
+                    disabled={isBusy}
+                  />
+                  <span className="zk-hub-form-hint">
+                    {copy.receive.nymAddressHint}
+                  </span>
+                </label>
+              ) : null}
               <button className="button-secondary" type="submit" disabled={isBusy}>
                 {busyAction === "loading"
                   ? `${copy.receive.loadLabel}...`
                   : copy.receive.loadLabel}
               </button>
             </form>
+
+            <TransferMotion copy={copy} stage={flowMotionStage} />
 
             {loadedOrder ? (
               <div className="zectime-paid-result">
@@ -670,6 +1196,153 @@ export function PaidPrivateFilePanel({
   );
 }
 
+function BrandRail({ copy }: { copy: PaidPrivateFileCopy }) {
+  return (
+    <div className="zectime-brand-rail" aria-label={copy.brand.railLabel}>
+      <BrandMark kind="zcash" label={copy.brand.zcash} />
+      <div className="zectime-brand-connector" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+      <BrandMark kind="nym" label={copy.brand.nym} />
+      <p>{copy.brand.railBody}</p>
+    </div>
+  );
+}
+
+function SellerShopArt({
+  copy,
+  authMode,
+}: {
+  copy: PaidPrivateFileCopy;
+  authMode: SellerAuthMode;
+}) {
+  const primaryLabel =
+    authMode === "create" ? copy.seller.createTab : copy.seller.loginTab;
+  const secondaryLabel =
+    authMode === "create"
+      ? copy.send.payoutAddressLabel
+      : copy.seller.accessKeyLabel;
+
+  return (
+    <div className="zectime-shop-art" data-mode={authMode}>
+      <div className="zectime-shop-art-logos" aria-label={copy.brand.railLabel}>
+        <BrandMark kind="zcash" label={copy.brand.zcash} />
+        <div className="zectime-shop-art-line" aria-hidden="true">
+          <span />
+          <span />
+        </div>
+        <BrandMark kind="nym" label={copy.brand.nym} />
+      </div>
+
+      <div className="zectime-shop-art-canvas" aria-hidden="true">
+        <div className="zectime-shop-route-card" />
+        <div className="zectime-shop-file-stack">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="zectime-shop-vault">
+          <span />
+        </div>
+      </div>
+
+      <div className="zectime-shop-art-footer">
+        <span>{primaryLabel}</span>
+        <strong>{copy.seller.publicRouteLabel}</strong>
+        <em>{secondaryLabel}</em>
+      </div>
+    </div>
+  );
+}
+
+function BrandMark({
+  kind,
+  label,
+}: {
+  kind: "zcash" | "nym";
+  label: string;
+}) {
+  return (
+    <span className={`zectime-brand-mark zectime-brand-mark-${kind}`}>
+      {kind === "zcash" ? (
+        <img src="/brand/zcash-brandmark-yellow.svg" alt="" />
+      ) : (
+        <img src="/brand/nym-app-icon.svg" alt="" />
+      )}
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function TransferMotion({
+  copy,
+  stage,
+}: {
+  copy: PaidPrivateFileCopy;
+  stage: FlowMotionStage;
+}) {
+  const steps: Array<{
+    stage: FlowMotionStage;
+    label: string;
+    body: string;
+  }> = [
+    {
+      stage: "transfer",
+      label: copy.motion.transferLabel,
+      body: copy.motion.transferBody,
+    },
+    {
+      stage: "payment",
+      label: copy.motion.paymentLabel,
+      body: copy.motion.paymentBody,
+    },
+    {
+      stage: "done",
+      label: copy.motion.doneLabel,
+      body: copy.motion.doneBody,
+    },
+  ];
+  const activeIndex = steps.findIndex((step) => step.stage === stage);
+
+  return (
+    <div className="zectime-transfer-motion" data-stage={stage}>
+      <div className="zectime-motion-head">
+        <div>
+          <p className="eyebrow">{copy.motion.title}</p>
+          <p>{copy.motion.body}</p>
+        </div>
+        <div className="zectime-motion-orbit" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+      </div>
+      <div className="zectime-motion-line" aria-hidden="true">
+        <span />
+      </div>
+      <ol>
+        {steps.map((step, index) => {
+          const state =
+            index < activeIndex
+              ? "done"
+              : index === activeIndex
+                ? "active"
+                : "pending";
+          return (
+            <li key={step.stage} data-state={state}>
+              <span className="zectime-motion-dot" aria-hidden="true" />
+              <strong>{step.label}</strong>
+              <span>{step.body}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function OrderDetails({
   order,
   copy,
@@ -691,6 +1364,12 @@ function OrderDetails({
         <dt>{copy.details.sellerPayoutAddress}</dt>
         <dd>{order.sellerPayoutAddress}</dd>
       </div>
+      {order.seller ? (
+        <div>
+          <dt>{copy.seller.publicRouteLabel}</dt>
+          <dd>@{order.seller.handle}</dd>
+        </div>
+      ) : null}
       <div>
         <dt>{copy.details.size}</dt>
         <dd>{formatBytes(order.file.originalSizeBytes)}</dd>
@@ -719,6 +1398,40 @@ function OrderDetails({
       ) : null}
     </dl>
   );
+}
+
+function getFlowMotionStage({
+  busyAction,
+  createdOrder,
+  loadedOrder,
+  payment,
+  downloadUrl,
+  nymStatus,
+}: {
+  busyAction: BusyAction;
+  createdOrder: TransferPublicOrder | null;
+  loadedOrder: TransferPublicOrder | null;
+  payment: TransferPayment | null;
+  downloadUrl: string;
+  nymStatus: BrowserNymStatus;
+}): FlowMotionStage {
+  if (downloadUrl || loadedOrder?.status === "claimed") {
+    return "done";
+  }
+  if (
+    busyAction === "encrypting" ||
+    busyAction === "unlocking" ||
+    busyAction === "nym" ||
+    nymStatus === "waiting" ||
+    payment?.status === "paid" ||
+    loadedOrder?.payment?.status === "paid"
+  ) {
+    return "transfer";
+  }
+  if (createdOrder || loadedOrder || payment) {
+    return "payment";
+  }
+  return "transfer";
 }
 
 function PaymentDetails({
@@ -808,6 +1521,83 @@ function extractOrderId(value: string): string | null {
 
   const match = trimmed.match(/pl_[a-f0-9]{24}/u);
   return match?.[0] ?? null;
+}
+
+function parseNymClaimPayload(value: string): NymClaimPayload | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed.schema !== "paidprivatefile.nym.claim.v1") {
+    return null;
+  }
+  if (typeof parsed.orderId !== "string") {
+    return null;
+  }
+  if (!isRecord(parsed.manifest) || !isRecord(parsed.keyEnvelope)) {
+    return null;
+  }
+  const manifest = parsed.manifest;
+  if (
+    typeof manifest.orderId !== "string" ||
+    manifest.orderId !== parsed.orderId ||
+    typeof manifest.fileName !== "string" ||
+    typeof manifest.mimeType !== "string" ||
+    typeof manifest.encryptedFileSha256 !== "string" ||
+    typeof manifest.encryptionIv !== "string"
+  ) {
+    return null;
+  }
+
+  const encryptedFileDownload = parseNymFileDownload(
+    parsed.encryptedFileDownload,
+  );
+  const devHttpFallback = parseNymFileDownload(parsed.devHttpFallback);
+  return {
+    schema: "paidprivatefile.nym.claim.v1",
+    orderId: parsed.orderId,
+    manifest: {
+      orderId: manifest.orderId,
+      fileName: manifest.fileName,
+      mimeType: manifest.mimeType,
+      encryptedFileSha256: manifest.encryptedFileSha256,
+      encryptionIv: manifest.encryptionIv,
+    },
+    keyEnvelope: parsed.keyEnvelope as unknown as PaidLinkKeyEnvelope,
+    ...(encryptedFileDownload ? { encryptedFileDownload } : {}),
+    ...(devHttpFallback ? { devHttpFallback } : {}),
+  };
+}
+
+function parseNymFileDownload(
+  value: unknown,
+): NymClaimPayload["encryptedFileDownload"] | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (typeof value.url !== "string" || typeof value.expiresAt !== "string") {
+    return undefined;
+  }
+  return {
+    url: value.url,
+    expiresAt: value.expiresAt,
+  };
+}
+
+function getOrCreateBrowserNymClientId(): string {
+  const existing = window.localStorage.getItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY);
+  if (existing) {
+    return existing;
+  }
+  const next = `paidprivatefile-${crypto.randomUUID()}`;
+  window.localStorage.setItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY, next);
+  return next;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseZecToZats(value: string): number {

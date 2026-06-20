@@ -12,12 +12,15 @@ The core invariant is simple: payment unlocks a private Nym delivery session. Th
 
 ```txt
 Browser client
+  - creates or logs into a no-email seller workspace
   - encrypts seller file before upload
   - generates buyer key pair
   - auto-detects buyer Nym/local receiver when available
   - decrypts file locally after Nym delivery
 
 Transfer API
+  - creates seller workspaces
+  - authenticates seller sessions with handle + access key
   - creates file orders
   - stores ciphertext
   - exposes public order metadata
@@ -39,7 +42,8 @@ Payment adapter
 Nym transport adapter
   - core component
   - receives or detects buyer Nym address/session
-  - sends wrapped key over Nym after payment
+  - sends wrapped key over standalone nym-client WebSocket after payment
+  - keeps a local outbox fallback for tests and development
   - optionally transfers encrypted file chunks over Nym
 
 CipherPay webhook
@@ -149,6 +153,7 @@ The seller submits:
 - release_secret_hash in seller-held deployments
 - ZEC amount in zatoshis
 - seller payout Unified Address
+- optional seller id and public handle from the no-email seller session
 - optional seller note
 - optional timestamp receipt
 
@@ -197,6 +202,25 @@ p256-ecdh-aes-gcm-v1
 
 The seller payout address is part of the transfer order. A payment intent uses that address as the intended ZEC recipient.
 
+The app should present this as a ZEC payment flow. CipherPay is an internal payment rail for invoice creation and webhook confirmation, not user-facing product language.
+
+## Seller Workspaces
+
+Seller accounts are intentionally no-email in the prototype:
+
+```txt
+handle + one-time access key -> signed seller session cookie
+```
+
+The public seller route is:
+
+```txt
+/s/:handle
+/s/:handle/files/:orderId
+```
+
+The access key is shown once and only its SHA-256 hash is stored. This keeps onboarding simple and close to a wallet-style flow, but production should add passkeys, wallet-signed login, key rotation, and recovery.
+
 Production source of truth:
 
 ```txt
@@ -222,6 +246,11 @@ POST /api/transfers/:orderId/claim
 GET  /api/transfers/:orderId/file?token=...
 POST /api/transfers/:orderId/dev-pay
 POST /api/webhooks/cipherpay
+POST /api/sellers
+GET  /api/seller-session
+POST /api/seller-session
+GET  /api/sellers/me
+PATCH /api/sellers/me
 ```
 
 Request:

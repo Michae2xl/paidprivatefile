@@ -6,6 +6,7 @@ import {
   type ServerErrorEnvelope,
 } from "../../../lib/server/error-kinds";
 import { enforceRateLimit } from "../../../lib/server/rate-limit";
+import { getSellerFromRequest } from "../../../lib/server/seller-store";
 import {
   createTransferOrder,
   type TransferTimestampReceipt,
@@ -31,10 +32,20 @@ export async function POST(request: Request) {
   }
 
   try {
+    const seller = await getSellerFromRequest(request);
     const form = await request.formData();
     const encryptedFile = form.get("encryptedFile");
     if (!(encryptedFile instanceof Blob)) {
       throw new ServerError("validation", "Missing encrypted file");
+    }
+    const sellerPayoutAddress =
+      readFormString(form, "sellerPayoutAddress") ??
+      seller?.defaultPayoutAddress;
+    if (!sellerPayoutAddress) {
+      throw new ServerError(
+        "validation",
+        "Missing required field: sellerPayoutAddress",
+      );
     }
 
     const order = await createTransferOrder({
@@ -49,16 +60,25 @@ export async function POST(request: Request) {
       encryptionIv: requireFormString(form, "encryptionIv"),
       fileKey: requireFormString(form, "fileKey"),
       amountZats: readFormNumber(form, "amountZats"),
-      sellerPayoutAddress: requireFormString(form, "sellerPayoutAddress"),
+      sellerPayoutAddress,
       sellerNote: readFormString(form, "sellerNote"),
+      seller: seller
+        ? {
+            sellerId: seller.sellerId,
+            handle: seller.handle,
+            displayName: seller.displayName,
+          }
+        : null,
       timestampReceipt: readTimestampReceipt(form),
     });
 
     return NextResponse.json({
       order,
-      sharePath: `/paid-private-file?order=${encodeURIComponent(
-        order.orderId,
-      )}`,
+      sharePath: order.seller
+        ? `/s/${encodeURIComponent(
+            order.seller.handle,
+          )}/files/${encodeURIComponent(order.orderId)}`
+        : `/paid-private-file?order=${encodeURIComponent(order.orderId)}`,
     });
   } catch (error) {
     return createServerErrorResponse("transfers/create", error);

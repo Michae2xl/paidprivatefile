@@ -44,6 +44,44 @@ Manual Nym address entry is a fallback only. In the integrated site
 implementation, the page calls the local bridge `/address` endpoint to fill the
 receiver before creating the ZEC payment.
 
+## Implemented `nym-claim-v1` Path
+
+The backend supports two delivery adapters:
+
+- `NYM_CLIENT_ENDPOINT` set: send through a standalone `nym-client` WebSocket.
+- `NYM_CLIENT_ENDPOINT` unset: write to the local `nym-outbox` for tests and local development.
+
+For a real claim test, run `nym-client` next to the web server:
+
+```bash
+nym-client init --id paidprivatefile-backend
+nym-client run --id paidprivatefile-backend
+```
+
+The standalone client exposes a WebSocket on `ws://127.0.0.1:1977`. Configure:
+
+```txt
+NYM_CLIENT_ENDPOINT=ws://127.0.0.1:1977
+PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY=1
+```
+
+When Nym delivery is required, `/api/transfers/:orderId/claim` returns only order state and a Nym delivery receipt. The wrapped key envelope and signed ciphertext URL are sent inside the Nym payload:
+
+```json
+{
+  "schema": "paidprivatefile.nym.claim.v1",
+  "orderId": "pl_...",
+  "manifest": {},
+  "keyEnvelope": {},
+  "encryptedFileDownload": {
+    "url": "/api/transfers/pl_.../file?token=...",
+    "expiresAt": "..."
+  }
+}
+```
+
+The buyer browser starts its own Nym receiver through the TypeScript SDK, registers the returned Nym address on the order, waits for this payload, fetches the ciphertext URL, unwraps the file key, and decrypts locally.
+
 ## Maximum-Privacy Target
 
 `nym-transfer-v1` sends encrypted file chunks through Nym:

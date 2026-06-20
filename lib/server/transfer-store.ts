@@ -6,7 +6,14 @@ import {
   timingSafeEqual,
   webcrypto,
 } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import {
@@ -80,6 +87,7 @@ export interface TransferOrder {
   };
   sellerPayoutAddress: string;
   sellerNote: string | null;
+  seller: TransferSeller | null;
   timestampReceipt: TransferTimestampReceipt | null;
   manifestRoot: string;
   payment: TransferPaymentState | null;
@@ -118,6 +126,7 @@ export interface TransferPublicOrder {
   price: TransferOrder["price"];
   sellerPayoutAddress: string;
   sellerNote: string | null;
+  seller: TransferSeller | null;
   timestamp: {
     commitmentScheme: string | null;
     commitment: string;
@@ -141,14 +150,22 @@ export interface CreateTransferOrderInput {
   amountZats: number;
   sellerPayoutAddress: string;
   sellerNote?: string | null;
+  seller?: TransferSeller | null;
   timestampReceipt?: TransferTimestampReceipt | null;
+}
+
+export interface TransferSeller {
+  sellerId: string;
+  handle: string;
+  displayName: string;
 }
 
 export interface TransferClaim {
   order: TransferPublicOrder;
   manifest: TransferManifest;
-  keyEnvelope: TransferKeyEnvelope;
-  download: {
+  deliveryMode: "http-dev-fallback" | "nym";
+  keyEnvelope?: TransferKeyEnvelope;
+  download?: {
     token: string;
     url: string;
     expiresAt: string;
@@ -244,6 +261,7 @@ export async function createTransferOrder(
     },
     sellerPayoutAddress,
     sellerNote: normalizeSellerNote(input.sellerNote),
+    seller: normalizeSeller(input.seller),
     timestampReceipt,
     manifestRoot,
     payment: null,
@@ -269,6 +287,43 @@ export async function getTransferPublicOrder(
   orderId: string,
 ): Promise<TransferPublicOrder> {
   return publicOrder(await readOrder(orderId));
+}
+
+export async function listSellerTransferPublicOrders(
+  sellerHandle: string,
+): Promise<TransferPublicOrder[]> {
+  const ordersRoot = join(transferRoot(), "orders");
+  let entries: string[];
+  try {
+    entries = await readdir(ordersRoot);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return [];
+    }
+    throw error;
+  }
+
+  const orders = await Promise.all(
+    entries
+      .filter((entry) => ORDER_ID_PATTERN.test(entry))
+      .map(async (orderId) => {
+        try {
+          return await readOrder(orderId);
+        } catch (error) {
+          if (isMissingFileError(error)) {
+            return null;
+          }
+          throw error;
+        }
+      }),
+  );
+
+  return orders
+    .filter((order): order is TransferOrder => {
+      return order?.seller?.handle === sellerHandle;
+    })
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map(publicOrder);
 }
 
 export async function createPaymentIntentForOrder(
@@ -465,6 +520,10 @@ export async function claimTransfer(
       expiresAtMs: expiresAt.getTime(),
     });
     const keyEnvelope = await wrapFileKey(order, buyerPublicKeyJwk);
+    const encryptedFileDownload = {
+      url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
+      expiresAt: expiresAt.toISOString(),
+    };
     const nymDelivery = await queueNymDelivery({
       orderId,
       buyerNymAddress: order.delivery.nymSession.buyerNymAddress,
@@ -474,10 +533,8 @@ export async function claimTransfer(
         orderId,
         manifest: manifestForOrder(order),
         keyEnvelope,
-        devHttpFallback: {
-          url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
-          expiresAt: expiresAt.toISOString(),
-        },
+        encryptedFileDownload,
+        devHttpFallback: encryptedFileDownload,
       },
     });
     order.status = "claimed";
@@ -492,17 +549,22 @@ export async function claimTransfer(
     });
     await writeOrder(order);
 
-    return {
+    const response: TransferClaim = {
       order: publicOrder(order),
       manifest: manifestForOrder(order),
-      keyEnvelope,
-      download: {
-        token,
-        url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
-        expiresAt: expiresAt.toISOString(),
-      },
+      deliveryMode: requireNymDeliveryForClaim()
+        ? "nym"
+        : "http-dev-fallback",
       nymDelivery,
     };
+    if (response.deliveryMode === "http-dev-fallback") {
+      response.keyEnvelope = keyEnvelope;
+      response.download = {
+        token,
+        ...encryptedFileDownload,
+      };
+    }
+    return response;
   });
 }
 
@@ -561,6 +623,7 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
     price: order.price,
     sellerPayoutAddress: order.sellerPayoutAddress,
     sellerNote: order.sellerNote,
+    seller: order.seller,
     timestamp: order.timestampReceipt
       ? {
           commitmentScheme: order.timestampReceipt.commitment_scheme ?? null,
@@ -906,6 +969,19 @@ function normalizeSellerNote(value: string | null | undefined): string | null {
   return cleaned ? cleaned : null;
 }
 
+function normalizeSeller(
+  value: TransferSeller | null | undefined,
+): TransferSeller | null {
+  if (!value) {
+    return null;
+  }
+  return {
+    sellerId: value.sellerId,
+    handle: value.handle,
+    displayName: value.displayName,
+  };
+}
+
 function normalizeTimestampReceipt(
   value: TransferTimestampReceipt | null | undefined,
 ): TransferTimestampReceipt | null {
@@ -1003,6 +1079,17 @@ function downloadTokenSecret(): string {
     process.env.ZECTIME_TRANSFER_TOKEN_SECRET ??
     process.env.ZKCGZ_TRANSFER_TOKEN_SECRET ??
     "paidprivatefile-dev-secret"
+  );
+}
+
+function requireNymDeliveryForClaim(): boolean {
+  if (process.env.PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY === "1") {
+    return true;
+  }
+  return (
+    process.env.NODE_ENV === "production" &&
+    Boolean(process.env.NYM_CLIENT_ENDPOINT?.trim()) &&
+    process.env.PAID_PRIVATE_FILE_ALLOW_HTTP_CLAIM_RESPONSE !== "1"
   );
 }
 

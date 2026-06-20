@@ -11,6 +11,45 @@ export interface PaidPrivateFileCopy {
     send: string;
     receive: string;
   };
+  brand: {
+    zcash: string;
+    nym: string;
+    cipherpay: string;
+    railLabel: string;
+    railBody: string;
+  };
+  motion: {
+    title: string;
+    body: string;
+    transferLabel: string;
+    transferBody: string;
+    paymentLabel: string;
+    paymentBody: string;
+    doneLabel: string;
+    doneBody: string;
+  };
+  seller: {
+    title: string;
+    body: string;
+    createTab: string;
+    loginTab: string;
+    handleLabel: string;
+    handlePlaceholder: string;
+    displayNameLabel: string;
+    displayNamePlaceholder: string;
+    accessKeyLabel: string;
+    accessKeyPlaceholder: string;
+    createLabel: string;
+    loginLabel: string;
+    publicRouteLabel: string;
+    loggedInLabel: string;
+    accessKeySavedTitle: string;
+    accessKeySavedBody: string;
+    accessKeyCopyLabel: string;
+    accessKeyCopiedLabel: string;
+    accessKeyConfirmLabel: string;
+    accessKeyBlocker: string;
+  };
   send: {
     title: string;
     body: string;
@@ -39,6 +78,14 @@ export interface PaidPrivateFileCopy {
     nymAddressLabel: string;
     nymAddressPlaceholder: string;
     nymAddressHint: string;
+    startNymLabel: string;
+    nymReadyLabel: string;
+    nymStartingLabel: string;
+    nymWaitingLabel: string;
+    privateReceiverLabel: string;
+    privateReceiverBody: string;
+    manualNymLabel: string;
+    manualNymHideLabel: string;
     loadLabel: string;
     payLabel: string;
     checkoutLabel: string;
@@ -68,6 +115,7 @@ export interface PaidPrivateFileCopy {
     invalidPayoutAddress: string;
     missingOrder: string;
     missingNymAddress: string;
+    nymUnavailable: string;
     serverError: string;
     paymentRequired: string;
   };
@@ -84,6 +132,47 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     tabs: {
       send: "Enviar arquivo",
       receive: "Abrir link",
+    },
+    brand: {
+      zcash: "Zcash",
+      nym: "Nym",
+      cipherpay: "CipherPay",
+      railLabel: "Zcash + Nym private rail",
+      railBody: "Pagamento em ZEC entra pelo checkout. A chave privada sai pela Nym.",
+    },
+    motion: {
+      title: "Fluxo privado",
+      body: "Um arquivo, um pagamento, uma entrega privada.",
+      transferLabel: "Arquivo em transito",
+      transferBody: "Ciphertext salvo. A chave fica fora do link publico.",
+      paymentLabel: "Aguardando ZEC",
+      paymentBody: "O invoice confirma antes da entrega da chave.",
+      doneLabel: "Feito",
+      doneBody: "Buyer recebe a chave pela Nym e decripta localmente.",
+    },
+    seller: {
+      title: "Private shop sem e-mail",
+      body: "Crie uma rota publica, configure sua wallet ZEC e use uma chave de acesso para entrar depois.",
+      createTab: "Criar shop",
+      loginTab: "Entrar",
+      handleLabel: "Rota publica",
+      handlePlaceholder: "meu-handle",
+      displayNameLabel: "Nome publico",
+      displayNamePlaceholder: "Minha loja de arquivos",
+      accessKeyLabel: "Chave de acesso",
+      accessKeyPlaceholder: "ppf_...",
+      createLabel: "Criar private shop",
+      loginLabel: "Entrar sem e-mail",
+      publicRouteLabel: "Rota publica",
+      loggedInLabel: "Private shop ativo",
+      accessKeySavedTitle: "Chave do private shop",
+      accessKeySavedBody:
+        "Ela aparece uma vez e nao pode ser recuperada pelo servidor. Guarde fora do navegador antes de publicar arquivos.",
+      accessKeyCopyLabel: "Copiar chave",
+      accessKeyCopiedLabel: "Chave copiada",
+      accessKeyConfirmLabel: "Eu guardei esta chave",
+      accessKeyBlocker:
+        "Confirme que guardou a chave para liberar a publicacao do arquivo.",
     },
     send: {
       title: "Criar arquivo privado pago",
@@ -115,9 +204,18 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       nymAddressPlaceholder: "nym...",
       nymAddressHint:
         "A chave do arquivo deve ser entregue por uma sessao Nym apos o pagamento.",
+      startNymLabel: "Iniciar receptor Nym",
+      nymReadyLabel: "Receptor Nym pronto",
+      nymStartingLabel: "Conectando Nym...",
+      nymWaitingLabel: "Aguardando entrega privada pela Nym...",
+      privateReceiverLabel: "Receptor privado",
+      privateReceiverBody:
+        "O browser prepara a sessao Nym automaticamente antes do pagamento. Voce nao precisa colar endereco.",
+      manualNymLabel: "Usar endereco Nym manual",
+      manualNymHideLabel: "Ocultar endereco manual",
       loadLabel: "Carregar",
       payLabel: "Criar pagamento",
-      checkoutLabel: "Abrir checkout CipherPay",
+      checkoutLabel: "Pagar em ZEC",
       devPayLabel: "Confirmar pagamento dev",
       unlockLabel: "Baixar e abrir",
       downloadLabel: "Salvar arquivo aberto",
@@ -144,6 +242,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       invalidPayoutAddress: "Informe uma Unified Address Zcash valida para receber.",
       missingOrder: "Cole um link ou order id valido.",
       missingNymAddress: "Informe um endereco Nym para receber a chave privada.",
+      nymUnavailable: "Nao foi possivel iniciar o receptor Nym no browser.",
       serverError: "Falha no paid link: ",
       paymentRequired: "Pagamento ainda nao confirmado. Aguarde o webhook ou tente novamente depois do checkout.",
     },
@@ -158,6 +257,47 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     tabs: {
       send: "Send file",
       receive: "Open link",
+    },
+    brand: {
+      zcash: "Zcash",
+      nym: "Nym",
+      cipherpay: "CipherPay",
+      railLabel: "Zcash + Nym private rail",
+      railBody: "ZEC payment enters through checkout. The private key exits through Nym.",
+    },
+    motion: {
+      title: "Private flow",
+      body: "One file, one payment, one private delivery.",
+      transferLabel: "File in transit",
+      transferBody: "Ciphertext stored. The key stays out of the public link.",
+      paymentLabel: "Waiting for ZEC",
+      paymentBody: "The invoice confirms before key delivery.",
+      doneLabel: "Done",
+      doneBody: "Buyer receives the key through Nym and decrypts locally.",
+    },
+    seller: {
+      title: "No-email private shop",
+      body: "Create a public route, configure your ZEC wallet, and use an access key to log in later.",
+      createTab: "Create shop",
+      loginTab: "Log in",
+      handleLabel: "Public route",
+      handlePlaceholder: "my-handle",
+      displayNameLabel: "Public name",
+      displayNamePlaceholder: "My private file shop",
+      accessKeyLabel: "Access key",
+      accessKeyPlaceholder: "ppf_...",
+      createLabel: "Create private shop",
+      loginLabel: "Log in without email",
+      publicRouteLabel: "Public route",
+      loggedInLabel: "Active private shop",
+      accessKeySavedTitle: "Private shop key",
+      accessKeySavedBody:
+        "It is shown once and cannot be recovered by the server. Save it outside the browser before publishing files.",
+      accessKeyCopyLabel: "Copy key",
+      accessKeyCopiedLabel: "Key copied",
+      accessKeyConfirmLabel: "I saved this key",
+      accessKeyBlocker:
+        "Confirm that you saved the key to unlock file publishing.",
     },
     send: {
       title: "Create paid private file",
@@ -189,9 +329,18 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       nymAddressPlaceholder: "nym...",
       nymAddressHint:
         "The file key should be delivered through a Nym session after payment.",
+      startNymLabel: "Start Nym receiver",
+      nymReadyLabel: "Nym receiver ready",
+      nymStartingLabel: "Connecting Nym...",
+      nymWaitingLabel: "Waiting for private Nym delivery...",
+      privateReceiverLabel: "Private receiver",
+      privateReceiverBody:
+        "The browser prepares the Nym session automatically before payment. No address paste needed.",
+      manualNymLabel: "Use manual Nym address",
+      manualNymHideLabel: "Hide manual address",
       loadLabel: "Load",
       payLabel: "Create payment",
-      checkoutLabel: "Open CipherPay checkout",
+      checkoutLabel: "Pay in ZEC",
       devPayLabel: "Confirm dev payment",
       unlockLabel: "Download and open",
       downloadLabel: "Save opened file",
@@ -218,6 +367,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       invalidPayoutAddress: "Enter a valid Zcash Unified Address to receive.",
       missingOrder: "Paste a valid link or order id.",
       missingNymAddress: "Enter a Nym address to receive the private key.",
+      nymUnavailable: "Could not start the browser Nym receiver.",
       serverError: "Paid link failed: ",
       paymentRequired: "Payment is not confirmed yet. Wait for the webhook or try again after checkout.",
     },

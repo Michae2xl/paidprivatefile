@@ -13,6 +13,7 @@ export type ServerErrorKind =
   | "nullifier_replay"
   | "cli_unavailable"
   | "network_unsupported"
+  | "auth_required"
   | "payment_required"
   | "flow_conflict"
   | "validation"
@@ -40,6 +41,7 @@ const STATUS_BY_KIND: Record<ServerErrorKind, number> = {
   nullifier_replay: 409,
   cli_unavailable: 503,
   network_unsupported: 422,
+  auth_required: 401,
   payment_required: 402,
   flow_conflict: 409,
   validation: 400,

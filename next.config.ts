@@ -3,8 +3,8 @@ import type { NextConfig } from "next";
 const isProduction = process.env.NODE_ENV === "production";
 
 const scriptSrc = isProduction
-  ? "'self' 'unsafe-inline'"
-  : "'self' 'unsafe-inline' 'unsafe-eval'";
+  ? "'self' 'unsafe-inline' 'wasm-unsafe-eval'"
+  : "'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'";
 
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -12,7 +12,8 @@ const contentSecurityPolicy = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  "connect-src 'self' https: ws: wss:",
+  "worker-src 'self' blob:",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",

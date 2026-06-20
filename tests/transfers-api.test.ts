@@ -4,8 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 
 import { POST as createTransferRoute } from "../app/api/transfers/route";
+import { POST as createSellerRoute } from "../app/api/sellers/route";
+import {
+  GET as readSellerSessionRoute,
+  POST as loginSellerRoute,
+} from "../app/api/seller-session/route";
 import { GET as readTransferRoute } from "../app/api/transfers/[orderId]/route";
 import { POST as claimTransferRoute } from "../app/api/transfers/[orderId]/claim/route";
 import { POST as devPayRoute } from "../app/api/transfers/[orderId]/dev-pay/route";
@@ -19,6 +25,7 @@ interface TransferPublicOrder {
   orderId: string;
   status: string;
   sellerPayoutAddress: string;
+  seller: { handle: string; displayName: string } | null;
   payment: { provider: string; invoiceId: string; status: string } | null;
   delivery: {
     requiredTransport: string;
@@ -43,6 +50,9 @@ beforeEach(async () => {
   process.env.PAID_PRIVATE_FILE_TRUST_PROXY_HEADERS = "0";
   delete process.env.CIPHERPAY_API_URL;
   delete process.env.CIPHERPAY_API_KEY;
+  delete process.env.NYM_CLIENT_ENDPOINT;
+  delete process.env.NYM_CLIENT_TIMEOUT_MS;
+  delete process.env.PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY;
   resetRateLimitStateForTesting();
 });
 
@@ -50,6 +60,9 @@ afterEach(async () => {
   delete process.env.PAID_PRIVATE_FILE_RUNTIME_DIR;
   delete process.env.PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET;
   delete process.env.PAID_PRIVATE_FILE_TRUST_PROXY_HEADERS;
+  delete process.env.NYM_CLIENT_ENDPOINT;
+  delete process.env.NYM_CLIENT_TIMEOUT_MS;
+  delete process.env.PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY;
   await rm(runtimeDir, { recursive: true, force: true });
 });
 
@@ -235,7 +248,219 @@ describe("/api/transfers", () => {
       consoleSpy.mockRestore();
     }
   });
+
+  it("sends a strict claim payload through the standalone Nym websocket client", async () => {
+    const nymClient = new WebSocketServer({ port: 0 });
+    await once(nymClient, "listening");
+    const address = nymClient.address();
+    if (typeof address !== "object" || address === null) {
+      throw new Error("Test websocket server did not bind to a TCP port");
+    }
+
+    const received = new Promise<Record<string, unknown>>((resolve, reject) => {
+      nymClient.once("connection", (socket) => {
+        socket.once("message", (data) => {
+          try {
+            resolve(JSON.parse(data.toString()) as Record<string, unknown>);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      nymClient.once("error", reject);
+    });
+
+    process.env.NYM_CLIENT_ENDPOINT = `ws://127.0.0.1:${address.port}`;
+    process.env.NYM_CLIENT_TIMEOUT_MS = "2000";
+    process.env.PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY = "1";
+
+    try {
+      const order = await createOrder();
+      const keyPair = await createBuyerKeyPair();
+      await paymentIntentRoute(
+        jsonRequest(
+          `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+          { buyerPublicKeyJwk: keyPair.publicJwk },
+        ),
+        routeContext(order.orderId),
+      );
+      await nymSessionRoute(
+        jsonRequest(`http://localhost/api/transfers/${order.orderId}/nym-session`, {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        }),
+        routeContext(order.orderId),
+      );
+      await devPayRoute(
+        new Request(
+          `http://localhost/api/transfers/${order.orderId}/dev-pay`,
+          { method: "POST" },
+        ),
+        routeContext(order.orderId),
+      );
+
+      const claimResponse = await claimTransferRoute(
+        jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
+          buyerPublicKeyJwk: keyPair.publicJwk,
+        }),
+        routeContext(order.orderId),
+      );
+      expect(claimResponse.status).toBe(200);
+      const claimBody = (await claimResponse.json()) as {
+        deliveryMode: string;
+        keyEnvelope?: unknown;
+        download?: unknown;
+        nymDelivery: { status: string };
+      };
+      expect(claimBody.deliveryMode).toBe("nym");
+      expect(claimBody.keyEnvelope).toBeUndefined();
+      expect(claimBody.download).toBeUndefined();
+      expect(claimBody.nymDelivery.status).toBe("sent_nym_client");
+
+      const wireMessage = await received;
+      expect(wireMessage.type).toBe("send");
+      expect(wireMessage.recipient).toBe(testBuyerNymAddress());
+      expect(typeof wireMessage.message).toBe("string");
+      const payload = JSON.parse(wireMessage.message as string) as {
+        schema: string;
+        orderId: string;
+        keyEnvelope: { scheme: string };
+        encryptedFileDownload: { url: string };
+      };
+      expect(payload.schema).toBe("paidprivatefile.nym.claim.v1");
+      expect(payload.orderId).toBe(order.orderId);
+      expect(payload.keyEnvelope.scheme).toBe("p256-ecdh-aes-gcm-v1");
+      expect(payload.encryptedFileDownload.url).toContain(
+        `/api/transfers/${order.orderId}/file?token=`,
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        nymClient.close((error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+  });
+
+  it("fails mandatory Nym delivery when no real Nym client endpoint is configured", async () => {
+    process.env.PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY = "1";
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await nymSessionRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/nym-session`, {
+        buyerNymAddress: testBuyerNymAddress(),
+        buyerPublicKeyJwk: keyPair.publicJwk,
+        transport: "nym-claim-v1",
+      }),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(
+        `http://localhost/api/transfers/${order.orderId}/dev-pay`,
+        { method: "POST" },
+      ),
+      routeContext(order.orderId),
+    );
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const claimResponse = await claimTransferRoute(
+        jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
+          buyerPublicKeyJwk: keyPair.publicJwk,
+        }),
+        routeContext(order.orderId),
+      );
+      expect(claimResponse.status).toBe(503);
+      const body = (await claimResponse.json()) as ErrorEnvelope;
+      expect(body.error.kind).toBe("cli_unavailable");
+      expect(body.error.message).toContain("NYM_CLIENT_ENDPOINT");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("creates a no-email seller login and publishes paid files under the seller route", async () => {
+    const sellerResponse = await createSellerRoute(
+      jsonRequest("http://localhost/api/sellers", {
+        handle: "alice-files",
+        displayName: "Alice Files",
+        defaultPayoutAddress: testSellerPayoutAddress(),
+      }),
+    );
+    expect(sellerResponse.status).toBe(201);
+    const sellerCookie = sellerResponse.headers.get("set-cookie");
+    expect(sellerCookie).toContain("paidprivatefile_seller=");
+    const sellerBody = (await sellerResponse.json()) as {
+      seller: {
+        handle: string;
+        displayName: string;
+        defaultPayoutAddress: string;
+        publicPath: string;
+      };
+      accessKey: string;
+    };
+    expect(sellerBody.seller.handle).toBe("alice-files");
+    expect(sellerBody.seller.publicPath).toBe("/s/alice-files");
+    expect(sellerBody.accessKey).toMatch(/^ppf_/u);
+
+    const sessionResponse = await readSellerSessionRoute(
+      new Request("http://localhost/api/seller-session", {
+        headers: { Cookie: sellerCookie ?? "" },
+      }),
+    );
+    expect(sessionResponse.status).toBe(200);
+    const sessionBody = (await sessionResponse.json()) as {
+      seller: { handle: string } | null;
+    };
+    expect(sessionBody.seller?.handle).toBe("alice-files");
+
+    const loginResponse = await loginSellerRoute(
+      jsonRequest("http://localhost/api/seller-session", {
+        handle: "alice-files",
+        accessKey: sellerBody.accessKey,
+      }),
+    );
+    expect(loginResponse.status).toBe(200);
+    expect(loginResponse.headers.get("set-cookie")).toContain(
+      "paidprivatefile_seller=",
+    );
+
+    const createResponse = await createTransferRoute(
+      makeCreateRequest({ Cookie: sellerCookie ?? "" }),
+    );
+    expect(createResponse.status).toBe(200);
+    const createBody = (await createResponse.json()) as {
+      order: TransferPublicOrder;
+      sharePath: string;
+    };
+    expect(createBody.order.seller?.handle).toBe("alice-files");
+    expect(createBody.order.sellerPayoutAddress).toBe(
+      testSellerPayoutAddress(),
+    );
+    expect(createBody.sharePath).toBe(
+      `/s/alice-files/files/${createBody.order.orderId}`,
+    );
+  });
 });
+
+function once(target: WebSocketServer, event: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    target.once(event, () => resolve());
+    target.once("error", reject);
+  });
+}
 
 async function createOrder(): Promise<TransferPublicOrder> {
   const response = await createTransferRoute(makeCreateRequest());
@@ -243,7 +468,7 @@ async function createOrder(): Promise<TransferPublicOrder> {
   return body.order;
 }
 
-function makeCreateRequest(): Request {
+function makeCreateRequest(headers?: HeadersInit): Request {
   const encrypted = encryptedFixture();
   const form = new FormData();
   form.set(
@@ -277,6 +502,7 @@ function makeCreateRequest(): Request {
 
   return new Request("http://localhost/api/transfers", {
     method: "POST",
+    headers,
     body: form,
   });
 }

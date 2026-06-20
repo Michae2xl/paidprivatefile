@@ -97,15 +97,22 @@ Important variables:
 ```txt
 CIPHERPAY_API_URL
 CIPHERPAY_API_KEY
+CIPHERPAY_CREATE_INVOICE_PATH
 CIPHERPAY_WEBHOOK_SECRET
 PAID_PRIVATE_FILE_RUNTIME_DIR
 PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET
+PAID_PRIVATE_FILE_AUTH_SECRET
+PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY
+PAID_PRIVATE_FILE_ALLOW_LOCAL_NYM_OUTBOX
+PAID_PRIVATE_FILE_ALLOW_HTTP_CLAIM_RESPONSE
 PAID_PRIVATE_FILE_ENABLE_DEV_PAY
 PAID_PRIVATE_FILE_TRUST_PROXY_HEADERS
 NYM_CLIENT_ENDPOINT
 NYM_CLIENT_SEND_PATH
 NYM_CLIENT_API_KEY
 NYM_DELIVERY_REQUIRED
+NYM_CLIENT_TIMEOUT_MS
+NYM_SERVICE_PROVIDER_ADDRESS
 NYM_TRANSPORT_MODE
 NEXT_PUBLIC_NYM_LOCAL_BRIDGE_URL
 NYM_BRIDGE_HOST
@@ -113,9 +120,43 @@ NYM_BRIDGE_PORT
 NYM_BRIDGE_WS_URL
 NYM_BRIDGE_ADDRESS_AUTH
 NYM_BRIDGE_ALLOWED_ORIGINS
+NEXT_PUBLIC_NYM_API_URL
+NEXT_PUBLIC_NYM_FORCE_TLS
 ```
 
 If CipherPay credentials are not configured, the app uses the local development payment provider. Use the dev payment endpoint only in local development or explicitly enabled production test environments.
+
+The user-facing payment flow is intentionally provider-neutral: sellers set a ZEC price and payout Unified Address, buyers see a ZEC checkout, and CipherPay remains a backend payment rail.
+
+## Seller Workspaces
+
+Sellers can create a no-email workspace:
+
+- public route: `/s/<handle>`
+- login: `<handle>` plus a one-time displayed `ppf_...` access key
+- default ZEC payout wallet
+- public paid files under `/s/<handle>/files/<orderId>`
+
+The access key is shown once and only its hash is stored. This is enough for the local prototype and a simple hosted MVP. Production should add passkeys or hardware-wallet signing for recovery and stronger account protection.
+
+## Real `nym-claim-v1` E2E
+
+Run a backend Nym client:
+
+```bash
+nym-client init --id paidprivatefile-backend
+nym-client run --id paidprivatefile-backend
+```
+
+Then configure:
+
+```txt
+NYM_CLIENT_ENDPOINT=ws://127.0.0.1:1977
+PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY=1
+NEXT_PUBLIC_NYM_API_URL=https://validator.nymtech.net/api
+```
+
+With `PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY=1`, `/api/transfers/:orderId/claim` sends the wrapped key envelope through Nym and does not include the key envelope or download URL in the HTTP response. The buyer browser starts its own Nym receiver, registers its Nym address on the order, receives the claim payload through Nym, downloads the ciphertext with the signed URL included inside that Nym payload, and decrypts locally.
 
 ## Validation
 
@@ -127,7 +168,7 @@ npm run build
 
 ## Current Status
 
-Prototype. The integrated `zkglobalcredit.tech` implementation now uses a lower-friction buyer flow: open link, auto-detect private receiver, pay in ZEC, then open locally. This standalone repo tracks the same product direction and should stay aligned with the integrated site implementation.
+Prototype moving toward real `nym-claim-v1`. The system supports no-email seller workspaces, public seller routes, local encrypted-file order creation, seller wallet/price configuration, browser-side Nym receiver startup, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, standalone `nym-client` WebSocket delivery, local Nym outbox fallback, signed ciphertext URLs inside the Nym claim payload, and browser-side decryption. The integrated `zkglobalcredit.tech` implementation now uses the same lower-friction buyer direction: open link, auto-detect a private receiver when available, pay in ZEC, then open locally.
 
 Before production, harden:
 
@@ -140,6 +181,7 @@ Before production, harden:
 - seller payout address validation
 - buyer key recovery UX
 - operational monitoring
+- Nym client/service-provider deployment and live reliability testing
 - Nym message retry and delivery receipts
 - encrypted chunk delivery for `nym-transfer-v1`
 
