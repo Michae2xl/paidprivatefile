@@ -4,7 +4,6 @@ import {
   randomBytes,
   randomUUID,
   timingSafeEqual,
-  webcrypto,
 } from "node:crypto";
 import {
   mkdir,
@@ -29,11 +28,7 @@ import {
 } from "./nym-transport";
 import { resolveWebRuntimeRoot } from "./web-session";
 
-export type TransferStatus =
-  | "created"
-  | "payment_pending"
-  | "paid"
-  | "claimed";
+export type TransferStatus = "created" | "payment_pending" | "paid" | "claimed";
 
 export interface TransferPaymentState {
   provider: CipherPayProvider;
@@ -43,6 +38,7 @@ export interface TransferPaymentState {
   memo: string | null;
   status: "pending" | "paid";
   buyerPublicKeyHash: string;
+  buyerPublicKeyJwk: JsonWebKey;
   createdAt: string;
   confirmedAt: string | null;
   raw?: unknown;
@@ -64,6 +60,14 @@ export interface TransferDeliveryState {
   nymSession: TransferNymSession | null;
 }
 
+export interface TransferReleaseState {
+  mode: "seller-held";
+  releaseSecretHash: string | null;
+  keyEnvelope: TransferKeyEnvelope | null;
+  buyerPublicKeyHash: string | null;
+  releasedAt: string | null;
+}
+
 export interface TransferOrder {
   schema: "zectime.paid-link.order.v1";
   orderId: string;
@@ -78,7 +82,6 @@ export interface TransferOrder {
   encryption: {
     scheme: "aes-256-gcm-v1";
     iv: string;
-    fileKey: string;
   };
   price: {
     asset: "ZEC";
@@ -92,6 +95,7 @@ export interface TransferOrder {
   manifestRoot: string;
   payment: TransferPaymentState | null;
   delivery: TransferDeliveryState;
+  release: TransferReleaseState;
   claims: Array<{
     claimedAt: string;
     buyerPublicKeyHash: string;
@@ -133,9 +137,17 @@ export interface TransferPublicOrder {
     blockHeight: number;
   } | null;
   manifestRoot: string;
-  payment: Omit<TransferPaymentState, "buyerPublicKeyHash" | "raw"> | null;
+  payment: Omit<
+    TransferPaymentState,
+    "buyerPublicKeyHash" | "buyerPublicKeyJwk" | "raw"
+  > | null;
   delivery: Omit<TransferDeliveryState, "nymSession"> & {
     nymSession: Omit<TransferNymSession, "buyerPublicKeyHash"> | null;
+  };
+  release: {
+    mode: TransferReleaseState["mode"];
+    status: "seller_pending" | "ready";
+    releasedAt: string | null;
   };
 }
 
@@ -146,7 +158,7 @@ export interface CreateTransferOrderInput {
   originalSizeBytes: number;
   encryptedFileSha256: string;
   encryptionIv: string;
-  fileKey: string;
+  releaseSecretHash: string;
   amountZats: number;
   sellerPayoutAddress: string;
   sellerNote?: string | null;
@@ -195,6 +207,20 @@ export interface TransferKeyEnvelope {
   ephemeralPublicKeyJwk: JsonWebKey;
   iv: string;
   ciphertext: string;
+}
+
+export interface TransferReleaseChallenge {
+  order: TransferPublicOrder;
+  release: {
+    status:
+      | "waiting_for_payment"
+      | "waiting_for_buyer"
+      | "ready_to_release"
+      | "released";
+    buyerPublicKeyHash: string | null;
+    buyerPublicKeyJwk: JsonWebKey | null;
+    releasedAt: string | null;
+  };
 }
 
 const ORDER_ID_PATTERN = /^pl_[a-f0-9]{24}$/u;
@@ -252,7 +278,6 @@ export async function createTransferOrder(
     encryption: {
       scheme: "aes-256-gcm-v1",
       iv: input.encryptionIv,
-      fileKey: input.fileKey,
     },
     price: {
       asset: "ZEC",
@@ -269,6 +294,17 @@ export async function createTransferOrder(
       requiredTransport: "nym-claim-v1",
       fallbackHttpDownload: false,
       nymSession: null,
+    },
+    release: {
+      mode: "seller-held",
+      releaseSecretHash: normalizeHex(
+        input.releaseSecretHash,
+        64,
+        "seller release secret hash",
+      ),
+      keyEnvelope: null,
+      buyerPublicKeyHash: null,
+      releasedAt: null,
     },
     claims: [],
   };
@@ -377,6 +413,7 @@ export async function createPaymentIntentForOrder(
       memo: invoice.memo,
       status: "pending",
       buyerPublicKeyHash,
+      buyerPublicKeyJwk,
       createdAt: now,
       confirmedAt: null,
       raw: invoice.raw,
@@ -396,7 +433,10 @@ export async function registerNymSessionForOrder(
     transport?: NymTransportMode;
     buyerPublicKeyJwk: JsonWebKey;
   },
-): Promise<{ order: TransferPublicOrder; nymSession: TransferPublicOrder["delivery"]["nymSession"] }> {
+): Promise<{
+  order: TransferPublicOrder;
+  nymSession: TransferPublicOrder["delivery"]["nymSession"];
+}> {
   validateBuyerPublicKeyJwk(input.buyerPublicKeyJwk);
   const buyerPublicKeyHash = hashBuyerPublicKey(input.buyerPublicKeyJwk);
   const buyerNymAddress = normalizeNymAddress(input.buyerNymAddress);
@@ -420,7 +460,10 @@ export async function registerNymSessionForOrder(
       transport,
       buyerNymAddress,
       buyerPublicKeyHash,
-      status: order.payment?.status === "paid" ? "ready_for_delivery" : "waiting_for_payment",
+      status:
+        order.payment?.status === "paid"
+          ? "ready_for_delivery"
+          : "waiting_for_payment",
       createdAt: order.delivery.nymSession?.createdAt ?? now,
       updatedAt: now,
       lastDelivery: order.delivery.nymSession?.lastDelivery,
@@ -457,9 +500,13 @@ export async function markTransferPaidFromInvoice(input: {
   orderId?: string | null;
   raw?: unknown;
 }): Promise<TransferPublicOrder> {
-  const orderId = input.orderId ?? (await findOrderIdByInvoice(input.invoiceId));
+  const orderId =
+    input.orderId ?? (await findOrderIdByInvoice(input.invoiceId));
   if (!orderId) {
-    throw new ServerError("validation", "CipherPay webhook did not map to an order");
+    throw new ServerError(
+      "validation",
+      "CipherPay webhook did not map to an order",
+    );
   }
 
   return withOrderLock(orderId, async () => {
@@ -481,6 +528,52 @@ export async function markTransferPaidFromInvoice(input: {
   });
 }
 
+export async function getTransferReleaseChallenge(
+  orderId: string,
+  releaseSecret: string,
+): Promise<TransferReleaseChallenge> {
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    assertReleaseSecret(order, releaseSecret);
+    return releaseChallengeForOrder(order);
+  });
+}
+
+export async function releaseTransferKey(input: {
+  orderId: string;
+  releaseSecret: string;
+  keyEnvelope: TransferKeyEnvelope;
+}): Promise<TransferReleaseChallenge> {
+  validateKeyEnvelope(input.keyEnvelope);
+
+  return withOrderLock(input.orderId, async () => {
+    const order = await readOrder(input.orderId);
+    assertReleaseSecret(order, input.releaseSecret);
+    if (!order.payment || order.payment.status !== "paid") {
+      throw new ServerError(
+        "payment_required",
+        "Payment must be confirmed before seller key release",
+      );
+    }
+
+    order.release = normalizeReleaseState(order.release);
+    if (order.release.keyEnvelope || order.status === "claimed") {
+      throw new ServerError(
+        "validation",
+        "The key envelope was already released for this order and cannot be replaced",
+      );
+    }
+
+    const now = new Date().toISOString();
+    order.release.keyEnvelope = input.keyEnvelope;
+    order.release.buyerPublicKeyHash = order.payment.buyerPublicKeyHash;
+    order.release.releasedAt = now;
+    order.updatedAt = now;
+    await writeOrder(order);
+    return releaseChallengeForOrder(order);
+  });
+}
+
 export async function claimTransfer(
   orderId: string,
   buyerPublicKeyJwk: JsonWebKey,
@@ -498,7 +591,10 @@ export async function claimTransfer(
         "Payment must be confirmed before the file key is released",
       );
     }
-    if (!order.payment || order.payment.buyerPublicKeyHash !== buyerPublicKeyHash) {
+    if (
+      !order.payment ||
+      order.payment.buyerPublicKeyHash !== buyerPublicKeyHash
+    ) {
       throw new ServerError(
         "payment_required",
         "This buyer key is not bound to the confirmed payment",
@@ -515,11 +611,12 @@ export async function claimTransfer(
       );
     }
 
+    order.release = normalizeReleaseState(order.release);
+    const keyEnvelope = claimKeyEnvelope(order);
     const token = signDownloadToken({
       orderId,
       expiresAtMs: expiresAt.getTime(),
     });
-    const keyEnvelope = await wrapFileKey(order, buyerPublicKeyJwk);
     const encryptedFileDownload = {
       url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
       expiresAt: expiresAt.toISOString(),
@@ -552,9 +649,7 @@ export async function claimTransfer(
     const response: TransferClaim = {
       order: publicOrder(order),
       manifest: manifestForOrder(order),
-      deliveryMode: requireNymDeliveryForClaim()
-        ? "nym"
-        : "http-dev-fallback",
+      deliveryMode: requireNymDeliveryForClaim() ? "nym" : "http-dev-fallback",
       nymDelivery,
     };
     if (response.deliveryMode === "http-dev-fallback") {
@@ -606,6 +701,7 @@ function markOrderPaid(order: TransferOrder, raw?: unknown): void {
 
 function publicOrder(order: TransferOrder): TransferPublicOrder {
   const delivery = normalizeDeliveryState(order.delivery);
+  const release = normalizeReleaseState(order.release);
   return {
     orderId: order.orderId,
     status: order.status,
@@ -658,6 +754,11 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
           }
         : null,
     },
+    release: {
+      mode: release.mode,
+      status: release.keyEnvelope ? "ready" : "seller_pending",
+      releasedAt: release.releasedAt,
+    },
   };
 }
 
@@ -680,46 +781,96 @@ function manifestForOrder(order: TransferOrder): TransferManifest {
   };
 }
 
-async function wrapFileKey(
+function releaseChallengeForOrder(
   order: TransferOrder,
-  buyerPublicKeyJwk: JsonWebKey,
-): Promise<TransferKeyEnvelope> {
-  const buyerPublicKey = await webcrypto.subtle.importKey(
-    "jwk",
-    buyerPublicKeyJwk,
-    { name: "ECDH", namedCurve: "P-256" },
-    false,
-    [],
-  );
-  const ephemeral = await webcrypto.subtle.generateKey(
-    { name: "ECDH", namedCurve: "P-256" },
-    true,
-    ["deriveKey"],
-  );
-  const wrappingKey = await webcrypto.subtle.deriveKey(
-    { name: "ECDH", public: buyerPublicKey },
-    ephemeral.privateKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt"],
-  );
-  const iv = randomBytes(12);
-  const fileKeyBytes = decodeBase64(order.encryption.fileKey, 32);
-  const ciphertext = await webcrypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    wrappingKey,
-    fileKeyBytes,
-  );
+): TransferReleaseChallenge {
+  const release = normalizeReleaseState(order.release);
+  const hasPaidBuyer = order.payment?.status === "paid";
+  const status = release.keyEnvelope
+    ? "released"
+    : hasPaidBuyer
+      ? "ready_to_release"
+      : order.payment
+        ? "waiting_for_payment"
+        : "waiting_for_buyer";
 
   return {
-    scheme: "p256-ecdh-aes-gcm-v1",
-    ephemeralPublicKeyJwk: await webcrypto.subtle.exportKey(
-      "jwk",
-      ephemeral.publicKey,
-    ),
-    iv: Buffer.from(iv).toString("base64"),
-    ciphertext: Buffer.from(ciphertext).toString("base64"),
+    order: publicOrder(order),
+    release: {
+      status,
+      buyerPublicKeyHash: order.payment?.buyerPublicKeyHash ?? null,
+      buyerPublicKeyJwk: hasPaidBuyer
+        ? (order.payment?.buyerPublicKeyJwk ?? null)
+        : null,
+      releasedAt: release.releasedAt,
+    },
   };
+}
+
+function claimKeyEnvelope(order: TransferOrder): TransferKeyEnvelope {
+  const release = normalizeReleaseState(order.release);
+  if (release.keyEnvelope) {
+    return release.keyEnvelope;
+  }
+  throw new ServerError(
+    "payment_required",
+    "Seller key release is pending for this paid private file",
+  );
+}
+
+function assertReleaseSecret(
+  order: TransferOrder,
+  releaseSecret: string,
+): void {
+  order.release = normalizeReleaseState(order.release);
+  if (!order.release.releaseSecretHash) {
+    throw new ServerError(
+      "validation",
+      "This paid private file does not support seller-held key release",
+    );
+  }
+  const actual = hashReleaseSecret(releaseSecret);
+  if (!safeEqual(actual, order.release.releaseSecretHash)) {
+    throw new ServerError("validation", "Invalid seller release secret");
+  }
+}
+
+function normalizeReleaseState(
+  value: TransferReleaseState | undefined,
+): TransferReleaseState {
+  return {
+    mode: "seller-held",
+    releaseSecretHash:
+      typeof value?.releaseSecretHash === "string"
+        ? value.releaseSecretHash
+        : null,
+    keyEnvelope: value?.keyEnvelope ?? null,
+    buyerPublicKeyHash:
+      typeof value?.buyerPublicKeyHash === "string"
+        ? value.buyerPublicKeyHash
+        : null,
+    releasedAt: typeof value?.releasedAt === "string" ? value.releasedAt : null,
+  };
+}
+
+function validateKeyEnvelope(value: TransferKeyEnvelope): void {
+  if (
+    !value ||
+    value.scheme !== "p256-ecdh-aes-gcm-v1" ||
+    typeof value.iv !== "string" ||
+    typeof value.ciphertext !== "string" ||
+    typeof value.ephemeralPublicKeyJwk !== "object" ||
+    value.ephemeralPublicKeyJwk === null ||
+    value.ephemeralPublicKeyJwk.kty !== "EC" ||
+    value.ephemeralPublicKeyJwk.crv !== "P-256"
+  ) {
+    throw new ServerError("validation", "Invalid key release envelope");
+  }
+  decodeBase64(value.iv, 12);
+  const ciphertext = Buffer.from(value.ciphertext, "base64");
+  if (ciphertext.byteLength < 16 || ciphertext.byteLength > 512) {
+    throw new ServerError("validation", "Invalid key release ciphertext");
+  }
 }
 
 function signDownloadToken(input: {
@@ -778,13 +929,19 @@ async function readOrder(orderId: string): Promise<TransferOrder> {
   validateOrderId(orderId);
   try {
     const raw = await readFile(orderPath(orderId), "utf8");
-    return JSON.parse(raw) as TransferOrder;
+    return normalizeStoredOrder(JSON.parse(raw) as TransferOrder);
   } catch (error) {
     if (isMissingFileError(error)) {
       throw new ServerError("validation", "Paid link not found");
     }
     throw error;
   }
+}
+
+function normalizeStoredOrder(order: TransferOrder): TransferOrder {
+  order.delivery = normalizeDeliveryState(order.delivery);
+  order.release = normalizeReleaseState(order.release);
+  return order;
 }
 
 async function writeOrder(order: TransferOrder): Promise<void> {
@@ -879,7 +1036,7 @@ function validateCreateTransferInput(input: CreateTransferOrderInput): void {
     );
   }
   decodeBase64(input.encryptionIv, 12);
-  decodeBase64(input.fileKey, 32);
+  normalizeHex(input.releaseSecretHash, 64, "seller release secret hash");
 }
 
 function normalizeDeliveryState(
@@ -891,7 +1048,9 @@ function normalizeDeliveryState(
     nymSession: value?.nymSession
       ? {
           transport: normalizeNymTransport(value.nymSession.transport),
-          buyerNymAddress: normalizeNymAddress(value.nymSession.buyerNymAddress),
+          buyerNymAddress: normalizeNymAddress(
+            value.nymSession.buyerNymAddress,
+          ),
           buyerPublicKeyHash: value.nymSession.buyerPublicKeyHash,
           status: value.nymSession.status,
           createdAt: value.nymSession.createdAt,
@@ -1024,6 +1183,14 @@ function normalizeHex(value: string, length: number, label: string): string {
 
 function hashBuyerPublicKey(value: JsonWebKey): string {
   return createHash("sha256").update(stableStringify(value)).digest("hex");
+}
+
+function hashReleaseSecret(value: string): string {
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.byteLength !== 32) {
+    throw new ServerError("validation", "Invalid seller release secret");
+  }
+  return sha256Hex(bytes);
 }
 
 function sha256Hex(bytes: Uint8Array): string {

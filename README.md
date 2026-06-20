@@ -4,7 +4,7 @@ Send a private file. The buyer pays in ZEC. Then the file opens locally.
 
 Paid Private File is a private commerce protocol for files: local encryption, ZEC payment, private key delivery, and local decryption. A seller encrypts a file locally, sets a ZEC price and payout address, and shares a private access link. A buyer opens the link, pays in ZEC, receives a wrapped file key through Nym, and decrypts on their own machine.
 
-Zcash is the payment rail. Nym is the private delivery rail. The server can store ciphertext and order state, but the product direction is seller-held keys and buyer-local opening.
+Zcash is the payment rail. Nym is the private delivery rail. The server stores ciphertext and order state but never holds the AES file key: custody is pure seller-held. The seller browser keeps the key in a local vault and, after payment, wraps it for the buyer and releases only that envelope. The buyer opens the file locally.
 
 ## Why It Exists
 
@@ -13,9 +13,10 @@ Most file-transfer tools separate payment, access control, and privacy. Paid Pri
 - private file upload
 - direct ZEC payment gating
 - automatic private receiver setup in the buyer flow
-- Nym-based wrapped-key release after payment
+- pure seller-held key custody (the server never holds or wraps the file key)
+- seller-side key wrapping and release after payment, delivered over Nym
 - local decryption by the buyer
-- no plaintext file storage on the server
+- no plaintext file storage and no file key on the server
 
 ## Product Flow
 
@@ -170,11 +171,13 @@ npm run build
 
 Prototype moving toward real `nym-claim-v1`. The system supports no-email seller workspaces, public seller routes, local encrypted-file order creation, seller wallet/price configuration, browser-side Nym receiver startup, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, standalone `nym-client` WebSocket delivery, local Nym outbox fallback, signed ciphertext URLs inside the Nym claim payload, and browser-side decryption. The integrated `zkglobalcredit.tech` implementation now uses the same lower-friction buyer direction: open link, auto-detect a private receiver when available, pay in ZEC, then open locally.
 
+Key custody is pure seller-held in every path: the server has no file key and no way to wrap it. The seller browser keeps `file_key` and `release_secret` in localStorage (`zectime_paid_link_seller_release_<orderId>`) and releases a buyer-wrapped key envelope via `POST /api/transfers/:orderId/key-release` after payment. The tradeoff is that the seller must keep the tab open to release the key; the seller panel auto-releases on payment confirmation and also exposes a manual "Release key" button. Until the seller releases, the buyer's claim is blocked with a clear "awaiting seller release" state.
+
 Before production, harden:
 
 - real CipherPay account configuration and webhook signatures
 - native Nym client / local receiver packaging
-- seller-held key release in every deployment path
+- seller key vault durability / recovery (release secret loss means the key cannot be released)
 - payment confirmation depth / finality semantics
 - file retention and deletion
 - abuse prevention

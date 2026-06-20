@@ -48,6 +48,14 @@ export async function POST(request: Request) {
       );
     }
 
+    // Pure seller-held custody: the server must never receive the AES file key.
+    if (form.has("fileKey")) {
+      throw new ServerError(
+        "validation",
+        "fileKey is not accepted; this paid private file is seller-held only",
+      );
+    }
+
     const order = await createTransferOrder({
       encryptedFile: new Uint8Array(await encryptedFile.arrayBuffer()),
       fileName: readFormString(form, "fileName") ?? "private-file",
@@ -58,7 +66,7 @@ export async function POST(request: Request) {
       originalSizeBytes: readFormNumber(form, "originalSizeBytes"),
       encryptedFileSha256: requireFormString(form, "encryptedFileSha256"),
       encryptionIv: requireFormString(form, "encryptionIv"),
-      fileKey: requireFormString(form, "fileKey"),
+      releaseSecretHash: requireFormString(form, "releaseSecretHash"),
       amountZats: readFormNumber(form, "amountZats"),
       sellerPayoutAddress,
       sellerNote: readFormString(form, "sellerNote"),
@@ -114,11 +122,18 @@ function readTimestampReceipt(form: FormData): TransferTimestampReceipt | null {
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+    ) {
       return parsed as TransferTimestampReceipt;
     }
   } catch {
-    throw new ServerError("validation", "timestampReceiptJson must be valid JSON");
+    throw new ServerError(
+      "validation",
+      "timestampReceiptJson must be valid JSON",
+    );
   }
   throw new ServerError("validation", "timestampReceiptJson must be an object");
 }

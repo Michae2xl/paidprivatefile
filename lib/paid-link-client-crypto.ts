@@ -17,6 +17,12 @@ export interface PaidLinkKeyEnvelope {
   ciphertext: string;
 }
 
+export interface PaidLinkSellerReleaseDraft {
+  releaseSecret: string;
+  releaseSecretHash: string;
+  fileKey: string;
+}
+
 const AES_GCM_IV_BYTES = 12;
 
 export async function encryptPaidLinkFile(
@@ -58,6 +64,60 @@ export async function createPaidLinkBuyerKeyPair(): Promise<PaidLinkBuyerKeyPair
   return {
     publicJwk: await crypto.subtle.exportKey("jwk", pair.publicKey),
     privateJwk: await crypto.subtle.exportKey("jwk", pair.privateKey),
+  };
+}
+
+export async function createPaidLinkSellerReleaseDraft(
+  fileKey: string,
+): Promise<PaidLinkSellerReleaseDraft> {
+  const secret = crypto.getRandomValues(new Uint8Array(32));
+  const digest = await crypto.subtle.digest("SHA-256", secret);
+
+  return {
+    releaseSecret: bytesToBase64(secret),
+    releaseSecretHash: bytesToHex(new Uint8Array(digest)),
+    fileKey,
+  };
+}
+
+export async function wrapPaidLinkFileKeyForBuyer(
+  fileKey: string,
+  buyerPublicJwk: JsonWebKey,
+): Promise<PaidLinkKeyEnvelope> {
+  const buyerPublicKey = await crypto.subtle.importKey(
+    "jwk",
+    buyerPublicJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    false,
+    [],
+  );
+  const ephemeral = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveKey"],
+  );
+  const wrappingKey = await crypto.subtle.deriveKey(
+    { name: "ECDH", public: buyerPublicKey },
+    ephemeral.privateKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt"],
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(AES_GCM_IV_BYTES));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    wrappingKey,
+    base64ToBytes(fileKey),
+  );
+
+  return {
+    scheme: "p256-ecdh-aes-gcm-v1",
+    ephemeralPublicKeyJwk: await crypto.subtle.exportKey(
+      "jwk",
+      ephemeral.publicKey,
+    ),
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
   };
 }
 
@@ -124,9 +184,7 @@ export function saveBuyerKeyPair(
   window.localStorage.setItem(storageKey(orderId), JSON.stringify(keyPair));
 }
 
-export function loadBuyerKeyPair(
-  orderId: string,
-): PaidLinkBuyerKeyPair | null {
+export function loadBuyerKeyPair(orderId: string): PaidLinkBuyerKeyPair | null {
   const raw = window.localStorage.getItem(storageKey(orderId));
   if (!raw) {
     return null;
@@ -147,8 +205,41 @@ export function loadBuyerKeyPair(
   return null;
 }
 
+export function saveSellerReleaseDraft(
+  orderId: string,
+  draft: PaidLinkSellerReleaseDraft,
+): void {
+  window.localStorage.setItem(sellerStorageKey(orderId), JSON.stringify(draft));
+}
+
+export function loadSellerReleaseDraft(
+  orderId: string,
+): PaidLinkSellerReleaseDraft | null {
+  const raw = window.localStorage.getItem(sellerStorageKey(orderId));
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as PaidLinkSellerReleaseDraft;
+    if (
+      typeof parsed.releaseSecret === "string" &&
+      typeof parsed.releaseSecretHash === "string" &&
+      typeof parsed.fileKey === "string"
+    ) {
+      return parsed;
+    }
+  } catch {
+    window.localStorage.removeItem(sellerStorageKey(orderId));
+  }
+  return null;
+}
+
 function storageKey(orderId: string): string {
   return `zectime_paid_link_buyer_key_${orderId}`;
+}
+
+function sellerStorageKey(orderId: string): string {
+  return `zectime_paid_link_seller_release_${orderId}`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {

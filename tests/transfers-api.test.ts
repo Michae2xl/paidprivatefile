@@ -3,7 +3,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { WebSocketServer } from "ws";
 
 import { POST as createTransferRoute } from "../app/api/transfers/route";
@@ -19,7 +27,13 @@ import { GET as fileRoute } from "../app/api/transfers/[orderId]/file/route";
 import { POST as nymSessionRoute } from "../app/api/transfers/[orderId]/nym-session/route";
 import { POST as paymentIntentRoute } from "../app/api/transfers/[orderId]/payment-intent/route";
 import { POST as cipherPayWebhookRoute } from "../app/api/webhooks/cipherpay/route";
+import { POST as keyReleaseRoute } from "../app/api/transfers/[orderId]/key-release/route";
 import { resetRateLimitStateForTesting } from "../lib/server/rate-limit";
+import {
+  createPaidLinkSellerReleaseDraft,
+  wrapPaidLinkFileKeyForBuyer,
+  type PaidLinkKeyEnvelope,
+} from "../lib/paid-link-client-crypto";
 
 interface TransferPublicOrder {
   orderId: string;
@@ -41,9 +55,28 @@ interface ErrorEnvelope {
 }
 
 let runtimeDir: string;
+let releaseDraft: {
+  releaseSecret: string;
+  releaseSecretHash: string;
+  fileKey: string;
+};
+
+beforeAll(() => {
+  // The client crypto lib uses window.btoa/window.atob; provide them in node.
+  const globalScope = globalThis as unknown as Record<string, unknown>;
+  if (typeof globalScope.window === "undefined") {
+    globalScope.window = {
+      btoa: (value: string) => Buffer.from(value, "binary").toString("base64"),
+      atob: (value: string) => Buffer.from(value, "base64").toString("binary"),
+    };
+  }
+});
 
 beforeEach(async () => {
   runtimeDir = await mkdtemp(join(tmpdir(), "paidprivatefile-test-"));
+  releaseDraft = await createPaidLinkSellerReleaseDraft(
+    randomBytes(32).toString("base64"),
+  );
   process.env.PAID_PRIVATE_FILE_RUNTIME_DIR = runtimeDir;
   process.env.PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET =
     "test-transfer-token-secret";
@@ -81,9 +114,7 @@ describe("/api/transfers", () => {
     expect(createBody.sharePath).toContain(createBody.order.orderId);
 
     const readResponse = await readTransferRoute(
-      new Request(
-        `http://localhost/api/transfers/${createBody.order.orderId}`,
-      ),
+      new Request(`http://localhost/api/transfers/${createBody.order.orderId}`),
       routeContext(createBody.order.orderId),
     );
     expect(readResponse.status).toBe(200);
@@ -122,11 +153,14 @@ describe("/api/transfers", () => {
     expect(paymentBody.order.status).toBe("payment_pending");
 
     const nymSessionResponse = await nymSessionRoute(
-      jsonRequest(`http://localhost/api/transfers/${order.orderId}/nym-session`, {
-        buyerNymAddress: testBuyerNymAddress(),
-        buyerPublicKeyJwk: keyPair.publicJwk,
-        transport: "nym-claim-v1",
-      }),
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
+      ),
       routeContext(order.orderId),
     );
     expect(nymSessionResponse.status).toBe(200);
@@ -147,13 +181,14 @@ describe("/api/transfers", () => {
     }
 
     const paidResponse = await devPayRoute(
-      new Request(
-        `http://localhost/api/transfers/${order.orderId}/dev-pay`,
-        { method: "POST" },
-      ),
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
       routeContext(order.orderId),
     );
     expect(paidResponse.status).toBe(200);
+
+    await releaseKeyForOrder(order.orderId);
 
     const claimResponse = await claimTransferRoute(
       jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
@@ -226,10 +261,9 @@ describe("/api/transfers", () => {
       routeContext(order.orderId),
     );
     await devPayRoute(
-      new Request(
-        `http://localhost/api/transfers/${order.orderId}/dev-pay`,
-        { method: "POST" },
-      ),
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
       routeContext(order.orderId),
     );
 
@@ -285,20 +319,24 @@ describe("/api/transfers", () => {
         routeContext(order.orderId),
       );
       await nymSessionRoute(
-        jsonRequest(`http://localhost/api/transfers/${order.orderId}/nym-session`, {
-          buyerNymAddress: testBuyerNymAddress(),
-          buyerPublicKeyJwk: keyPair.publicJwk,
-          transport: "nym-claim-v1",
-        }),
-        routeContext(order.orderId),
-      );
-      await devPayRoute(
-        new Request(
-          `http://localhost/api/transfers/${order.orderId}/dev-pay`,
-          { method: "POST" },
+        jsonRequest(
+          `http://localhost/api/transfers/${order.orderId}/nym-session`,
+          {
+            buyerNymAddress: testBuyerNymAddress(),
+            buyerPublicKeyJwk: keyPair.publicJwk,
+            transport: "nym-claim-v1",
+          },
         ),
         routeContext(order.orderId),
       );
+      await devPayRoute(
+        new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+          method: "POST",
+        }),
+        routeContext(order.orderId),
+      );
+
+      await releaseKeyForOrder(order.orderId);
 
       const claimResponse = await claimTransferRoute(
         jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
@@ -359,20 +397,24 @@ describe("/api/transfers", () => {
       routeContext(order.orderId),
     );
     await nymSessionRoute(
-      jsonRequest(`http://localhost/api/transfers/${order.orderId}/nym-session`, {
-        buyerNymAddress: testBuyerNymAddress(),
-        buyerPublicKeyJwk: keyPair.publicJwk,
-        transport: "nym-claim-v1",
-      }),
-      routeContext(order.orderId),
-    );
-    await devPayRoute(
-      new Request(
-        `http://localhost/api/transfers/${order.orderId}/dev-pay`,
-        { method: "POST" },
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
       ),
       routeContext(order.orderId),
     );
+    await devPayRoute(
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
+      routeContext(order.orderId),
+    );
+
+    await releaseKeyForOrder(order.orderId);
 
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -483,7 +525,7 @@ function makeCreateRequest(headers?: HeadersInit): Request {
   form.set("originalSizeBytes", "123");
   form.set("encryptedFileSha256", sha256Hex(encrypted));
   form.set("encryptionIv", randomBytes(12).toString("base64"));
-  form.set("fileKey", randomBytes(32).toString("base64"));
+  form.set("releaseSecretHash", releaseDraft.releaseSecretHash);
   form.set("amountZats", "5000000");
   form.set("sellerPayoutAddress", testSellerPayoutAddress());
   form.set("sellerNote", "private delivery");
@@ -520,6 +562,39 @@ async function createBuyerKeyPair(): Promise<{
     publicJwk: await webcrypto.subtle.exportKey("jwk", pair.publicKey),
     privateJwk: await webcrypto.subtle.exportKey("jwk", pair.privateKey),
   };
+}
+
+async function releaseKeyForOrder(orderId: string): Promise<void> {
+  const statusResponse = await keyReleaseRoute(
+    jsonRequest(`http://localhost/api/transfers/${orderId}/key-release`, {
+      releaseSecret: releaseDraft.releaseSecret,
+    }),
+    routeContext(orderId),
+  );
+  if (statusResponse.status !== 200) {
+    throw new Error(`key-release status failed: ${statusResponse.status}`);
+  }
+  const challenge = (await statusResponse.json()) as {
+    release: { status: string; buyerPublicKeyJwk: JsonWebKey | null };
+  };
+  if (challenge.release.status !== "ready_to_release") {
+    throw new Error(`order not ready to release: ${challenge.release.status}`);
+  }
+  const keyEnvelope: PaidLinkKeyEnvelope = await wrapPaidLinkFileKeyForBuyer(
+    releaseDraft.fileKey,
+    challenge.release.buyerPublicKeyJwk as JsonWebKey,
+  );
+  const releaseResponse = await keyReleaseRoute(
+    jsonRequest(`http://localhost/api/transfers/${orderId}/key-release`, {
+      action: "release",
+      releaseSecret: releaseDraft.releaseSecret,
+      keyEnvelope,
+    }),
+    routeContext(orderId),
+  );
+  if (releaseResponse.status !== 200) {
+    throw new Error(`key-release action failed: ${releaseResponse.status}`);
+  }
 }
 
 function routeContext(orderId: string) {

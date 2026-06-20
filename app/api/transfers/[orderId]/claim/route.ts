@@ -13,11 +13,15 @@ interface RouteContext {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const throttled = enforceRateLimit(request, "transfers/claim", RATE_LIMIT);
+  const { orderId } = await context.params;
+  const throttled = enforceRateLimit(
+    request,
+    `transfers/claim:${orderId}`,
+    RATE_LIMIT,
+  );
   if (throttled) return throttled;
 
   try {
-    const { orderId } = await context.params;
     const payload = await readLimitedJsonObject(request, MAX_BODY_BYTES);
     const buyerPublicKeyJwk = payload.buyerPublicKeyJwk as JsonWebKey;
     return NextResponse.json(await claimTransfer(orderId, buyerPublicKeyJwk));

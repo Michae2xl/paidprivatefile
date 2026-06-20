@@ -11,11 +11,15 @@ import {
 
 import {
   createPaidLinkBuyerKeyPair,
+  createPaidLinkSellerReleaseDraft,
   decryptPaidLinkFile,
   decryptPaidLinkFileKey,
   encryptPaidLinkFile,
   loadBuyerKeyPair,
+  loadSellerReleaseDraft,
   saveBuyerKeyPair,
+  saveSellerReleaseDraft,
+  wrapPaidLinkFileKeyForBuyer,
   type PaidLinkBuyerKeyPair,
   type PaidLinkKeyEnvelope,
 } from "../../../lib/paid-link-client-crypto";
@@ -73,6 +77,25 @@ interface TransferPublicOrder {
       createdAt: string;
       updatedAt: string;
     } | null;
+  };
+  release: {
+    mode: "seller-held";
+    status: "seller_pending" | "ready";
+    releasedAt: string | null;
+  };
+}
+
+interface KeyReleaseResponse {
+  order: TransferPublicOrder;
+  release: {
+    status:
+      | "waiting_for_payment"
+      | "waiting_for_buyer"
+      | "ready_to_release"
+      | "released";
+    buyerPublicKeyHash: string | null;
+    buyerPublicKeyJwk: JsonWebKey | null;
+    releasedAt: string | null;
   };
 }
 
@@ -176,6 +199,7 @@ type BusyAction =
   | "payment"
   | "nym"
   | "seller"
+  | "release"
   | "unlocking";
 type BrowserNymStatus = "idle" | "starting" | "ready" | "waiting" | "error";
 
@@ -219,10 +243,12 @@ export function PaidPrivateFilePanel({
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFileName, setDownloadFileName] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  const [releaseMessage, setReleaseMessage] = useState("");
   const [nymStatus, setNymStatus] = useState<BrowserNymStatus>("idle");
   const [nymMessage, setNymMessage] = useState("");
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
+  const autoReleaseRef = useRef(false);
 
   useEffect(() => {
     if (!initialOrderId) {
@@ -286,9 +312,12 @@ export function PaidPrivateFilePanel({
 
   async function loadSellerSession() {
     try {
-      const body = await postJson<SellerSessionResponse>("/api/seller-session", {
-        method: "GET",
-      });
+      const body = await postJson<SellerSessionResponse>(
+        "/api/seller-session",
+        {
+          method: "GET",
+        },
+      );
       if (body.seller) {
         applySeller(body.seller);
       }
@@ -400,6 +429,12 @@ export function PaidPrivateFilePanel({
     try {
       const timestampDraft = await createClientTimestampDraft(file);
       const encrypted = await encryptPaidLinkFile(file);
+      // Pure seller-held custody: the AES file key never leaves this browser.
+      // We only upload the SHA-256 of a random release secret; the actual file
+      // key stays in the local seller vault until the seller releases it.
+      const releaseDraft = await createPaidLinkSellerReleaseDraft(
+        encrypted.fileKey,
+      );
       const form = new FormData();
       form.set("encryptedFile", encrypted.encryptedFile, `${file.name}.enc`);
       form.set("fileName", file.name);
@@ -407,7 +442,7 @@ export function PaidPrivateFilePanel({
       form.set("originalSizeBytes", String(file.size));
       form.set("encryptedFileSha256", encrypted.encryptedFileSha256);
       form.set("encryptionIv", encrypted.encryptionIv);
-      form.set("fileKey", encrypted.fileKey);
+      form.set("releaseSecretHash", releaseDraft.releaseSecretHash);
       form.set("amountZats", String(amountZats));
       form.set("sellerPayoutAddress", sellerPayoutAddress.trim());
       form.set("sellerNote", sellerNote);
@@ -417,6 +452,7 @@ export function PaidPrivateFilePanel({
         method: "POST",
         body: form,
       });
+      saveSellerReleaseDraft(body.order.orderId, releaseDraft);
       const href = new URL(
         withProductLocale(body.sharePath, locale),
         window.location.origin,
@@ -705,6 +741,159 @@ export function PaidPrivateFilePanel({
     return next;
   }
 
+  async function onReleaseSellerKey(
+    order: TransferPublicOrder,
+    options?: { silent?: boolean },
+  ): Promise<void> {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setErrorMessage("");
+    }
+    setReleaseMessage("");
+    setBusyAction("release");
+    try {
+      const draft = loadSellerReleaseDraft(order.orderId);
+      if (!draft) {
+        throw new Error(
+          locale === "pt"
+            ? "Esta maquina nao tem o segredo local do vendedor para liberar a chave."
+            : "This browser does not hold the seller release secret for this file.",
+        );
+      }
+
+      const challenge = await postJson<KeyReleaseResponse>(
+        `/api/transfers/${encodeURIComponent(order.orderId)}/key-release`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ releaseSecret: draft.releaseSecret }),
+        },
+      );
+      applyOrderState(challenge.order);
+      if (challenge.release.status === "released") {
+        setReleaseMessage(formatReleaseStatus("released", locale));
+        return;
+      }
+      if (challenge.release.status !== "ready_to_release") {
+        const message = formatReleaseStatus(challenge.release.status, locale);
+        if (silent) {
+          setReleaseMessage(message);
+        } else {
+          throw new Error(message);
+        }
+        return;
+      }
+      if (!challenge.release.buyerPublicKeyJwk) {
+        throw new Error(
+          locale === "pt"
+            ? "A chave publica do comprador ainda nao esta disponivel."
+            : "The buyer public key is not available yet.",
+        );
+      }
+
+      const keyEnvelope = await wrapPaidLinkFileKeyForBuyer(
+        draft.fileKey,
+        challenge.release.buyerPublicKeyJwk,
+      );
+      const released = await postJson<KeyReleaseResponse>(
+        `/api/transfers/${encodeURIComponent(order.orderId)}/key-release`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "release",
+            releaseSecret: draft.releaseSecret,
+            keyEnvelope,
+          }),
+        },
+      );
+      applyOrderState(released.order);
+      setReleaseMessage(formatReleaseStatus("released", locale));
+    } catch (error) {
+      if (silent) {
+        setReleaseMessage(formatError(error, copy.errors.serverError));
+      } else {
+        setErrorMessage(formatError(error, copy.errors.serverError));
+      }
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
+  function applyOrderState(order: TransferPublicOrder): void {
+    if (mode === "send") {
+      setCreatedOrder(order);
+    }
+    setLoadedOrder(order);
+    setPayment(order.payment);
+  }
+
+  // Seller-online polling: while the created order still awaits seller key
+  // release, the seller's tab polls the public order status so the auto-release
+  // effect below can fire as soon as payment is confirmed.
+  useEffect(() => {
+    if (mode !== "send" || !createdOrder) {
+      return;
+    }
+    if (createdOrder.release?.status !== "seller_pending") {
+      return;
+    }
+    if (!loadSellerReleaseDraft(createdOrder.orderId)) {
+      return;
+    }
+    const orderId = createdOrder.orderId;
+    let active = true;
+    const interval = window.setInterval(() => {
+      void (async () => {
+        try {
+          const body = await postJson<{ order: TransferPublicOrder }>(
+            `/api/transfers/${encodeURIComponent(orderId)}`,
+            { method: "GET" },
+          );
+          if (active) {
+            setCreatedOrder(body.order);
+          }
+        } catch {
+          // Transient polling failures are non-fatal; retry on next tick.
+        }
+      })();
+    }, 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, createdOrder?.orderId, createdOrder?.release?.status]);
+
+  // Seller-online auto release: when the seller's tab detects that payment is
+  // confirmed but the key has not been released yet, and this browser holds the
+  // local release secret, wrap and release the key automatically.
+  useEffect(() => {
+    const order = createdOrder ?? loadedOrder;
+    if (!order) {
+      return;
+    }
+    const paymentPaid =
+      order.payment?.status === "paid" ||
+      order.status === "paid" ||
+      order.status === "claimed";
+    const needsRelease = order.release?.status === "seller_pending";
+    if (!paymentPaid || !needsRelease) {
+      autoReleaseRef.current = false;
+      return;
+    }
+    if (autoReleaseRef.current || busyAction !== "idle") {
+      return;
+    }
+    if (!loadSellerReleaseDraft(order.orderId)) {
+      return;
+    }
+    autoReleaseRef.current = true;
+    void onReleaseSellerKey(order, { silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createdOrder, loadedOrder, busyAction]);
+
   const isBusy = busyAction !== "idle";
   const mustAcknowledgeAccessKey =
     Boolean(newSellerAccessKey) && !accessKeyAcknowledged;
@@ -724,9 +913,7 @@ export function PaidPrivateFilePanel({
 
       <header className="frame zk-hub-topbar surface-reveal">
         <div className="zk-hub-topbar-brand">
-          <p className="eyebrow zk-hub-topbar-eyebrow">
-            {copy.shell.eyebrow}
-          </p>
+          <p className="eyebrow zk-hub-topbar-eyebrow">{copy.shell.eyebrow}</p>
           <Link
             className="zk-hub-topbar-back"
             href={withProductLocale(backHref, locale)}
@@ -735,14 +922,14 @@ export function PaidPrivateFilePanel({
           </Link>
         </div>
         <div className="zk-hub-topbar-tools">
-          <div className="zectime-topbar-logos" aria-label={copy.brand.railLabel}>
+          <div
+            className="zectime-topbar-logos"
+            aria-label={copy.brand.railLabel}
+          >
             <BrandMark kind="zcash" label={copy.brand.zcash} />
             <BrandMark kind="nym" label={copy.brand.nym} />
           </div>
-          <ProductLocaleToggle
-            locale={locale}
-            ariaLabel={copy.shell.eyebrow}
-          />
+          <ProductLocaleToggle locale={locale} ariaLabel={copy.shell.eyebrow} />
         </div>
       </header>
 
@@ -839,7 +1026,9 @@ export function PaidPrivateFilePanel({
                       </span>
                       <input
                         value={sellerHandle}
-                        onChange={(event) => setSellerHandle(event.target.value)}
+                        onChange={(event) =>
+                          setSellerHandle(event.target.value)
+                        }
                         placeholder={copy.seller.handlePlaceholder}
                         disabled={isBusy}
                       />
@@ -1050,6 +1239,15 @@ export function PaidPrivateFilePanel({
                   </a>
                 </div>
                 <OrderDetails order={createdOrder} copy={copy} />
+
+                <SellerReleasePanel
+                  order={createdOrder}
+                  locale={locale}
+                  busy={busyAction === "release"}
+                  releaseMessage={releaseMessage}
+                  onRelease={() => void onReleaseSellerKey(createdOrder)}
+                  disabled={isBusy}
+                />
               </div>
             ) : null}
           </section>
@@ -1073,7 +1271,7 @@ export function PaidPrivateFilePanel({
                   placeholder={copy.receive.orderPlaceholder}
                   disabled={isBusy}
                 />
-                </label>
+              </label>
               <div className="zectime-nym-receiver">
                 <div>
                   <p className="eyebrow">{copy.receive.privateReceiverLabel}</p>
@@ -1111,7 +1309,11 @@ export function PaidPrivateFilePanel({
                   </span>
                 </label>
               ) : null}
-              <button className="button-secondary" type="submit" disabled={isBusy}>
+              <button
+                className="button-secondary"
+                type="submit"
+                disabled={isBusy}
+              >
                 {busyAction === "loading"
                   ? `${copy.receive.loadLabel}...`
                   : copy.receive.loadLabel}
@@ -1131,14 +1333,26 @@ export function PaidPrivateFilePanel({
                         ? copy.receive.paidStatus
                         : copy.receive.pendingStatus}
                     </p>
-                    {payment ? <PaymentDetails payment={payment} copy={copy} /> : null}
+                    {payment ? (
+                      <PaymentDetails payment={payment} copy={copy} />
+                    ) : null}
+                    {loadedOrder.payment?.status === "paid" &&
+                    loadedOrder.release?.status === "seller_pending" ? (
+                      <p className="zk-hub-form-hint">
+                        {locale === "pt"
+                          ? "Pagamento confirmado. Aguardando o vendedor liberar a chave (custodia do vendedor)."
+                          : "Payment confirmed. Awaiting seller key release (seller-held custody)."}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="zectime-paid-actions">
                     <button
                       type="button"
                       className="button-secondary"
                       onClick={() => void onCreatePayment()}
-                      disabled={isBusy || loadedOrder.payment?.status === "paid"}
+                      disabled={
+                        isBusy || loadedOrder.payment?.status === "paid"
+                      }
                     >
                       {busyAction === "payment"
                         ? `${copy.receive.payLabel}...`
@@ -1257,13 +1471,7 @@ function SellerShopArt({
   );
 }
 
-function BrandMark({
-  kind,
-  label,
-}: {
-  kind: "zcash" | "nym";
-  label: string;
-}) {
+function BrandMark({ kind, label }: { kind: "zcash" | "nym"; label: string }) {
   return (
     <span className={`zectime-brand-mark zectime-brand-mark-${kind}`}>
       {kind === "zcash" ? (
@@ -1463,6 +1671,71 @@ function PaymentDetails({
   );
 }
 
+function SellerReleasePanel({
+  order,
+  locale,
+  busy,
+  releaseMessage,
+  onRelease,
+  disabled,
+}: {
+  order: TransferPublicOrder;
+  locale: ProductLocale;
+  busy: boolean;
+  releaseMessage: string;
+  onRelease: () => void;
+  disabled: boolean;
+}) {
+  const pt = locale === "pt";
+  const released = order.release?.status === "ready";
+  const paymentPaid =
+    order.payment?.status === "paid" ||
+    order.status === "paid" ||
+    order.status === "claimed";
+
+  const statusLine = released
+    ? formatReleaseStatus("released", locale)
+    : paymentPaid
+      ? formatReleaseStatus("ready_to_release", locale)
+      : order.payment
+        ? formatReleaseStatus("waiting_for_payment", locale)
+        : formatReleaseStatus("waiting_for_buyer", locale);
+
+  return (
+    <div className="zectime-key-vault">
+      <div>
+        <p className="eyebrow">
+          {pt ? "Custodia do vendedor" : "Seller-held key custody"}
+        </p>
+        <p>
+          {pt
+            ? "A chave do arquivo fica neste navegador e e embrulhada para o comprador aqui; o servidor nao a recebe diretamente. Mantenha esta aba aberta: a chave e liberada automaticamente quando o pagamento for confirmado."
+            : "The file key stays in this browser and is wrapped for the buyer here; the server is not given it directly. Keep this tab open: the key is released automatically once payment is confirmed."}
+        </p>
+      </div>
+      <p className="zk-hub-form-hint">{releaseMessage || statusLine}</p>
+      {!released ? (
+        <div className="zectime-paid-actions">
+          <button
+            type="button"
+            className="button-secondary"
+            onClick={onRelease}
+            disabled={disabled || busy || !paymentPaid}
+          >
+            {busy
+              ? pt
+                ? "Liberando chave..."
+                : "Releasing key..."
+              : pt
+                ? "Liberar chave"
+                : "Release key"}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 class ApiError extends Error {
   readonly status: number;
 
@@ -1494,6 +1767,36 @@ async function readResponseBody(response: Response): Promise<unknown> {
     return JSON.parse(text) as unknown;
   } catch {
     return { raw: text };
+  }
+}
+
+function formatReleaseStatus(
+  status:
+    | "waiting_for_payment"
+    | "waiting_for_buyer"
+    | "ready_to_release"
+    | "released",
+  locale: ProductLocale,
+): string {
+  const pt = locale === "pt";
+  switch (status) {
+    case "released":
+      return pt
+        ? "Chave liberada. O comprador ja pode abrir o arquivo."
+        : "Key released. The buyer can now open the file.";
+    case "ready_to_release":
+      return pt
+        ? "Pagamento confirmado. Liberando a chave para o comprador."
+        : "Payment confirmed. Releasing the key to the buyer.";
+    case "waiting_for_payment":
+      return pt
+        ? "Aguardando confirmacao do pagamento antes de liberar a chave."
+        : "Waiting for payment confirmation before the key can be released.";
+    case "waiting_for_buyer":
+    default:
+      return pt
+        ? "Aguardando o comprador iniciar o pagamento."
+        : "Waiting for the buyer to start the payment.";
   }
 }
 

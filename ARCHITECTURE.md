@@ -6,7 +6,9 @@ Paid Private File is a paid private file-delivery system:
 
 > ZEC payment unlocks private Nym delivery. The file opens only locally.
 
-The core invariant is simple: payment unlocks a private Nym delivery session. The server may store ciphertext and payment metadata, but it must not release key material outside a buyer-bound Nym session after payment confirmation.
+The core invariant is simple: payment unlocks a private Nym delivery session, and the AES file key is held only by the seller's browser. The server stores ciphertext and payment metadata, but it never holds, wraps, or sees the file key. After payment, the seller's browser wraps the key for the buyer and releases only that buyer-bound envelope, which the API then delivers inside a Nym session.
+
+This is **pure seller-held custody**: there is no server-held key path. Orders are created with a `release_secret_hash` only (the SHA-256 of a random release secret). The seller browser keeps the raw `file_key` and `release_secret` in a local vault and is the only party that can produce the wrapped key envelope. The tradeoff is that the seller must be online (the tab open) to release the key after payment; the panel auto-releases on payment confirmation and also offers a manual "Release key" button.
 
 ## Components
 
@@ -25,8 +27,11 @@ Transfer API
   - stores ciphertext
   - exposes public order metadata
   - creates payment intents
+  - records buyer public key on the payment intent
+  - discloses the buyer public key to the seller only after payment
+  - stores the seller-released buyer-wrapped key envelope (never the file key)
   - requires Nym delivery session before claim
-  - queues wrapped key delivery after payment
+  - queues the seller-released wrapped key envelope after payment
 
 Transfer store
   - persists order JSON
@@ -128,7 +133,7 @@ State definitions:
 - `paid`: payment provider confirmed payment.
 - `claimed`: buyer successfully received a wrapped file key.
 
-The API must reject key claims before `paid`.
+The API must reject key claims before `paid`, and also before the seller has released the key (claim returns `payment_required` while `release.status` is `seller_pending`).
 
 ## Seller-Side Flow
 
@@ -242,6 +247,7 @@ POST /api/transfers
 GET  /api/transfers/:orderId
 POST /api/transfers/:orderId/payment-intent
 POST /api/transfers/:orderId/nym-session
+POST /api/transfers/:orderId/key-release
 POST /api/transfers/:orderId/claim
 GET  /api/transfers/:orderId/file?token=...
 POST /api/transfers/:orderId/dev-pay
@@ -253,7 +259,9 @@ GET  /api/sellers/me
 PATCH /api/sellers/me
 ```
 
-Request:
+`POST /api/transfers` requires `releaseSecretHash` (64-char hex) and rejects any `fileKey` field.
+
+Nym session request:
 
 ```json
 {
@@ -263,15 +271,41 @@ Request:
 }
 ```
 
-Response:
+### Seller key release: `POST /api/transfers/:orderId/key-release`
+
+Two actions on one endpoint, both authenticated with the seller `releaseSecret` (the base64 32-byte secret whose SHA-256 is the stored `release_secret_hash`; compared timing-safely).
+
+Status (no `action`, or `action: "status"`):
+
+```json
+{ "releaseSecret": "<base64-32>" }
+```
+
+returns the release challenge:
 
 ```json
 {
-  "orderId": "pl_...",
-  "transport": "nym-claim-v1",
-  "status": "waiting_for_payment"
+  "order": { "...": "public order" },
+  "release": {
+    "status": "waiting_for_buyer | waiting_for_payment | ready_to_release | released",
+    "buyerPublicKeyHash": "<hex|null>",
+    "buyerPublicKeyJwk": { "...": "P-256 JWK, only when paid" },
+    "releasedAt": "<iso|null>"
+  }
 }
 ```
+
+`buyerPublicKeyJwk` is disclosed only once the order is `paid`. Release (`action: "release"`):
+
+```json
+{
+  "action": "release",
+  "releaseSecret": "<base64-32>",
+  "keyEnvelope": { "scheme": "p256-ecdh-aes-gcm-v1", "...": "..." }
+}
+```
+
+stores the buyer-wrapped envelope and returns the challenge with `status: "released"`. Release requires `payment.status === "paid"`; otherwise it returns `payment_required`.
 
 ## Storage Layout
 
@@ -308,15 +342,30 @@ Server may see:
 - payment status
 - timestamp commitment
 
-Server should not see:
+Server never sees:
 
 - plaintext file bytes
+- the AES file key (`file_key`)
+- the seller release secret (`release_secret`)
 - buyer decrypted output
 - buyer private key
 
-Important caveat: older prototype deployments store the raw file key server-side until claim so they can wrap the key after payment. The preferred current design is seller-held key release: the API stores `release_secret_hash`, the seller client keeps `file_key` and `release_secret`, and after payment the seller releases only a buyer-wrapped key envelope.
+Key custody is **pure seller-held**. There is no `wrapFileKey` path on the server and no `encryption.fileKey` field in `order.json`. Order creation requires `release_secret_hash` and explicitly rejects any uploaded `fileKey`. The flow is:
 
-Nym improves transport privacy, but it does not remove the need to harden key custody. The clean long-term design is buyer pre-key negotiation plus seller-side wrapping, with Nym used to deliver the encrypted key material privately.
+1. Seller browser encrypts the file, derives a random `release_secret`, and uploads only `release_secret_hash` plus the ciphertext and IV. The raw `file_key` and `release_secret` are saved in a local seller vault (localStorage key `zectime_paid_link_seller_release_<orderId>`).
+2. Buyer pays. The payment intent records the buyer P-256 public key (`buyerPublicKeyJwk`) on the order.
+3. Seller browser calls the key-release endpoint, which discloses the buyer public key only once payment is confirmed, wraps `file_key` for that buyer with ECDH-ES, and posts the envelope back.
+4. On claim, the API returns the seller-released envelope. If the seller has not released yet, claim fails with `payment_required` ("Seller key release is pending for this paid private file").
+
+Key release is **monotonic**: once an envelope is released it cannot be replaced (`releaseTransferKey` rejects a second release or release after claim), so a leaked `release_secret` cannot swap the file for a buyer after the sale.
+
+Nym is used to deliver the seller-wrapped key envelope privately after payment.
+
+### Threat model and its limit (important)
+
+Seller-held custody removes the server's access to the key **against an honest-but-curious server**: in normal operation the server only ever stores `release_secret_hash` and an opaque, client-produced ECDH envelope it cannot decrypt (it has no buyer private key). It does NOT hold the raw `file_key` at rest, in memory, or in logs.
+
+It is **not** unconditionally trustless. The server is the source of the buyer public key that the seller wraps to, and the seller does not authenticate that key out-of-band. A **malicious or compromised server (or a MITM on the seller's session)** can substitute its own P-256 public key in the release challenge; the seller browser would wrap `file_key` to it, letting the server decrypt and recover the plaintext key (then re-wrap to the real buyer). Fully defending against this requires authenticating the buyer key to the seller (e.g. a buyer-confirmed key fingerprint or a buyer signature) — a deliberate future hardening. UI copy is scoped accordingly: the server is _not given the key directly_, rather than an absolute "never receives it" claim.
 
 ## Production Hardening
 
