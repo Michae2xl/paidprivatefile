@@ -15,6 +15,7 @@ import {
   decryptPaidLinkFile,
   decryptPaidLinkFileKey,
   encryptPaidLinkFile,
+  fingerprintPaidLinkPublicKey,
   loadBuyerKeyPair,
   loadSellerReleaseDraft,
   saveBuyerKeyPair,
@@ -246,6 +247,10 @@ export function PaidPrivateFilePanel({
   const [releaseMessage, setReleaseMessage] = useState("");
   const [nymStatus, setNymStatus] = useState<BrowserNymStatus>("idle");
   const [nymMessage, setNymMessage] = useState("");
+  const [buyerVerificationCode, setBuyerVerificationCode] = useState("");
+  const [buyerKeyEpoch, setBuyerKeyEpoch] = useState(0);
+  const [sellerBuyerCode, setSellerBuyerCode] = useState("");
+  const [sellerCodeConfirmed, setSellerCodeConfirmed] = useState(false);
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   const autoReleaseRef = useRef(false);
@@ -265,6 +270,37 @@ export function PaidPrivateFilePanel({
       }
     };
   }, [downloadUrl]);
+
+  // Buyer self-verification: derive the buyer's OWN public-key fingerprint so it
+  // can be compared out-of-band with the code the seller sees. If they match,
+  // the server did not substitute the buyer key the seller wraps to.
+  useEffect(() => {
+    const orderId = loadedOrder?.orderId;
+    if (mode !== "receive" || !orderId) {
+      setBuyerVerificationCode("");
+      return;
+    }
+    const keyPair = loadBuyerKeyPair(orderId);
+    if (!keyPair) {
+      setBuyerVerificationCode("");
+      return;
+    }
+    let active = true;
+    void fingerprintPaidLinkPublicKey(keyPair.publicJwk)
+      .then((code) => {
+        if (active) {
+          setBuyerVerificationCode(code);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setBuyerVerificationCode("");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [mode, loadedOrder?.orderId, buyerKeyEpoch]);
 
   useEffect(() => {
     const savedPayoutAddress = window.localStorage.getItem(
@@ -509,6 +545,7 @@ export function PaidPrivateFilePanel({
     setBusyAction("payment");
     try {
       const keyPair = await getOrCreateBuyerKeyPair(loadedOrder.orderId);
+      setBuyerKeyEpoch((current) => current + 1);
       const nymAddress = buyerNymAddress.trim() || (await startBrowserNym());
       await postJson<{ order: TransferPublicOrder }>(
         `/api/transfers/${encodeURIComponent(loadedOrder.orderId)}/nym-session`,
@@ -739,6 +776,56 @@ export function PaidPrivateFilePanel({
     const next = await createPaidLinkBuyerKeyPair();
     saveBuyerKeyPair(orderId, next);
     return next;
+  }
+
+  // Verified manual release: fetch the key-release challenge (status only) so
+  // the seller can SEE the buyer-key fingerprint and compare it out-of-band with
+  // the code the buyer reads. A mismatch exposes a server key substitution.
+  async function onRevealBuyerCode(order: TransferPublicOrder): Promise<void> {
+    setErrorMessage("");
+    setReleaseMessage("");
+    setBusyAction("release");
+    try {
+      const draft = loadSellerReleaseDraft(order.orderId);
+      if (!draft) {
+        throw new Error(
+          locale === "pt"
+            ? "Esta maquina nao tem o segredo local do vendedor para liberar a chave."
+            : "This browser does not hold the seller release secret for this file.",
+        );
+      }
+      const challenge = await postJson<KeyReleaseResponse>(
+        `/api/transfers/${encodeURIComponent(order.orderId)}/key-release`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ releaseSecret: draft.releaseSecret }),
+        },
+      );
+      applyOrderState(challenge.order);
+      if (challenge.release.status !== "ready_to_release") {
+        setReleaseMessage(
+          formatReleaseStatus(challenge.release.status, locale),
+        );
+        return;
+      }
+      if (!challenge.release.buyerPublicKeyJwk) {
+        throw new Error(
+          locale === "pt"
+            ? "A chave publica do comprador ainda nao esta disponivel."
+            : "The buyer public key is not available yet.",
+        );
+      }
+      const code = await fingerprintPaidLinkPublicKey(
+        challenge.release.buyerPublicKeyJwk,
+      );
+      setSellerBuyerCode(code);
+      setSellerCodeConfirmed(false);
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    } finally {
+      setBusyAction("idle");
+    }
   }
 
   async function onReleaseSellerKey(
@@ -1245,6 +1332,10 @@ export function PaidPrivateFilePanel({
                   locale={locale}
                   busy={busyAction === "release"}
                   releaseMessage={releaseMessage}
+                  buyerCode={sellerBuyerCode}
+                  codeConfirmed={sellerCodeConfirmed}
+                  onConfirmCodeChange={setSellerCodeConfirmed}
+                  onRevealCode={() => void onRevealBuyerCode(createdOrder)}
                   onRelease={() => void onReleaseSellerKey(createdOrder)}
                   disabled={isBusy}
                 />
@@ -1343,6 +1434,21 @@ export function PaidPrivateFilePanel({
                           ? "Pagamento confirmado. Aguardando o vendedor liberar a chave (custodia do vendedor)."
                           : "Payment confirmed. Awaiting seller key release (seller-held custody)."}
                       </p>
+                    ) : null}
+                    {buyerVerificationCode ? (
+                      <div className="zectime-verification-code">
+                        <p className="eyebrow">
+                          {locale === "pt"
+                            ? "Codigo de verificacao"
+                            : "Verification code"}
+                        </p>
+                        <code>{buyerVerificationCode}</code>
+                        <p className="zk-hub-form-hint">
+                          {locale === "pt"
+                            ? "Codigo de verificacao acima. Se quiser confirmar um canal privado, passe este codigo ao vendedor antes de ele liberar a chave."
+                            : "Verification code above. To confirm a private channel, share this code with the seller before they release the key."}
+                        </p>
+                      </div>
                     ) : null}
                   </div>
                   <div className="zectime-paid-actions">
@@ -1676,6 +1782,10 @@ function SellerReleasePanel({
   locale,
   busy,
   releaseMessage,
+  buyerCode,
+  codeConfirmed,
+  onConfirmCodeChange,
+  onRevealCode,
   onRelease,
   disabled,
 }: {
@@ -1683,6 +1793,10 @@ function SellerReleasePanel({
   locale: ProductLocale;
   busy: boolean;
   releaseMessage: string;
+  buyerCode: string;
+  codeConfirmed: boolean;
+  onConfirmCodeChange: (confirmed: boolean) => void;
+  onRevealCode: () => void;
   onRelease: () => void;
   disabled: boolean;
 }) {
@@ -1715,21 +1829,68 @@ function SellerReleasePanel({
       </div>
       <p className="zk-hub-form-hint">{releaseMessage || statusLine}</p>
       {!released ? (
+        <p className="zk-hub-form-hint">
+          {pt
+            ? "Liberacao automatica confia na chave informada pelo servidor; para verificacao forte, libere manualmente conferindo o codigo."
+            : "Auto-release trusts the server-provided buyer key; for strong verification, release manually after confirming the code."}
+        </p>
+      ) : null}
+      {!released && paymentPaid && buyerCode ? (
+        <div className="zectime-verification-code">
+          <p className="eyebrow">{pt ? "Codigo do comprador" : "Buyer code"}</p>
+          <code>{buyerCode}</code>
+          <p className="zk-hub-form-hint">
+            {pt
+              ? "Codigo do comprador acima. Confirme que e igual ao codigo que o comprador te passou (protege contra um servidor malicioso trocar a chave)."
+              : "Buyer code above. Confirm it matches the code the buyer gave you (protects against a malicious server swapping the key)."}
+          </p>
+          <label className="zectime-key-confirm">
+            <input
+              type="checkbox"
+              checked={codeConfirmed}
+              onChange={(event) => onConfirmCodeChange(event.target.checked)}
+            />
+            <span>
+              {pt
+                ? "Conferi este codigo com o comprador"
+                : "I verified this code with the buyer"}
+            </span>
+          </label>
+        </div>
+      ) : null}
+      {!released ? (
         <div className="zectime-paid-actions">
-          <button
-            type="button"
-            className="button-secondary"
-            onClick={onRelease}
-            disabled={disabled || busy || !paymentPaid}
-          >
-            {busy
-              ? pt
-                ? "Liberando chave..."
-                : "Releasing key..."
-              : pt
-                ? "Liberar chave"
-                : "Release key"}
-          </button>
+          {buyerCode ? (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={onRelease}
+              disabled={disabled || busy || !paymentPaid || !codeConfirmed}
+            >
+              {busy
+                ? pt
+                  ? "Liberando chave..."
+                  : "Releasing key..."
+                : pt
+                  ? "Liberar chave"
+                  : "Release key"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={onRevealCode}
+              disabled={disabled || busy || !paymentPaid}
+            >
+              {busy
+                ? pt
+                  ? "Carregando codigo..."
+                  : "Loading code..."
+                : pt
+                  ? "Conferir codigo e liberar"
+                  : "Verify code and release"}
+            </button>
+          )}
         </div>
       ) : null}
     </div>

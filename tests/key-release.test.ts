@@ -31,6 +31,7 @@ import {
   decryptPaidLinkFile,
   decryptPaidLinkFileKey,
   encryptPaidLinkFile,
+  fingerprintPaidLinkPublicKey,
   wrapPaidLinkFileKeyForBuyer,
   type PaidLinkKeyEnvelope,
 } from "../lib/paid-link-client-crypto";
@@ -330,6 +331,22 @@ describe("pure seller-held key custody", () => {
     );
     const recovered = new Uint8Array(await opened.arrayBuffer());
     expect(new TextDecoder().decode(recovered)).toBe("seller-held round trip");
+  });
+
+  it("derives a stable buyer-key fingerprint that differs for a substituted key", async () => {
+    const buyer = await createPaidLinkBuyerKeyPair();
+    const attacker = await createPaidLinkBuyerKeyPair();
+
+    const code = await fingerprintPaidLinkPublicKey(buyer.publicJwk);
+    // Deterministic: same key -> same code (buyer and seller agree).
+    expect(await fingerprintPaidLinkPublicKey(buyer.publicJwk)).toBe(code);
+    // Human-comparable format: 5 groups of 4 uppercase hex.
+    expect(code).toMatch(/^[0-9A-F]{4}(-[0-9A-F]{4}){4}$/u);
+    // Substitution detection: a different (attacker) key yields a different code,
+    // so a malicious server swapping the buyer key is caught out-of-band.
+    expect(await fingerprintPaidLinkPublicKey(attacker.publicJwk)).not.toBe(
+      code,
+    );
   });
 
   it("makes key release monotonic: a second release cannot swap the envelope", async () => {

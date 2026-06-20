@@ -234,6 +234,28 @@ export function loadSellerReleaseDraft(
   return null;
 }
 
+/**
+ * Human-comparable fingerprint of a P-256 public key. Buyer and seller compute
+ * the same code from the same public key; if a malicious server substitutes the
+ * buyer key the seller wraps to, the seller's code will NOT match the code the
+ * buyer reads, exposing the substitution when compared out-of-band.
+ */
+export async function fingerprintPaidLinkPublicKey(
+  publicJwk: JsonWebKey,
+): Promise<string> {
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    publicJwk,
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    [],
+  );
+  const raw = await crypto.subtle.exportKey("raw", publicKey);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", raw));
+  const code = bytesToHex(digest.slice(0, 10)).toUpperCase();
+  return (code.match(/.{1,4}/gu) ?? []).join("-");
+}
+
 function storageKey(orderId: string): string {
   return `zectime_paid_link_buyer_key_${orderId}`;
 }

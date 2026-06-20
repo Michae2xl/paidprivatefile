@@ -365,7 +365,14 @@ Nym is used to deliver the seller-wrapped key envelope privately after payment.
 
 Seller-held custody removes the server's access to the key **against an honest-but-curious server**: in normal operation the server only ever stores `release_secret_hash` and an opaque, client-produced ECDH envelope it cannot decrypt (it has no buyer private key). It does NOT hold the raw `file_key` at rest, in memory, or in logs.
 
-It is **not** unconditionally trustless. The server is the source of the buyer public key that the seller wraps to, and the seller does not authenticate that key out-of-band. A **malicious or compromised server (or a MITM on the seller's session)** can substitute its own P-256 public key in the release challenge; the seller browser would wrap `file_key` to it, letting the server decrypt and recover the plaintext key (then re-wrap to the real buyer). Fully defending against this requires authenticating the buyer key to the seller (e.g. a buyer-confirmed key fingerprint or a buyer signature) — a deliberate future hardening. UI copy is scoped accordingly: the server is _not given the key directly_, rather than an absolute "never receives it" claim.
+It is **not** unconditionally trustless. The server is the source of the buyer public key that the seller wraps to. A **malicious or compromised server (or a MITM on the seller's session)** can substitute its own P-256 public key in the release challenge; the seller browser would then wrap `file_key` to it, letting the server decrypt and recover the plaintext key (then re-wrap to the real buyer).
+
+**Buyer-key authentication is now available** via an out-of-band verification code. `fingerprintPaidLinkPublicKey` derives a short, human-comparable fingerprint (e.g. `A1B2-C3D4-E5F6-7890-1234`) deterministically from a P-256 public key. The buyer panel shows the buyer's OWN public-key fingerprint as a "Verification code"; the seller release panel shows the fingerprint of the buyer key returned in the release challenge ("Buyer code"). Compared out-of-band, a mismatch detects a substituted key because a different key yields a different code.
+
+- **Verified path (strong):** the seller uses **manual release** — the release button is gated behind a confirmation checkbox ("I verified this code with the buyer") that the seller can only honestly check after comparing the displayed buyer code with the code the buyer shared out-of-band. This defeats server key substitution.
+- **Unverified path (convenience default):** **auto-release** on payment confirmation still trusts the server-provided buyer key without out-of-band verification. It is the default for the seller-online flow and is not blocked; the panel notes that strong verification requires the manual path.
+
+UI copy is scoped accordingly: the server is _not given the key directly_, rather than an absolute "never receives it" claim.
 
 ## Production Hardening
 
