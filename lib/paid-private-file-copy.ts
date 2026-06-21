@@ -102,13 +102,13 @@ export interface PaidPrivateFileCopy {
     file: string;
     size: string;
     status: string;
-    digest: string;
-    timestamp: string;
     paymentAddress: string;
     paymentMemo: string;
     invoice: string;
     privateDelivery: string;
     nymSession: string;
+    qrCaption: string;
+    qrAlt: string;
   };
   errors: {
     missingFile: string;
@@ -234,13 +234,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       file: "Arquivo",
       size: "Tamanho",
       status: "Status",
-      digest: "Ciphertext SHA-256",
-      timestamp: "ZK timestamp commitment",
       paymentAddress: "Endereco de pagamento",
       paymentMemo: "Memo",
       invoice: "Invoice",
       privateDelivery: "Entrega privada",
       nymSession: "Sessao Nym",
+      qrCaption: "Escaneie para pagar - {price} ZEC",
+      qrAlt: "QR code do pagamento Zcash",
     },
     errors: {
       missingFile: "Escolha um arquivo antes de criar o link.",
@@ -365,13 +365,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       file: "File",
       size: "Size",
       status: "Status",
-      digest: "Ciphertext SHA-256",
-      timestamp: "ZK timestamp commitment",
       paymentAddress: "Payment address",
       paymentMemo: "Memo",
       invoice: "Invoice",
       privateDelivery: "Private delivery",
       nymSession: "Nym session",
+      qrCaption: "Scan to pay - {price} ZEC",
+      qrAlt: "Zcash payment QR code",
     },
     errors: {
       missingFile: "Choose a file before creating the link.",

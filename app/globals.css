@@ -438,7 +438,7 @@ a {
 
 .zectime-paid-details {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 1px;
   margin: 0;
   border: 1px solid var(--line-dark);
@@ -474,7 +474,85 @@ a {
 
 .zectime-paid-payment-details {
   margin-top: 10px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+/* Neon focal point for the per-order PAYMENT ADDRESS (the pay-here target).
+   The container sits inside a 1px-gap grid, so we lift it above its
+   neighbours, draw a green/teal accent border, and pulse a colored glow so the
+   buyer's eye lands here first. Readable on the light card in the dark theme. */
+.zectime-paid-payaddress {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(20, 232, 140, 0.85);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(20, 232, 140, 0.12), transparent 60%),
+    var(--surface-strong);
+  box-shadow:
+    0 0 0 1px rgba(20, 232, 140, 0.45),
+    0 0 18px -2px rgba(20, 232, 140, 0.7),
+    0 0 40px -8px rgba(66, 196, 255, 0.55);
+  animation: zectime-payaddress-pulse 2.6s ease-in-out infinite;
+}
+
+.zectime-paid-payaddress dt {
+  color: #0f7048;
+}
+
+.zectime-paid-payaddress dd {
+  color: var(--ink);
+}
+
+.zectime-paid-qr {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+}
+
+.zectime-paid-qr img {
+  width: 192px;
+  height: 192px;
+  max-width: 100%;
+  border: 1px solid rgba(20, 128, 84, 0.28);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 10px;
+  box-shadow: 0 0 22px -6px rgba(20, 232, 140, 0.7);
+}
+
+.zectime-paid-qr figcaption {
+  margin: 0;
+  color: #0f7048;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+
+@keyframes zectime-payaddress-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(20, 232, 140, 0.4),
+      0 0 16px -3px rgba(20, 232, 140, 0.6),
+      0 0 34px -10px rgba(66, 196, 255, 0.45);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(20, 232, 140, 0.6),
+      0 0 26px -2px rgba(20, 232, 140, 0.92),
+      0 0 52px -6px rgba(66, 196, 255, 0.7);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zectime-paid-payaddress {
+    animation: none;
+  }
 }
 
 .zectime-paid-download {

@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
+import QRCode from "qrcode";
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -1582,7 +1584,11 @@ export function PaidPrivateFilePanel({
                         : copy.receive.pendingStatus}
                     </p>
                     {payment ? (
-                      <PaymentDetails payment={payment} copy={copy} />
+                      <PaymentDetails
+                        payment={payment}
+                        priceZec={loadedOrder.price.displayZec}
+                        copy={copy}
+                      />
                     ) : null}
                     {loadedOrder.payment?.status === "paid" &&
                     loadedOrder.release?.status === "seller_pending" ? (
@@ -1860,16 +1866,6 @@ function OrderDetails({
         <dt>{copy.details.nymSession}</dt>
         <dd>{order.delivery.nymSession?.status ?? "required"}</dd>
       </div>
-      <div className="zectime-paid-details-wide">
-        <dt>{copy.details.digest}</dt>
-        <dd>{order.file.encryptedFileSha256}</dd>
-      </div>
-      {order.timestamp ? (
-        <div className="zectime-paid-details-wide">
-          <dt>{copy.details.timestamp}</dt>
-          <dd>{order.timestamp.commitment}</dd>
-        </div>
-      ) : null}
     </dl>
   );
 }
@@ -1910,9 +1906,11 @@ function getFlowMotionStage({
 
 function PaymentDetails({
   payment,
+  priceZec,
   copy,
 }: {
   payment: TransferPayment;
+  priceZec: string;
   copy: PaidPrivateFileCopy;
 }) {
   return (
@@ -1922,9 +1920,14 @@ function PaymentDetails({
         <dd>{payment.invoiceId}</dd>
       </div>
       {payment.paymentAddress ? (
-        <div className="zectime-paid-details-wide">
+        <div className="zectime-paid-details-wide zectime-paid-payaddress">
           <dt>{copy.details.paymentAddress}</dt>
           <dd>{payment.paymentAddress}</dd>
+          <PaymentQr
+            address={payment.paymentAddress}
+            priceZec={priceZec}
+            copy={copy}
+          />
         </div>
       ) : null}
       {payment.memo ? (
@@ -1934,6 +1937,65 @@ function PaymentDetails({
         </div>
       ) : null}
     </dl>
+  );
+}
+
+// Render a scannable QR encoding the Zcash payment URI. The data URL is
+// generated CLIENT-SIDE in an effect keyed on address + amount so it never runs
+// during SSR (qrcode.toDataURL is async + browser-friendly), and the CSP allows
+// `img-src data:` so the resulting data URL renders inline.
+function PaymentQr({
+  address,
+  priceZec,
+  copy,
+}: {
+  address: string;
+  priceZec: string;
+  copy: PaidPrivateFileCopy;
+}) {
+  const uri = useMemo(
+    () => buildZcashPaymentUri(address, priceZec),
+    [address, priceZec],
+  );
+  const [dataUrl, setDataUrl] = useState("");
+
+  useEffect(() => {
+    if (!uri) {
+      setDataUrl("");
+      return;
+    }
+    let active = true;
+    void QRCode.toDataURL(uri, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      width: 192,
+      color: { dark: "#0f7048", light: "#ffffff" },
+    })
+      .then((url) => {
+        if (active) {
+          setDataUrl(url);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setDataUrl("");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [uri]);
+
+  if (!dataUrl) {
+    return null;
+  }
+
+  const caption = copy.details.qrCaption.replace("{price}", priceZec);
+  return (
+    <figure className="zectime-paid-qr">
+      <img src={dataUrl} alt={copy.details.qrAlt} width={192} height={192} />
+      <figcaption>{caption}</figcaption>
+    </figure>
   );
 }
 
@@ -2335,6 +2397,27 @@ function isLikelyZcashUnifiedAddress(value: string): boolean {
     cleaned.length <= 512 &&
     /^(u1|utest|uregtest)[a-z0-9]{16,}$/iu.test(cleaned)
   );
+}
+
+// Build a Zcash payment URI (ZIP-321 style) the buyer can scan to pay the
+// per-order PAYMENT ADDRESS: `zcash:<address>?amount=<ZEC decimal>`. The amount
+// is the existing display price string (e.g. "0.0001"); we do not invent
+// precision. Returns null when the address is missing so callers can skip the
+// QR entirely. Exported for unit testing the URI format.
+export function buildZcashPaymentUri(
+  address: string | null | undefined,
+  amountZec: string | null | undefined,
+): string | null {
+  const cleanedAddress = (address ?? "").trim();
+  if (!cleanedAddress) {
+    return null;
+  }
+  const cleanedAmount = (amountZec ?? "").trim();
+  const base = `zcash:${cleanedAddress}`;
+  if (!cleanedAmount) {
+    return base;
+  }
+  return `${base}?amount=${encodeURIComponent(cleanedAmount)}`;
 }
 
 function formatBytes(bytes: number): string {
