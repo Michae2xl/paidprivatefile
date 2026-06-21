@@ -32,7 +32,7 @@ import {
 } from "./deposit-pool";
 import { ServerError } from "./error-kinds";
 import { getScannerClient, type ScannerClient } from "./scanner-client";
-import { getSellerUfvk } from "./seller-store";
+import { getSellerScanRef } from "./seller-store";
 import {
   queueNymDelivery,
   type NymDeliveryReceipt,
@@ -389,23 +389,23 @@ export async function listSellerTransferPublicOrders(
 export interface ScanWatchlistEntry {
   orderId: string;
   sellerId: string;
-  ufvk: string;
+  scanRef: string;
   address: string;
   diversifierIndex: number;
   startHeight: number;
   amountZats: number;
 }
 
-// Non-custodial marketplace (Phase 1): one entry per OPEN order (status
-// payment_pending) that has a UFVK binding. The scanner pulls this, groups by
-// UFVK, scans from min(startHeight), trial-decrypts, and POSTs the webhook on a
-// match. Each seller's UFVK is decrypted here for the scanner to consume — this
-// payload is HMAC-authenticated and MUST NOT be exposed to buyers.
+// Non-custodial marketplace: one entry per OPEN order (status payment_pending)
+// that has a UFVK binding. The scanner pulls this, resolves each scanRef to the
+// UFVK it holds on its own host, scans from min(startHeight), and POSTs the
+// webhook on a match. Phase 3: the app sends only the opaque scanRef — never the
+// viewing key. This payload is still HMAC-authenticated.
 export async function listScanWatchlistEntries(): Promise<
   ScanWatchlistEntry[]
 > {
   const bindings = await listBindings();
-  const ufvkCache = new Map<string, string | null>();
+  const scanRefCache = new Map<string, string | null>();
   const entries: ScanWatchlistEntry[] = [];
 
   for (const binding of bindings) {
@@ -413,14 +413,14 @@ export async function listScanWatchlistEntries(): Promise<
     if (!order || order.status !== "payment_pending" || !order.payment) {
       continue;
     }
-    const ufvk = await resolveSellerUfvkCached(binding, ufvkCache);
-    if (!ufvk) {
+    const scanRef = await resolveSellerScanRefCached(binding, scanRefCache);
+    if (!scanRef) {
       continue;
     }
     entries.push({
       orderId: binding.orderId,
       sellerId: binding.sellerId,
-      ufvk,
+      scanRef,
       address: binding.address,
       diversifierIndex: binding.diversifierIndex,
       startHeight: binding.startHeight,
@@ -430,16 +430,16 @@ export async function listScanWatchlistEntries(): Promise<
   return entries;
 }
 
-async function resolveSellerUfvkCached(
+async function resolveSellerScanRefCached(
   binding: DepositBinding,
   cache: Map<string, string | null>,
 ): Promise<string | null> {
   if (cache.has(binding.sellerId)) {
     return cache.get(binding.sellerId) ?? null;
   }
-  const ufvk = await getSellerUfvk(binding.sellerId);
-  cache.set(binding.sellerId, ufvk);
-  return ufvk;
+  const scanRef = await getSellerScanRef(binding.sellerId);
+  cache.set(binding.sellerId, scanRef);
+  return scanRef;
 }
 
 async function readOrderOrNull(orderId: string): Promise<TransferOrder | null> {
@@ -593,16 +593,19 @@ async function deriveSellerDepositAddress(
   if (!sellerId) {
     return null;
   }
-  const ufvk = await getSellerUfvk(sellerId);
-  if (!ufvk) {
+  const scanRef = await getSellerScanRef(sellerId);
+  if (!scanRef) {
     return null;
   }
 
-  // Resolve the scanner lazily: only sellers with a UFVK reach the scanner, so
-  // the pool path (no UFVK) never requires PPF_SCANNER_URL to be configured.
+  // Resolve the scanner lazily: only sellers with a scanRef reach the scanner,
+  // so the pool path never requires PPF_SCANNER_URL to be configured.
   const scannerClient = scanner ?? getScannerClient();
   const diversifierIndex = await nextDiversifierIndex(sellerId);
-  const derived = await scannerClient.deriveAddress({ ufvk, diversifierIndex });
+  const derived = await scannerClient.deriveAddress({
+    scanRef,
+    diversifierIndex,
+  });
   await bindOrderDeposit(order.orderId, {
     address: derived.address,
     sellerId,

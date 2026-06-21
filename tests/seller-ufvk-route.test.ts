@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST as registerUfvkRoute } from "../app/api/sellers/me/ufvk/route";
+import { ServerError } from "../lib/server/error-kinds";
 import { resetRateLimitStateForTesting } from "../lib/server/rate-limit";
 import {
   setScannerClientForTesting,
@@ -15,13 +16,14 @@ import {
 import {
   createSellerProfile,
   createSellerSessionToken,
-  getSellerUfvk,
+  getSellerScanRef,
   SELLER_SESSION_COOKIE,
 } from "../lib/server/seller-store";
 
 const DEFAULT_ADDRESS = "u1default00000000000000000000000000000000000000";
 const FINGERPRINT = "d".repeat(64);
 const UFVK = "uview1routekeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SCAN_REF = `scan_${"f".repeat(24)}`;
 
 let runtimeDir: string;
 
@@ -42,6 +44,25 @@ function fakeScanner(
         receivers: ["orchard"],
         uaMatches: true,
         ...overrides,
+      };
+    },
+    async registerUfvk() {
+      const base = {
+        valid: true,
+        network: "main" as const,
+        uaMatches: true,
+        ...overrides,
+      };
+      if (!base.valid || base.uaMatches === false) {
+        throw new ServerError("validation", "scanner rejected the viewing key");
+      }
+      return {
+        scanRef: SCAN_REF,
+        network: base.network,
+        fingerprint: FINGERPRINT,
+        defaultAddress: DEFAULT_ADDRESS,
+        receivers: ["orchard"],
+        uaMatches: base.uaMatches,
       };
     },
     async deriveAddress() {
@@ -107,7 +128,7 @@ describe("POST /api/sellers/me/ufvk", () => {
     expect(parsed.network).toBe("main");
     expect(parsed.defaultAddress).toBe(DEFAULT_ADDRESS);
 
-    expect(await getSellerUfvk(sellerId)).toBe(UFVK);
+    expect(await getSellerScanRef(sellerId)).toBe(SCAN_REF);
   });
 
   it("requires a seller session", async () => {

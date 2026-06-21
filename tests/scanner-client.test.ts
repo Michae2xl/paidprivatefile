@@ -144,7 +144,7 @@ describe("scanner-client deriveAddress", () => {
     const client = createScannerClient(fetch);
 
     const result = await client.deriveAddress({
-      ufvk: "uview1abc",
+      scanRef: "scan_abc",
       diversifierIndex: 1230,
     });
 
@@ -152,7 +152,7 @@ describe("scanner-client deriveAddress", () => {
     expect(result.actualIndex).toBe(1234);
     expect(calls[0].url).toBe(`${SCANNER_URL}/derive`);
     expect(JSON.parse(calls[0].body)).toEqual({
-      ufvk: "uview1abc",
+      scanRef: "scan_abc",
       diversifierIndex: 1230,
     });
     const expectedSig = createHmac("sha256", SCANNER_SECRET)
@@ -165,7 +165,7 @@ describe("scanner-client deriveAddress", () => {
     const { fetch } = makeFetch(() => ({ json: { address: 123 } }));
     const client = createScannerClient(fetch);
     await expect(
-      client.deriveAddress({ ufvk: "uview1abc", diversifierIndex: 1 }),
+      client.deriveAddress({ scanRef: "scan_abc", diversifierIndex: 1 }),
     ).rejects.toThrow();
   });
 
@@ -175,7 +175,7 @@ describe("scanner-client deriveAddress", () => {
       json: { address: "u1x000000000000000000", actualIndex: 0 },
     }));
     const client = createScannerClient(fetch);
-    await client.deriveAddress({ ufvk: "uview1abc", diversifierIndex: 0 });
+    await client.deriveAddress({ scanRef: "scan_abc", diversifierIndex: 0 });
     expect(calls[0].url).toBe(`${SCANNER_URL}/derive`);
   });
 });

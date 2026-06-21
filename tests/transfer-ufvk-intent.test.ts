@@ -25,11 +25,12 @@ import {
 const SELLER_DEFAULT_ADDRESS = "u1selleraddr0000000000000000000000000000000000";
 const DERIVED_BASE = "u1derived";
 const FINGERPRINT = "b".repeat(64);
+const SCAN_REF = `scan_${"e".repeat(24)}`;
 const POOL_ADDRESS = "u1poolfallbackaddr00000000000000000000000000000000";
 
 let runtimeDir: string;
 let releaseDraft: { releaseSecretHash: string };
-let deriveCalls: Array<{ ufvk: string; diversifierIndex: number }>;
+let deriveCalls: Array<{ scanRef: string; diversifierIndex: number }>;
 
 function fakeScanner(): ScannerClient {
   deriveCalls = [];
@@ -37,6 +38,16 @@ function fakeScanner(): ScannerClient {
     async validateUfvk() {
       return {
         valid: true,
+        network: "main",
+        fingerprint: FINGERPRINT,
+        defaultAddress: SELLER_DEFAULT_ADDRESS,
+        receivers: ["orchard", "sapling", "transparent"],
+        uaMatches: true,
+      };
+    },
+    async registerUfvk() {
+      return {
+        scanRef: SCAN_REF,
         network: "main",
         fingerprint: FINGERPRINT,
         defaultAddress: SELLER_DEFAULT_ADDRESS,

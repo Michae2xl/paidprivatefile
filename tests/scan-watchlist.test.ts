@@ -36,6 +36,7 @@ const WEBHOOK_SECRET = "test-scan-webhook-secret";
 const SELLER_ADDRESS = "u1selleraddr0000000000000000000000000000000000";
 const UFVK = "uview1watchlistkeyaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const FINGERPRINT = "c".repeat(64);
+const SCAN_REF = `scan_${"d".repeat(24)}`;
 
 let runtimeDir: string;
 let releaseDraft: { releaseSecretHash: string };
@@ -47,7 +48,7 @@ interface ErrorEnvelope {
 interface WatchlistEntry {
   orderId: string;
   sellerId: string;
-  ufvk: string;
+  scanRef: string;
   address: string;
   diversifierIndex: number;
   startHeight: number;
@@ -59,6 +60,16 @@ function fakeScanner(): ScannerClient {
     async validateUfvk() {
       return {
         valid: true,
+        network: "main",
+        fingerprint: FINGERPRINT,
+        defaultAddress: SELLER_ADDRESS,
+        receivers: ["orchard"],
+        uaMatches: true,
+      };
+    },
+    async registerUfvk() {
+      return {
+        scanRef: SCAN_REF,
         network: "main",
         fingerprint: FINGERPRINT,
         defaultAddress: SELLER_ADDRESS,
@@ -247,7 +258,7 @@ describe("scan-watchlist payload", () => {
     const entry = parsed.entries[0];
     expect(entry.orderId).toBe(orderId);
     expect(entry.sellerId).toBe(sellerId);
-    expect(entry.ufvk).toBe(UFVK);
+    expect(entry.scanRef).toBe(SCAN_REF);
     expect(entry.address).toBe(receivingAddress);
     expect(entry.diversifierIndex).toBe(1);
     expect(entry.startHeight).toBe(0);

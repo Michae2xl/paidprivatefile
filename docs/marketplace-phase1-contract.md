@@ -89,3 +89,50 @@ Order lifecycle, `markTransferPaidOnchain` (idempotent), claim, seller-held key 
 
 Self-hosted Zaino on the Pi (Phase 2), UFVK-only-on-scanner custody + scan-by-account (Phase 3),
 diversifier→index reverse mapping optimization (MVP keeps an explicit address→order binding).
+
+---
+
+# Phase 3 — UFVK custody hardening (key only on the scanner host)
+
+Goal: the app NEVER stores a UFVK. The scanner is the sole holder; the app keeps
+only an opaque `scanRef` + fingerprint + derived address. An app DB compromise
+leaks zero viewing keys.
+
+## Scanner (gains persistent, encrypted state)
+- Encrypted UFVK store on the scanner host, under `PPF_SCANNER_DATA_DIR` (default
+  `/data`, a Railway volume), AES-256-GCM with `PPF_SCANNER_UFVK_KEY` (32-byte
+  hex). Maps `scanRef -> { ufvkEncrypted, fingerprint, network, defaultAddress }`.
+  `scanRef` = `scan_<hex>`. Atomic writes; in-process lock.
+- `POST /sellers/register {ufvk, ua?}` (HMAC x-ppf-scanner-sig): validate (same
+  rules as /validate — mainnet, uaMatches), store encrypted, return
+  `{ scanRef, fingerprint, network, defaultAddress, receivers, uaMatches? }`.
+- `POST /derive { scanRef, diversifierIndex }` (HMAC): look up the UFVK by scanRef
+  (404 if unknown), `find_address` -> `{ address, actualIndex }`. (No UFVK in the
+  request anymore.)
+- `POST /validate { ufvk, ua? }`: UNCHANGED, stateless, stores nothing (used by
+  the live create-shop preview).
+- Scan loop: watchlist entries now carry `scanRef` (NOT `ufvk`); the scanner
+  resolves scanRef -> stored UFVK and scans. Entry:
+  `{ orderId, sellerId, scanRef, address, diversifierIndex, startHeight, amountZats }`.
+
+## App (drops all UFVK storage)
+- `seller-store`: SellerProfile gains `sellerScanRef`; REMOVE `ufvkEncrypted` and
+  the `PAID_PRIVATE_FILE_SELLER_UFVK_KEY` usage. Keep `ufvkFingerprint`,
+  `network`, `defaultPayoutAddress`. `getSellerUfvk()` removed.
+- registration (createSellerProfile w/ ufvk + registerSellerUfvk): call scanner
+  `registerUfvk` -> store `sellerScanRef` + fingerprint + derive payout from the
+  returned defaultAddress. The app never persists the UFVK.
+- `scanner-client`: add `registerUfvk({ufvk, ua})`; change `deriveAddress` to
+  `({ scanRef, diversifierIndex })`.
+- `deriveSellerDepositAddress`: use the seller's `sellerScanRef`.
+- `scan-watchlist`: return `scanRef` (not the UFVK).
+- The `/api/zcash/ufvk-preview` route keeps calling scanner `/validate` (stateless).
+
+## Infra
+- Add a Railway volume `/data` to `ppf-scanner-prod` (and `ppf-scanner` staging);
+  set `PPF_SCANNER_DATA_DIR=/data` + `PPF_SCANNER_UFVK_KEY` on both scanners.
+- `PAID_PRIVATE_FILE_SELLER_UFVK_KEY` can be removed from the apps (unused).
+
+## Migration
+Phase-1 sellers have `ufvkEncrypted` app-side (test shops on staging/prod): they
+re-register to get a `sellerScanRef`. No production seller data to migrate yet.

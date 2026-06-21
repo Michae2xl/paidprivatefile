@@ -31,8 +31,19 @@ export interface ScannerValidateResult {
   uaMatches?: boolean;
 }
 
+export interface ScannerRegisterResult {
+  // Opaque handle to the UFVK held ONLY on the scanner host. The app stores this
+  // instead of the viewing key (Phase 3 custody hardening).
+  scanRef: string;
+  fingerprint: string;
+  network: ScannerNetwork;
+  defaultAddress: string;
+  receivers: string[];
+  uaMatches?: boolean;
+}
+
 export interface ScannerDeriveInput {
-  ufvk: string;
+  scanRef: string;
   diversifierIndex: number;
 }
 
@@ -43,6 +54,7 @@ export interface ScannerDeriveResult {
 
 export interface ScannerClient {
   validateUfvk(input: ScannerValidateInput): Promise<ScannerValidateResult>;
+  registerUfvk(input: ScannerValidateInput): Promise<ScannerRegisterResult>;
   deriveAddress(input: ScannerDeriveInput): Promise<ScannerDeriveResult>;
 }
 
@@ -71,9 +83,18 @@ export function createScannerClient(fetchImpl?: ScannerFetch): ScannerClient {
       return parseValidateResult(parsed);
     },
 
+    async registerUfvk(input) {
+      const body: ScannerValidateInput = { ufvk: input.ufvk };
+      if (input.ua !== undefined) {
+        body.ua = input.ua;
+      }
+      const parsed = await postJson(doFetch, "/sellers/register", body);
+      return parseRegisterResult(parsed);
+    },
+
     async deriveAddress(input) {
       const body: ScannerDeriveInput = {
-        ufvk: input.ufvk,
+        scanRef: input.scanRef,
         diversifierIndex: input.diversifierIndex,
       };
       const parsed = await postJson(doFetch, "/derive", body);
@@ -124,6 +145,22 @@ async function postJson(
   }
 
   if (!response.ok) {
+    // A 400 means the input (e.g. an invalid UFVK / non-matching UA) was
+    // rejected — surface it as a validation error so the user gets a 400, not 5xx.
+    if (response.status === 400) {
+      let message = "The viewing key (UFVK) was rejected";
+      try {
+        const body = (await response.json()) as {
+          error?: { message?: string };
+        };
+        if (body?.error?.message) {
+          message = body.error.message;
+        }
+      } catch {
+        // keep the default message
+      }
+      throw new ServerError("validation", message);
+    }
     throw new ServerError(
       "cli_unavailable",
       `Scanner returned HTTP ${response.status}`,
@@ -172,6 +209,47 @@ function parseValidateResult(value: unknown): ScannerValidateResult {
   if (record.uaMatches !== undefined) {
     if (typeof record.uaMatches !== "boolean") {
       throw scannerShapeError("validate.uaMatches");
+    }
+    result.uaMatches = record.uaMatches;
+  }
+  return result;
+}
+
+function parseRegisterResult(value: unknown): ScannerRegisterResult {
+  const record = asObject(value, "register");
+  const scanRef = record.scanRef;
+  if (typeof scanRef !== "string" || !scanRef) {
+    throw scannerShapeError("register.scanRef");
+  }
+  const network = parseNetwork(record.network);
+  const fingerprint = record.fingerprint;
+  if (
+    typeof fingerprint !== "string" ||
+    !FINGERPRINT_PATTERN.test(fingerprint)
+  ) {
+    throw scannerShapeError("register.fingerprint");
+  }
+  const defaultAddress = record.defaultAddress;
+  if (typeof defaultAddress !== "string" || !defaultAddress) {
+    throw scannerShapeError("register.defaultAddress");
+  }
+  const receivers = record.receivers;
+  if (
+    !Array.isArray(receivers) ||
+    !receivers.every((entry) => typeof entry === "string")
+  ) {
+    throw scannerShapeError("register.receivers");
+  }
+  const result: ScannerRegisterResult = {
+    scanRef,
+    network,
+    fingerprint,
+    defaultAddress,
+    receivers: receivers as string[],
+  };
+  if (record.uaMatches !== undefined) {
+    if (typeof record.uaMatches !== "boolean") {
+      throw scannerShapeError("register.uaMatches");
     }
     result.uaMatches = record.uaMatches;
   }

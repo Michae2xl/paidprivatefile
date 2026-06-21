@@ -1,6 +1,4 @@
 import {
-  createCipheriv,
-  createDecipheriv,
   createHash,
   createHmac,
   randomBytes,
@@ -36,8 +34,10 @@ export interface SellerProfile {
   accessKeyHash: string;
   createdAt: string;
   updatedAt: string;
-  // Non-custodial marketplace (Phase 1). All optional for back-compat.
-  // ufvkEncrypted is iv:tag:ciphertext (hex), AES-256-GCM. NEVER expose it.
+  // Non-custodial marketplace. All optional for back-compat.
+  // Phase 3: the UFVK lives ONLY on the scanner host; the app keeps an opaque
+  // handle. `ufvkEncrypted` is the deprecated Phase-1 field (no longer written).
+  sellerScanRef?: string;
   ufvkEncrypted?: string;
   // sha256 hex of the UFVK; safe to expose (mirrors how a fingerprint is safe).
   ufvkFingerprint?: string;
@@ -102,42 +102,29 @@ export async function createSellerProfile(
   }
 
   let defaultPayoutAddress: string;
-  let ufvkEncrypted: SellerProfile["ufvkEncrypted"];
+  let sellerScanRef: SellerProfile["sellerScanRef"];
   let ufvkFingerprint: SellerProfile["ufvkFingerprint"];
   let network: SellerProfile["network"];
 
   const ufvkInput = input.ufvk?.trim();
   if (ufvkInput) {
-    // Non-custodial: validate the viewing key and derive the shop's receiving
-    // address from it. The platform can detect payments, never spend.
+    // Non-custodial (Phase 3): the scanner validates AND stores the viewing key
+    // on its own host; the app keeps only an opaque scanRef + derived address.
     const ufvk = normalizeUfvk(ufvkInput);
     const ua = input.ua ? normalizeZcashUnifiedAddress(input.ua) : undefined;
-    const encrypted = encryptUfvk(ufvk);
-    const validation = await scanner.validateUfvk(ua ? { ufvk, ua } : { ufvk });
-    if (!validation.valid) {
-      throw new ServerError(
-        "validation",
-        "The viewing key (UFVK) is not valid",
-      );
-    }
-    if (validation.network !== "main") {
+    const reg = await scanner.registerUfvk(ua ? { ufvk, ua } : { ufvk });
+    if (reg.network !== "main") {
       throw new ServerError(
         "validation",
         "Only mainnet viewing keys are accepted",
       );
     }
-    if (ua && validation.uaMatches === false) {
-      throw new ServerError(
-        "validation",
-        "The unified address does not match the viewing key",
-      );
-    }
     defaultPayoutAddress = normalizeZcashUnifiedAddress(
-      ua ?? validation.defaultAddress,
+      ua ?? reg.defaultAddress,
     );
-    ufvkEncrypted = encrypted;
-    ufvkFingerprint = validation.fingerprint;
-    network = validation.network;
+    sellerScanRef = reg.scanRef;
+    ufvkFingerprint = reg.fingerprint;
+    network = reg.network;
   } else if (input.defaultPayoutAddress) {
     defaultPayoutAddress = normalizeZcashUnifiedAddress(
       input.defaultPayoutAddress,
@@ -153,7 +140,7 @@ export async function createSellerProfile(
   const accessKey = generateAccessKey();
   const now = new Date().toISOString();
   const profile: SellerProfile = {
-    schema: ufvkEncrypted
+    schema: sellerScanRef
       ? "paidprivatefile.seller.v2"
       : "paidprivatefile.seller.v1",
     sellerId,
@@ -163,7 +150,7 @@ export async function createSellerProfile(
     accessKeyHash: hashAccessKey(accessKey),
     createdAt: now,
     updatedAt: now,
-    ...(ufvkEncrypted ? { ufvkEncrypted, ufvkFingerprint, network } : {}),
+    ...(sellerScanRef ? { sellerScanRef, ufvkFingerprint, network } : {}),
   };
 
   await mkdir(sellerProfileDir(), { recursive: true, mode: 0o700 });
@@ -266,23 +253,13 @@ export async function registerSellerUfvk(
   const ufvk = normalizeUfvk(input.ufvk);
   const ua = input.ua ? normalizeZcashUnifiedAddress(input.ua) : undefined;
 
-  // Encryption key is required before we touch the scanner; fail fast.
-  const encrypted = encryptUfvk(ufvk);
-
-  const validation = await scanner.validateUfvk(ua ? { ufvk, ua } : { ufvk });
-  if (!validation.valid) {
-    throw new ServerError("validation", "The viewing key (UFVK) is not valid");
-  }
-  if (validation.network !== "main") {
+  // Phase 3: the scanner validates AND stores the UFVK on its own host; the app
+  // keeps only an opaque scanRef + fingerprint.
+  const reg = await scanner.registerUfvk(ua ? { ufvk, ua } : { ufvk });
+  if (reg.network !== "main") {
     throw new ServerError(
       "validation",
       "Only mainnet viewing keys are accepted",
-    );
-  }
-  if (ua && validation.uaMatches === false) {
-    throw new ServerError(
-      "validation",
-      "The unified address does not match the viewing key",
     );
   }
 
@@ -290,28 +267,29 @@ export async function registerSellerUfvk(
   const next: SellerProfile = {
     ...profile,
     schema: "paidprivatefile.seller.v2",
-    ufvkEncrypted: encrypted,
-    ufvkFingerprint: validation.fingerprint,
-    network: validation.network,
+    sellerScanRef: reg.scanRef,
+    // Drop any deprecated Phase-1 encrypted blob on re-registration.
+    ufvkEncrypted: undefined,
+    ufvkFingerprint: reg.fingerprint,
+    network: reg.network,
     updatedAt: now,
   };
   await atomicWriteJson(sellerProfilePath(next.sellerId), next);
 
   return {
-    ufvkFingerprint: validation.fingerprint,
-    network: validation.network,
-    defaultAddress: validation.defaultAddress,
+    ufvkFingerprint: reg.fingerprint,
+    network: reg.network,
+    defaultAddress: reg.defaultAddress,
   };
 }
 
-// Internal use only (e.g. derive, scan-watchlist). NEVER return this to a
-// client or log it.
-export async function getSellerUfvk(sellerId: string): Promise<string | null> {
+// Internal use only (scan-watchlist / derive): the opaque handle the scanner
+// uses to look up the stored UFVK. The app never holds the viewing key (Phase 3).
+export async function getSellerScanRef(
+  sellerId: string,
+): Promise<string | null> {
   const profile = await getSellerProfileById(sellerId);
-  if (!profile || !profile.ufvkEncrypted) {
-    return null;
-  }
-  return decryptUfvk(profile.ufvkEncrypted);
+  return profile?.sellerScanRef ?? null;
 }
 
 export async function getSellerFromRequest(
@@ -439,12 +417,15 @@ function verifySellerSessionToken(
 }
 
 function normalizeSellerProfile(value: SellerProfile): SellerProfile {
+  const hasScanRef =
+    typeof value.sellerScanRef === "string" && value.sellerScanRef.length > 0;
   const hasUfvk =
     typeof value.ufvkEncrypted === "string" && value.ufvkEncrypted.length > 0;
   const profile: SellerProfile = {
-    schema: hasUfvk
-      ? "paidprivatefile.seller.v2"
-      : (value.schema ?? "paidprivatefile.seller.v1"),
+    schema:
+      hasScanRef || hasUfvk
+        ? "paidprivatefile.seller.v2"
+        : (value.schema ?? "paidprivatefile.seller.v1"),
     sellerId: value.sellerId,
     handle: normalizeSellerHandle(value.handle),
     displayName: normalizeDisplayName(value.displayName, value.handle),
@@ -455,6 +436,9 @@ function normalizeSellerProfile(value: SellerProfile): SellerProfile {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
+  if (hasScanRef) {
+    profile.sellerScanRef = value.sellerScanRef;
+  }
   if (hasUfvk) {
     profile.ufvkEncrypted = value.ufvkEncrypted;
   }
@@ -523,61 +507,6 @@ function normalizeUfvk(value: unknown): string {
     );
   }
   return cleaned;
-}
-
-// AES-256-GCM at rest. Stored as iv:tag:ciphertext (hex). The key comes from
-// PAID_PRIVATE_FILE_SELLER_UFVK_KEY (32-byte hex). No plaintext is persisted.
-function ufvkEncryptionKey(): Buffer {
-  const raw = process.env.PAID_PRIVATE_FILE_SELLER_UFVK_KEY?.trim();
-  if (!raw) {
-    throw new ServerError(
-      "validation",
-      "Seller UFVK encryption key is not configured",
-    );
-  }
-  if (!/^[0-9a-f]{64}$/iu.test(raw)) {
-    throw new ServerError(
-      "validation",
-      "Seller UFVK encryption key must be 32 bytes hex",
-    );
-  }
-  return Buffer.from(raw, "hex");
-}
-
-function encryptUfvk(ufvk: string): string {
-  const key = ufvkEncryptionKey();
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([
-    cipher.update(ufvk, "utf8"),
-    cipher.final(),
-  ]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
-}
-
-function decryptUfvk(encrypted: string): string {
-  const key = ufvkEncryptionKey();
-  const parts = encrypted.split(":");
-  if (parts.length !== 3) {
-    throw new ServerError("validation", "Stored UFVK is corrupt");
-  }
-  const [ivHex, tagHex, dataHex] = parts;
-  try {
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      key,
-      Buffer.from(ivHex, "hex"),
-    );
-    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-    const plaintext = Buffer.concat([
-      decipher.update(Buffer.from(dataHex, "hex")),
-      decipher.final(),
-    ]);
-    return plaintext.toString("utf8");
-  } catch {
-    throw new ServerError("validation", "Stored UFVK could not be decrypted");
-  }
 }
 
 async function atomicWriteJson(path: string, value: unknown): Promise<void> {
