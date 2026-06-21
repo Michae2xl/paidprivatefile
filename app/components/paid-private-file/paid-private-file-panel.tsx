@@ -696,7 +696,13 @@ export function PaidPrivateFilePanel({
           "https://validator.nymtech.net/api",
         forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
       });
-      const address = await nym.client.selfAddress();
+      // selfAddress() can be empty until the gateway handshake completes, so
+      // poll for the buyer address instead of reading it once right after start.
+      let address = await nym.client.selfAddress();
+      for (let attempt = 0; attempt < 90 && !address; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        address = await nym.client.selfAddress();
+      }
       if (!address) {
         throw new Error("Nym client did not return an address");
       }
