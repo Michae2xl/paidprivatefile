@@ -37,15 +37,29 @@ node scripts/zallet-payment-watcher.mjs            # loops; Ctrl+C to stop
 WATCH_ONCE=1 node scripts/zallet-payment-watcher.mjs   # single pass
 ```
 
-Polls `z_listunspent` and reports each note to `/api/webhooks/zcash`. The app settles
-only when `amount >= price` and `confirmations >= PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS`.
+Per-address query model (Zallet alpha.3's `z_listunspent` does **not** return the
+per-note receiving address, but it accepts an `addresses` filter):
+
+1. The watcher asks the app which per-order deposit addresses are live via the signed
+   **watchlist** endpoint `POST /api/transfers/payments/zcash/watchlist` (body `{}`,
+   signed with `PPF_ZCASH_POOL_SECRET` — the same secret the pool filler uses).
+2. For each watched address it calls `z_listunspent(0, 9999999, true, [address])`.
+3. Any unspent notes for that address are aggregated into one sighting (amount = sum of
+   note values, confirmations = MIN across notes, txid = first note's txid) and reported
+   to `/api/webhooks/zcash`, signed with `PPF_ZCASH_WEBHOOK_SECRET`.
+
+The watcher therefore needs **both** `PPF_ZCASH_POOL_SECRET` (watchlist) and
+`PPF_ZCASH_WEBHOOK_SECRET` (sightings). The app settles only when `amount >= price` and
+`confirmations >= PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS`; identical
+`address:txid:confirmations` sightings are de-duped within the process.
 
 ## Verify on first real payment
 
-The app matches a note to an order by **receiving address** (the per-order UA). On the
-first testnet payment, confirm `z_listunspent`'s `note.address` equals the UA the buyer
-paid. If Zallet reports a different address representation, switch matching to a per-order
-**memo** (zcap-voting matches by `account_uuid` + `memoStr`) — a small webhook + watcher change.
+The app matches a sighting to an order by **receiving address** (the per-order UA the
+watcher passed to `z_listunspent`'s `addresses` filter). On the first testnet payment,
+confirm a note shows up when filtering by the UA the buyer paid. If a UA never returns
+its note under the `addresses` filter, switch matching to a per-order **memo**
+(zcap-voting matches by `account_uuid` + `memoStr`) — a small webhook + watcher change.
 
 ## Activation order (coordinated with the app)
 

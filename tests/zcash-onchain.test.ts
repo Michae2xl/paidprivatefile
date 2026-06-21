@@ -16,6 +16,7 @@ import {
 import { POST as createTransferRoute } from "../app/api/transfers/route";
 import { POST as paymentIntentRoute } from "../app/api/transfers/[orderId]/payment-intent/route";
 import { POST as poolRoute } from "../app/api/transfers/payments/zcash/addresses/route";
+import { POST as watchlistRoute } from "../app/api/transfers/payments/zcash/watchlist/route";
 import { POST as zcashWebhookRoute } from "../app/api/webhooks/zcash/route";
 import { resetRateLimitStateForTesting } from "../lib/server/rate-limit";
 import { createPaidLinkSellerReleaseDraft } from "../lib/paid-link-client-crypto";
@@ -142,6 +143,70 @@ describe("zcash deposit-address pool route", () => {
     } finally {
       consoleSpy.mockRestore();
     }
+  });
+});
+
+describe("zcash deposit-address watchlist route", () => {
+  it("rejects a missing signature", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await watchlistRoute(
+        new Request("http://localhost/api/transfers/payments/zcash/watchlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+      );
+      expect(response.status).toBe(400);
+      const parsed = (await response.json()) as ErrorEnvelope;
+      expect(parsed.error.kind).toBe("validation");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("rejects an invalid signature", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await watchlistRoute(
+        signedWatchlistRequest("{}", "deadbeef"),
+      );
+      expect(response.status).toBe(400);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("rejects when the pool secret is unset", async () => {
+    delete process.env.PAID_PRIVATE_FILE_ZCASH_POOL_SECRET;
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await watchlistRoute(
+        signedWatchlistRequest("{}", "deadbeef"),
+      );
+      expect(response.status).toBe(400);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("returns the deposit addresses assigned to orders", async () => {
+    await seedPool();
+    const { receivingAddress } = await orderWithDeposit();
+
+    const response = await watchlistRoute(signedWatchlistRequest("{}"));
+    expect(response.status).toBe(200);
+    const parsed = (await response.json()) as { addresses: string[] };
+    expect(Array.isArray(parsed.addresses)).toBe(true);
+    expect(parsed.addresses).toContain(receivingAddress);
+  });
+
+  it("returns an empty list when no orders are assigned", async () => {
+    await seedPool();
+    const response = await watchlistRoute(signedWatchlistRequest("{}"));
+    expect(response.status).toBe(200);
+    const parsed = (await response.json()) as { addresses: string[] };
+    expect(parsed.addresses).toEqual([]);
   });
 });
 
@@ -445,6 +510,21 @@ function signedPoolRequest(body: string, signature?: string): Request {
   const sig = signature ?? hmacHex(POOL_SECRET, body);
   return new Request(
     "http://localhost/api/transfers/payments/zcash/addresses",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-zcash-signature": `sha256=${sig}`,
+      },
+      body,
+    },
+  );
+}
+
+function signedWatchlistRequest(body: string, signature?: string): Request {
+  const sig = signature ?? hmacHex(POOL_SECRET, body);
+  return new Request(
+    "http://localhost/api/transfers/payments/zcash/watchlist",
     {
       method: "POST",
       headers: {

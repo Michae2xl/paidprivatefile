@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   assignDepositAddress,
   findOrderIdByDepositAddress,
+  listAssignedDepositAddresses,
   registerDepositAddresses,
 } from "../lib/server/deposit-pool";
 
@@ -73,5 +74,25 @@ describe("deposit pool", () => {
 
   it("returns null lookup for an unknown deposit address", async () => {
     expect(await findOrderIdByDepositAddress(ADDRESS_C)).toBeNull();
+  });
+
+  it("lists only the deposit addresses currently assigned to an order", async () => {
+    await registerDepositAddresses([ADDRESS_A, ADDRESS_B, ADDRESS_C]);
+
+    // Nothing assigned yet.
+    expect(await listAssignedDepositAddresses()).toEqual([]);
+
+    await assignDepositAddress(ORDER_A);
+    await assignDepositAddress(ORDER_B);
+
+    const assigned = await listAssignedDepositAddresses();
+    // Two of the three are assigned; the never-assigned one is excluded.
+    expect(assigned).toHaveLength(2);
+    expect(assigned.sort()).toEqual([ADDRESS_A, ADDRESS_B].sort());
+    expect(assigned).not.toContain(ADDRESS_C);
+  });
+
+  it("returns an empty list when no addresses are registered", async () => {
+    expect(await listAssignedDepositAddresses()).toEqual([]);
   });
 });

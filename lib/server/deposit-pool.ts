@@ -118,6 +118,13 @@ export async function findOrderIdByDepositAddress(
   return entry?.orderId ?? null;
 }
 
+export async function listAssignedDepositAddresses(): Promise<string[]> {
+  const pool = await readPool();
+  return pool.entries
+    .filter((entry) => entry.status === "assigned")
+    .map((entry) => entry.address);
+}
+
 function normalizeDepositAddress(value: unknown): string {
   if (typeof value !== "string") {
     throw new ServerError("validation", "Deposit address must be a string");
