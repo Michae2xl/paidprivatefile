@@ -9,6 +9,7 @@ import {
   useState,
   type ChangeEvent,
   type FormEvent,
+  type ReactNode,
 } from "react";
 
 import {
@@ -120,6 +121,22 @@ interface SellerProfile {
   displayName: string;
   defaultPayoutAddress: string;
   publicPath: string;
+  // Non-custodial marketplace: only the fingerprint + network are exposed.
+  ufvkFingerprint?: string;
+  network?: "main" | "test" | "regtest";
+}
+
+interface SellerFile {
+  orderId: string;
+  fileName: string;
+  displayZec: string;
+  status: TransferPublicOrder["status"];
+  createdAt: string;
+  sharePath: string;
+}
+
+interface SellerFilesResponse {
+  files: SellerFile[];
 }
 
 interface SellerCreateResponse {
@@ -200,6 +217,7 @@ interface BrowserNymClient {
 
 type Mode = "send" | "receive";
 type SellerAuthMode = "create" | "login";
+type SellerScreen = "dashboard" | "files" | "settings" | "create";
 type FlowMotionStage = "transfer" | "payment" | "done";
 type BusyAction =
   | "idle"
@@ -232,6 +250,17 @@ export function PaidPrivateFilePanel({
   const [seller, setSeller] = useState<SellerProfile | null>(null);
   const [sellerAuthMode, setSellerAuthMode] =
     useState<SellerAuthMode>("create");
+  // Seller shop dashboard: one screen at a time (no stacking). Defaults to the
+  // dashboard whenever a seller is logged in.
+  const [sellerScreen, setSellerScreen] = useState<SellerScreen>("dashboard");
+  const [sellerFiles, setSellerFiles] = useState<SellerFile[]>([]);
+  const [sellerFilesStatus, setSellerFilesStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [settingsSaveStatus, setSettingsSaveStatus] = useState<
+    "idle" | "saving" | "saved"
+  >("idle");
+  const [publicLinkCopied, setPublicLinkCopied] = useState(false);
   const [sellerHandle, setSellerHandle] = useState("");
   const [sellerDisplayName, setSellerDisplayName] = useState("");
   const [sellerAccessKey, setSellerAccessKey] = useState("");
@@ -428,6 +457,35 @@ export function PaidPrivateFilePanel({
     }
   }
 
+  async function loadSellerFiles() {
+    setSellerFilesStatus("loading");
+    try {
+      const body = await postJson<SellerFilesResponse>(
+        "/api/sellers/me/files",
+        { method: "GET" },
+      );
+      setSellerFiles(body.files);
+      setSellerFilesStatus("ready");
+    } catch {
+      // Non-fatal: the dashboard still renders without the files list.
+      setSellerFilesStatus("error");
+    }
+  }
+
+  // Seller dashboard: refresh the files list when the dashboard or files screen
+  // becomes active for a logged-in seller (mount + screen switch + after a new
+  // file is created, which routes back to the dashboard).
+  useEffect(() => {
+    if (!seller) {
+      return;
+    }
+    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+      return;
+    }
+    void loadSellerFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seller?.sellerId, sellerScreen]);
+
   async function onCreateSeller() {
     setErrorMessage("");
     setNewSellerAccessKey("");
@@ -510,6 +568,45 @@ export function PaidPrivateFilePanel({
     setSellerHandle(nextSeller.handle);
     setSellerDisplayName(nextSeller.displayName);
     setSellerPayoutAddress(nextSeller.defaultPayoutAddress);
+    setSellerScreen("dashboard");
+  }
+
+  // Settings screen: persist an edited public display name via the existing
+  // PATCH /api/sellers/me endpoint (handle + receiving config stay read-only).
+  async function onSaveSettings() {
+    if (!seller) {
+      return;
+    }
+    setErrorMessage("");
+    setSettingsSaveStatus("saving");
+    try {
+      const body = await postJson<{ seller: SellerProfile }>(
+        "/api/sellers/me",
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ displayName: sellerDisplayName }),
+        },
+      );
+      setSeller(body.seller);
+      setSellerDisplayName(body.seller.displayName);
+      setSettingsSaveStatus("saved");
+    } catch (error) {
+      setSettingsSaveStatus("idle");
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    }
+  }
+
+  async function onCopyPublicLink() {
+    if (!seller) {
+      return;
+    }
+    const href = new URL(
+      withProductLocale(seller.publicPath, locale),
+      window.location.origin,
+    ).toString();
+    await navigator.clipboard.writeText(href);
+    setPublicLinkCopied(true);
   }
 
   async function onCopyNewSellerAccessKey() {
@@ -584,6 +681,13 @@ export function PaidPrivateFilePanel({
       setShareUrl(href);
       setOrderInput(body.order.orderId);
       setLoadedOrder(body.order);
+      // Seller dashboard: after a successful create, return to the dashboard so
+      // the new file appears in "Your files" (the share link stays available on
+      // the dashboard via the createdOrder/shareUrl state).
+      if (seller) {
+        setSellerScreen("dashboard");
+        void loadSellerFiles();
+      }
     } catch (error) {
       setErrorMessage(formatError(error, copy.errors.serverError));
     } finally {
@@ -1285,7 +1389,129 @@ export function PaidPrivateFilePanel({
           </p>
         ) : null}
 
-        {mode === "send" ? (
+        {mode === "send" && seller ? (
+          <SellerDashboard
+            copy={copy}
+            locale={locale}
+            seller={seller}
+            screen={sellerScreen}
+            onScreenChange={setSellerScreen}
+            files={sellerFiles}
+            filesStatus={sellerFilesStatus}
+            newSellerAccessKey={newSellerAccessKey}
+            displayNameInput={sellerDisplayName}
+            onDisplayNameChange={setSellerDisplayName}
+            settingsSaveStatus={settingsSaveStatus}
+            onSaveSettings={() => void onSaveSettings()}
+            publicLinkCopied={publicLinkCopied}
+            onCopyPublicLink={() => void onCopyPublicLink()}
+            isBusy={isBusy}
+          >
+            {sellerScreen === "create" ? (
+              <>
+                {canPublishFile ? (
+                  <form className="zk-hub-form" onSubmit={onCreateLink}>
+                    <label className="zk-hub-form-field">
+                      <span className="zk-hub-form-label">
+                        {copy.send.fileLabel}
+                      </span>
+                      <span className="zk-hub-file-picker">
+                        <input
+                          className="zk-hub-file-input"
+                          type="file"
+                          onChange={onFileChange}
+                          disabled={isBusy}
+                        />
+                        <span className="zk-hub-file-button">
+                          {copy.send.chooseFileLabel}
+                        </span>
+                        <span className="zk-hub-file-name">
+                          {file ? file.name : copy.send.emptyFileLabel}
+                        </span>
+                      </span>
+                    </label>
+
+                    <label className="zk-hub-form-field">
+                      <span className="zk-hub-form-label">
+                        {copy.send.priceLabel}
+                      </span>
+                      <input
+                        value={priceZec}
+                        onChange={(event) => setPriceZec(event.target.value)}
+                        inputMode="decimal"
+                        disabled={isBusy}
+                      />
+                      <span className="zk-hub-form-hint">
+                        {copy.send.priceHint}
+                      </span>
+                    </label>
+
+                    <label className="zk-hub-form-field">
+                      <span className="zk-hub-form-label">
+                        {copy.send.noteLabel}
+                      </span>
+                      <textarea
+                        value={sellerNote}
+                        onChange={(event) => setSellerNote(event.target.value)}
+                        placeholder={copy.send.notePlaceholder}
+                        disabled={isBusy}
+                        rows={3}
+                      />
+                    </label>
+
+                    <button
+                      className="button-primary"
+                      type="submit"
+                      disabled={isBusy}
+                    >
+                      {busyAction === "encrypting"
+                        ? copy.send.busyLabel
+                        : copy.send.submitLabel}
+                    </button>
+                  </form>
+                ) : null}
+
+                {createdOrder && shareUrl ? (
+                  <div className="zectime-paid-result">
+                    <div>
+                      <p className="eyebrow">{copy.send.successTitle}</p>
+                      <p>{copy.send.successBody}</p>
+                    </div>
+                    <code>{shareUrl}</code>
+                    <div className="zectime-paid-actions">
+                      <button
+                        type="button"
+                        className="button-secondary"
+                        onClick={() =>
+                          void navigator.clipboard.writeText(shareUrl)
+                        }
+                      >
+                        {copy.send.copyLinkLabel}
+                      </button>
+                      <a className="button-primary" href={shareUrl}>
+                        {copy.send.openLinkLabel}
+                      </a>
+                    </div>
+                    <OrderDetails order={createdOrder} copy={copy} />
+
+                    <SellerReleasePanel
+                      order={createdOrder}
+                      locale={locale}
+                      busy={busyAction === "release"}
+                      releaseMessage={releaseMessage}
+                      buyerCode={sellerBuyerCode}
+                      codeConfirmed={sellerCodeConfirmed}
+                      onConfirmCodeChange={setSellerCodeConfirmed}
+                      onRevealCode={() => void onRevealBuyerCode(createdOrder)}
+                      onRelease={() => void onReleaseSellerKey(createdOrder)}
+                      disabled={isBusy}
+                    />
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+          </SellerDashboard>
+        ) : mode === "send" ? (
           <section className="frame zectime-paid-panel surface-reveal">
             <div className="zectime-paid-panel-copy">
               <p className="eyebrow">{copy.tabs.send}</p>
@@ -1296,28 +1522,11 @@ export function PaidPrivateFilePanel({
 
             <div className="zectime-paid-result zectime-seller-auth">
               <div>
-                <p className="eyebrow">
-                  {seller ? copy.seller.loggedInLabel : copy.seller.title}
-                </p>
+                <p className="eyebrow">{copy.seller.title}</p>
                 <p>{copy.seller.body}</p>
               </div>
 
-              {seller ? (
-                <dl className="zectime-paid-details zectime-paid-payment-details">
-                  <div>
-                    <dt>{copy.seller.publicRouteLabel}</dt>
-                    <dd>
-                      <a href={withProductLocale(seller.publicPath, locale)}>
-                        {seller.publicPath}
-                      </a>
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{copy.details.sellerPayoutAddress}</dt>
-                    <dd>{seller.defaultPayoutAddress}</dd>
-                  </div>
-                </dl>
-              ) : (
+              {
                 <>
                   <div className="zectime-paid-tabs" role="tablist">
                     <button
@@ -1494,7 +1703,7 @@ export function PaidPrivateFilePanel({
                     </button>
                   </div>
                 </>
-              )}
+              }
 
               {newSellerAccessKey ? (
                 <div className="zectime-key-vault">
@@ -1551,122 +1760,6 @@ export function PaidPrivateFilePanel({
                 </div>
               ) : null}
             </div>
-
-            {canPublishFile ? (
-              <form className="zk-hub-form" onSubmit={onCreateLink}>
-                <label className="zk-hub-form-field">
-                  <span className="zk-hub-form-label">
-                    {copy.send.fileLabel}
-                  </span>
-                  <span className="zk-hub-file-picker">
-                    <input
-                      className="zk-hub-file-input"
-                      type="file"
-                      onChange={onFileChange}
-                      disabled={isBusy}
-                    />
-                    <span className="zk-hub-file-button">
-                      {copy.send.chooseFileLabel}
-                    </span>
-                    <span className="zk-hub-file-name">
-                      {file ? file.name : copy.send.emptyFileLabel}
-                    </span>
-                  </span>
-                </label>
-
-                <label className="zk-hub-form-field">
-                  <span className="zk-hub-form-label">
-                    {copy.send.priceLabel}
-                  </span>
-                  <input
-                    value={priceZec}
-                    onChange={(event) => setPriceZec(event.target.value)}
-                    inputMode="decimal"
-                    disabled={isBusy}
-                  />
-                  <span className="zk-hub-form-hint">
-                    {copy.send.priceHint}
-                  </span>
-                </label>
-
-                <label className="zk-hub-form-field">
-                  <span className="zk-hub-form-label">
-                    {copy.send.payoutAddressLabel}
-                  </span>
-                  <input
-                    value={sellerPayoutAddress}
-                    onChange={(event) =>
-                      setSellerPayoutAddress(event.target.value)
-                    }
-                    placeholder={copy.send.payoutAddressPlaceholder}
-                    autoComplete="off"
-                    disabled={isBusy}
-                  />
-                  <span className="zk-hub-form-hint">
-                    {copy.send.payoutAddressHint}
-                  </span>
-                </label>
-
-                <label className="zk-hub-form-field">
-                  <span className="zk-hub-form-label">
-                    {copy.send.noteLabel}
-                  </span>
-                  <textarea
-                    value={sellerNote}
-                    onChange={(event) => setSellerNote(event.target.value)}
-                    placeholder={copy.send.notePlaceholder}
-                    disabled={isBusy}
-                    rows={3}
-                  />
-                </label>
-
-                <button
-                  className="button-primary"
-                  type="submit"
-                  disabled={isBusy}
-                >
-                  {busyAction === "encrypting"
-                    ? copy.send.busyLabel
-                    : copy.send.submitLabel}
-                </button>
-              </form>
-            ) : null}
-
-            {createdOrder && shareUrl ? (
-              <div className="zectime-paid-result">
-                <div>
-                  <p className="eyebrow">{copy.send.successTitle}</p>
-                  <p>{copy.send.successBody}</p>
-                </div>
-                <code>{shareUrl}</code>
-                <div className="zectime-paid-actions">
-                  <button
-                    type="button"
-                    className="button-secondary"
-                    onClick={() => void navigator.clipboard.writeText(shareUrl)}
-                  >
-                    {copy.send.copyLinkLabel}
-                  </button>
-                  <a className="button-primary" href={shareUrl}>
-                    {copy.send.openLinkLabel}
-                  </a>
-                </div>
-                <OrderDetails order={createdOrder} copy={copy} />
-
-                <SellerReleasePanel
-                  order={createdOrder}
-                  locale={locale}
-                  busy={busyAction === "release"}
-                  releaseMessage={releaseMessage}
-                  buyerCode={sellerBuyerCode}
-                  codeConfirmed={sellerCodeConfirmed}
-                  onConfirmCodeChange={setSellerCodeConfirmed}
-                  onRevealCode={() => void onRevealBuyerCode(createdOrder)}
-                  onRelease={() => void onReleaseSellerKey(createdOrder)}
-                  disabled={isBusy}
-                />
-              </div>
-            ) : null}
           </section>
         ) : (
           <section className="frame zectime-paid-panel surface-reveal">
@@ -1755,6 +1848,11 @@ export function PaidPrivateFilePanel({
                         copy={copy}
                       />
                     ) : null}
+                    {!loadedOrder.payment ? (
+                      <p className="zk-hub-form-hint">
+                        {copy.receive.paymentAddressHint}
+                      </p>
+                    ) : null}
                     {loadedOrder.payment?.status === "paid" &&
                     loadedOrder.release?.status === "seller_pending" ? (
                       <p className="zk-hub-form-hint">
@@ -1842,6 +1940,334 @@ export function PaidPrivateFilePanel({
       </div>
     </main>
   );
+}
+
+function SellerDashboard({
+  copy,
+  locale,
+  seller,
+  screen,
+  onScreenChange,
+  files,
+  filesStatus,
+  newSellerAccessKey,
+  displayNameInput,
+  onDisplayNameChange,
+  settingsSaveStatus,
+  onSaveSettings,
+  publicLinkCopied,
+  onCopyPublicLink,
+  isBusy,
+  children,
+}: {
+  copy: PaidPrivateFileCopy;
+  locale: ProductLocale;
+  seller: SellerProfile;
+  screen: SellerScreen;
+  onScreenChange: (screen: SellerScreen) => void;
+  files: SellerFile[];
+  filesStatus: "idle" | "loading" | "ready" | "error";
+  newSellerAccessKey: string;
+  displayNameInput: string;
+  onDisplayNameChange: (value: string) => void;
+  settingsSaveStatus: "idle" | "saving" | "saved";
+  onSaveSettings: () => void;
+  publicLinkCopied: boolean;
+  onCopyPublicLink: () => void;
+  isBusy: boolean;
+  children: ReactNode;
+}) {
+  const tabs: Array<{ screen: SellerScreen; label: string }> = [
+    { screen: "dashboard", label: copy.dashboard.tabDashboard },
+    { screen: "files", label: copy.dashboard.tabFiles },
+    { screen: "settings", label: copy.dashboard.tabSettings },
+  ];
+  const activeTab = screen === "create" ? "dashboard" : screen;
+
+  return (
+    <section className="frame ppf-shop surface-reveal">
+      <header className="ppf-shop-header">
+        <div className="ppf-shop-identity">
+          <h2>{seller.displayName}</h2>
+          <p className="ppf-shop-handle">@{seller.handle}</p>
+        </div>
+        <button
+          type="button"
+          className="button-primary ppf-shop-cta"
+          onClick={() => onScreenChange("create")}
+        >
+          {copy.dashboard.createFileCta}
+        </button>
+      </header>
+
+      <nav className="ppf-shop-tabs" role="tablist">
+        {tabs.map((tab) => (
+          <button
+            key={tab.screen}
+            type="button"
+            role="tab"
+            className="ppf-shop-tab"
+            data-active={activeTab === tab.screen}
+            aria-selected={activeTab === tab.screen}
+            onClick={() => onScreenChange(tab.screen)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
+
+      {screen === "create" ? (
+        <div className="ppf-shop-screen">
+          <button
+            type="button"
+            className="ppf-shop-back"
+            onClick={() => onScreenChange("dashboard")}
+          >
+            ← {copy.dashboard.backToDashboard}
+          </button>
+          {children}
+        </div>
+      ) : screen === "settings" ? (
+        <SellerSettingsScreen
+          copy={copy}
+          locale={locale}
+          seller={seller}
+          displayNameInput={displayNameInput}
+          onDisplayNameChange={onDisplayNameChange}
+          settingsSaveStatus={settingsSaveStatus}
+          onSaveSettings={onSaveSettings}
+          publicLinkCopied={publicLinkCopied}
+          onCopyPublicLink={onCopyPublicLink}
+          isBusy={isBusy}
+        />
+      ) : screen === "files" ? (
+        <div className="ppf-shop-screen">
+          <SellerFilesList
+            copy={copy}
+            locale={locale}
+            files={files}
+            filesStatus={filesStatus}
+          />
+        </div>
+      ) : (
+        <div className="ppf-shop-screen">
+          <SellerReceivingCard copy={copy} seller={seller} />
+          {newSellerAccessKey ? null : (
+            <div className="ppf-shop-reminder" role="note">
+              <p className="eyebrow">{copy.dashboard.accessKeyReminderTitle}</p>
+              <p>{copy.dashboard.accessKeyReminderBody}</p>
+            </div>
+          )}
+          <SellerFilesList
+            copy={copy}
+            locale={locale}
+            files={files}
+            filesStatus={filesStatus}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SellerReceivingCard({
+  copy,
+  seller,
+}: {
+  copy: PaidPrivateFileCopy;
+  seller: SellerProfile;
+}) {
+  const fingerprint = seller.ufvkFingerprint
+    ? `${seller.ufvkFingerprint.slice(0, 8)}…`
+    : null;
+  const network = seller.network ?? "main";
+  return (
+    <div className="ppf-receiving-card">
+      <div className="ppf-receiving-head">
+        <p className="eyebrow">{copy.dashboard.receivingTitle}</p>
+      </div>
+      <dl className="ppf-receiving-grid">
+        <div>
+          <dt>{copy.dashboard.receivingAccountLabel}</dt>
+          <dd>
+            <code className="ppf-receiving-address">
+              {seller.defaultPayoutAddress}
+            </code>
+          </dd>
+        </div>
+        <div>
+          <dt>{copy.dashboard.viewingKeyLabel}</dt>
+          <dd className="ppf-receiving-key">
+            {fingerprint ? (
+              <>
+                <code>{fingerprint}</code>
+                <span className="ppf-tag ppf-tag-ok">
+                  {copy.dashboard.viewingKeyHeldBy}
+                </span>
+              </>
+            ) : (
+              <span className="ppf-muted">{copy.dashboard.viewingKeyNone}</span>
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{copy.dashboard.networkLabel}</dt>
+          <dd>{network}</dd>
+        </div>
+      </dl>
+      <p className="ppf-receiving-helper">{copy.dashboard.receivingHelper}</p>
+    </div>
+  );
+}
+
+function SellerFilesList({
+  copy,
+  locale,
+  files,
+  filesStatus,
+}: {
+  copy: PaidPrivateFileCopy;
+  locale: ProductLocale;
+  files: SellerFile[];
+  filesStatus: "idle" | "loading" | "ready" | "error";
+}) {
+  return (
+    <div className="ppf-files">
+      <p className="eyebrow">{copy.dashboard.filesTitle}</p>
+      {filesStatus === "loading" && files.length === 0 ? (
+        <p className="ppf-muted">{copy.dashboard.filesLoading}</p>
+      ) : files.length === 0 ? (
+        <div className="ppf-files-empty">
+          <p className="ppf-files-empty-title">
+            {copy.dashboard.filesEmptyTitle}
+          </p>
+          <p className="ppf-muted">{copy.dashboard.filesEmptyBody}</p>
+        </div>
+      ) : (
+        <ul className="ppf-files-list">
+          {files.map((file) => (
+            <li key={file.orderId} className="ppf-file-row">
+              <div className="ppf-file-main">
+                <span className="ppf-file-name">{file.fileName}</span>
+                <span className="ppf-file-price">{file.displayZec} ZEC</span>
+              </div>
+              <div className="ppf-file-side">
+                <span className="ppf-status-badge" data-status={file.status}>
+                  {formatFileStatus(file.status, copy)}
+                </span>
+                <a
+                  className="ppf-file-open"
+                  href={withProductLocale(file.sharePath, locale)}
+                >
+                  {copy.dashboard.fileOpenLabel}
+                </a>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function SellerSettingsScreen({
+  copy,
+  locale,
+  seller,
+  displayNameInput,
+  onDisplayNameChange,
+  settingsSaveStatus,
+  onSaveSettings,
+  publicLinkCopied,
+  onCopyPublicLink,
+  isBusy,
+}: {
+  copy: PaidPrivateFileCopy;
+  locale: ProductLocale;
+  seller: SellerProfile;
+  displayNameInput: string;
+  onDisplayNameChange: (value: string) => void;
+  settingsSaveStatus: "idle" | "saving" | "saved";
+  onSaveSettings: () => void;
+  publicLinkCopied: boolean;
+  onCopyPublicLink: () => void;
+  isBusy: boolean;
+}) {
+  const saveLabel =
+    settingsSaveStatus === "saving"
+      ? copy.dashboard.settingsSavingLabel
+      : settingsSaveStatus === "saved"
+        ? copy.dashboard.settingsSavedLabel
+        : copy.dashboard.settingsSaveLabel;
+  return (
+    <div className="ppf-shop-screen">
+      <section className="ppf-settings-block">
+        <p className="eyebrow">{copy.dashboard.settingsIdentityTitle}</p>
+        <label className="zk-hub-form-field">
+          <span className="zk-hub-form-label">
+            {copy.seller.publicRouteLabel}
+          </span>
+          <input value={`@${seller.handle}`} readOnly disabled />
+        </label>
+        <label className="zk-hub-form-field">
+          <span className="zk-hub-form-label">
+            {copy.dashboard.settingsDisplayNameLabel}
+          </span>
+          <input
+            value={displayNameInput}
+            onChange={(event) => onDisplayNameChange(event.target.value)}
+            disabled={isBusy}
+          />
+        </label>
+        <button
+          type="button"
+          className="button-secondary"
+          onClick={onSaveSettings}
+          disabled={isBusy || settingsSaveStatus === "saving"}
+        >
+          {saveLabel}
+        </button>
+      </section>
+
+      <section className="ppf-settings-block">
+        <p className="eyebrow">{copy.dashboard.settingsReceivingTitle}</p>
+        <SellerReceivingCard copy={copy} seller={seller} />
+      </section>
+
+      <section className="ppf-settings-block">
+        <p className="eyebrow">{copy.dashboard.settingsPublicLinkTitle}</p>
+        <code className="ppf-receiving-address">
+          {withProductLocale(seller.publicPath, locale)}
+        </code>
+        <button
+          type="button"
+          className="button-secondary"
+          onClick={onCopyPublicLink}
+        >
+          {publicLinkCopied
+            ? copy.dashboard.settingsPublicLinkCopied
+            : copy.dashboard.settingsPublicLinkCopy}
+        </button>
+      </section>
+    </div>
+  );
+}
+
+function formatFileStatus(
+  status: TransferPublicOrder["status"],
+  copy: PaidPrivateFileCopy,
+): string {
+  switch (status) {
+    case "payment_pending":
+      return copy.dashboard.statusPaymentPending;
+    case "paid":
+      return copy.dashboard.statusPaid;
+    case "claimed":
+      return copy.dashboard.statusClaimed;
+    case "created":
+    default:
+      return copy.dashboard.statusCreated;
+  }
 }
 
 function BrandRail({ copy }: { copy: PaidPrivateFileCopy }) {

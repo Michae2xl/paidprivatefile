@@ -386,6 +386,48 @@ export async function listSellerTransferPublicOrders(
     .map(publicOrder);
 }
 
+// Seller shop dashboard: list every order created by a given seller, newest
+// first, as public orders (buyer key material is stripped by publicOrder). Low
+// volume per shop, so a directory scan is acceptable here — mirrors
+// listSellerTransferPublicOrders but matches on the stable sellerId instead of
+// the mutable handle.
+export async function listOrdersForSeller(
+  sellerId: string,
+): Promise<TransferPublicOrder[]> {
+  const ordersRoot = join(transferRoot(), "orders");
+  let entries: string[];
+  try {
+    entries = await readdir(ordersRoot);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return [];
+    }
+    throw error;
+  }
+
+  const orders = await Promise.all(
+    entries
+      .filter((entry) => ORDER_ID_PATTERN.test(entry))
+      .map(async (orderId) => {
+        try {
+          return await readOrder(orderId);
+        } catch (error) {
+          if (isMissingFileError(error)) {
+            return null;
+          }
+          throw error;
+        }
+      }),
+  );
+
+  return orders
+    .filter((order): order is TransferOrder => {
+      return order?.seller?.sellerId === sellerId;
+    })
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map(publicOrder);
+}
+
 export interface ScanWatchlistEntry {
   orderId: string;
   sellerId: string;

@@ -66,6 +66,42 @@ export interface PaidPrivateFileCopy {
     ufvkPreviewReceives: string;
     ufvkPreviewInvalid: string;
   };
+  dashboard: {
+    createFileCta: string;
+    backToDashboard: string;
+    tabDashboard: string;
+    tabFiles: string;
+    tabSettings: string;
+    receivingTitle: string;
+    receivingTag: string;
+    receivingAccountLabel: string;
+    viewingKeyLabel: string;
+    viewingKeyHeldBy: string;
+    viewingKeyNone: string;
+    networkLabel: string;
+    receivingHelper: string;
+    accessKeyReminderTitle: string;
+    accessKeyReminderBody: string;
+    filesTitle: string;
+    filesEmptyTitle: string;
+    filesEmptyBody: string;
+    filesLoading: string;
+    fileOpenLabel: string;
+    settingsTitle: string;
+    settingsIdentityTitle: string;
+    settingsDisplayNameLabel: string;
+    settingsSaveLabel: string;
+    settingsSavedLabel: string;
+    settingsSavingLabel: string;
+    settingsReceivingTitle: string;
+    settingsPublicLinkTitle: string;
+    settingsPublicLinkCopy: string;
+    settingsPublicLinkCopied: string;
+    statusCreated: string;
+    statusPaymentPending: string;
+    statusPaid: string;
+    statusClaimed: string;
+  };
   send: {
     title: string;
     body: string;
@@ -110,6 +146,7 @@ export interface PaidPrivateFileCopy {
     downloadLabel: string;
     paidStatus: string;
     pendingStatus: string;
+    paymentAddressHint: string;
   };
   details: {
     price: string;
@@ -215,6 +252,44 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkPreviewReceives: "Recebe em",
       ufvkPreviewInvalid: "Chave de visualizacao invalida",
     },
+    dashboard: {
+      createFileCta: "Criar arquivo pago",
+      backToDashboard: "Voltar ao painel",
+      tabDashboard: "Painel",
+      tabFiles: "Arquivos",
+      tabSettings: "Configuracoes",
+      receivingTitle: "Recebendo - nao-custodial",
+      receivingTag: "guardado pelo scanner",
+      receivingAccountLabel: "Conta que recebe",
+      viewingKeyLabel: "Chave de visualizacao",
+      viewingKeyHeldBy: "guardada pelo scanner",
+      viewingKeyNone: "nenhuma registrada",
+      networkLabel: "Rede",
+      receivingHelper:
+        "Cada venda recebe um endereco unico derivado desta chave. Detectamos pagamentos somente em modo de leitura - nunca podemos gastar.",
+      accessKeyReminderTitle: "Chave de acesso",
+      accessKeyReminderBody:
+        "Sua chave de acesso aparece apenas uma vez na criacao da loja. Guarde-a fora do navegador: e a unica forma de entrar de novo.",
+      filesTitle: "Seus arquivos",
+      filesEmptyTitle: "Nenhum arquivo ainda",
+      filesEmptyBody: "Crie seu primeiro arquivo pago para comecar a vender.",
+      filesLoading: "Carregando arquivos...",
+      fileOpenLabel: "Abrir",
+      settingsTitle: "Configuracoes",
+      settingsIdentityTitle: "Identidade da loja",
+      settingsDisplayNameLabel: "Nome publico",
+      settingsSaveLabel: "Salvar",
+      settingsSavedLabel: "Salvo",
+      settingsSavingLabel: "Salvando...",
+      settingsReceivingTitle: "Recebendo (nao-custodial)",
+      settingsPublicLinkTitle: "Link publico",
+      settingsPublicLinkCopy: "Copiar link",
+      settingsPublicLinkCopied: "Link copiado",
+      statusCreated: "Criado",
+      statusPaymentPending: "Aguardando pagamento",
+      statusPaid: "Pago",
+      statusClaimed: "Entregue",
+    },
     send: {
       title: "Criar arquivo privado pago",
       body: "Escolha o arquivo, defina o preco em ZEC e compartilhe acesso privado. O servidor guarda ciphertext; a entrega da chave e tratada como sessao Nym.",
@@ -263,6 +338,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       downloadLabel: "Salvar arquivo aberto",
       paidStatus: "Pagamento confirmado",
       pendingStatus: "Aguardando pagamento",
+      paymentAddressHint:
+        "Seu endereco de pagamento + QR aparecem depois que voce criar o pagamento.",
     },
     details: {
       price: "Preco",
@@ -370,6 +447,44 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkPreviewReceives: "Receives at",
       ufvkPreviewInvalid: "Invalid viewing key",
     },
+    dashboard: {
+      createFileCta: "Create paid file",
+      backToDashboard: "Back to dashboard",
+      tabDashboard: "Dashboard",
+      tabFiles: "Files",
+      tabSettings: "Settings",
+      receivingTitle: "Receiving - non-custodial",
+      receivingTag: "held by scanner",
+      receivingAccountLabel: "Receiving account",
+      viewingKeyLabel: "Viewing key",
+      viewingKeyHeldBy: "held by scanner",
+      viewingKeyNone: "none registered",
+      networkLabel: "Network",
+      receivingHelper:
+        "Each sale gets a unique address derived from this key. We detect payments view-only - we can never spend.",
+      accessKeyReminderTitle: "Access key",
+      accessKeyReminderBody:
+        "Your access key is shown only once when the shop is created. Keep it outside the browser: it is the only way to log back in.",
+      filesTitle: "Your files",
+      filesEmptyTitle: "No files yet",
+      filesEmptyBody: "Create your first paid file to start selling.",
+      filesLoading: "Loading files...",
+      fileOpenLabel: "Open",
+      settingsTitle: "Settings",
+      settingsIdentityTitle: "Shop identity",
+      settingsDisplayNameLabel: "Public name",
+      settingsSaveLabel: "Save",
+      settingsSavedLabel: "Saved",
+      settingsSavingLabel: "Saving...",
+      settingsReceivingTitle: "Receiving (non-custodial)",
+      settingsPublicLinkTitle: "Public link",
+      settingsPublicLinkCopy: "Copy link",
+      settingsPublicLinkCopied: "Link copied",
+      statusCreated: "Created",
+      statusPaymentPending: "Awaiting payment",
+      statusPaid: "Paid",
+      statusClaimed: "Delivered",
+    },
     send: {
       title: "Create paid private file",
       body: "Pick a file, set the ZEC price, and share private access. The server stores ciphertext; key delivery is treated as a Nym session.",
@@ -417,6 +532,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       downloadLabel: "Save opened file",
       paidStatus: "Payment confirmed",
       pendingStatus: "Waiting for payment",
+      paymentAddressHint:
+        "Your payment address + QR appear after you create the payment.",
     },
     details: {
       price: "Price",

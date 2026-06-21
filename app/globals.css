@@ -1620,3 +1620,366 @@ a {
     min-width: 0;
   }
 }
+
+/* Seller shop dashboard: a dark, self-contained surface (consistent with the
+   dark topbar) that hosts the header, tabs, the receiving card, and the files
+   list. One screen renders at a time. */
+.ppf-shop {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid rgba(20, 232, 140, 0.18);
+  border-radius: 10px;
+  background: rgba(9, 13, 11, 0.92);
+  color: var(--surface-strong);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+
+.ppf-shop-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ppf-shop-identity {
+  display: grid;
+  gap: 2px;
+}
+
+.ppf-shop-identity h2 {
+  margin: 0;
+  font-size: 1.3rem;
+  color: var(--surface-strong);
+}
+
+.ppf-shop-handle {
+  margin: 0;
+  color: var(--green);
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.ppf-shop-cta {
+  flex: none;
+}
+
+.ppf-shop-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 12px 22px 0;
+}
+
+.ppf-shop-tab {
+  padding: 9px 16px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.ppf-shop-tab:hover {
+  color: var(--surface-strong);
+}
+
+.ppf-shop-tab[data-active="true"] {
+  background: rgba(20, 232, 140, 0.12);
+  border-color: rgba(20, 232, 140, 0.28);
+  color: var(--surface-strong);
+}
+
+.ppf-shop-screen {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ppf-shop-back {
+  justify-self: start;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  color: var(--green);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ppf-shop-screen .zk-hub-form-label {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.ppf-shop-screen .zk-hub-form input,
+.ppf-shop-screen .zk-hub-form textarea {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--surface-strong);
+}
+
+/* Receiving card */
+.ppf-receiving-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(20, 232, 140, 0.28);
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(20, 232, 140, 0.12), transparent 62%),
+    rgba(255, 255, 255, 0.03);
+}
+
+.ppf-receiving-head .eyebrow {
+  color: var(--green);
+}
+
+.ppf-receiving-grid {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+}
+
+.ppf-receiving-grid div {
+  display: grid;
+  gap: 4px;
+}
+
+.ppf-receiving-grid dt {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ppf-receiving-grid dd {
+  margin: 0;
+  color: var(--surface-strong);
+}
+
+.ppf-receiving-address {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 6px 10px;
+  border: 1px solid rgba(20, 128, 84, 0.4);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--green);
+  font-size: 0.85rem;
+}
+
+.ppf-receiving-key {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ppf-receiving-key code {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--surface-strong);
+  font-weight: 700;
+}
+
+.ppf-tag {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.ppf-tag-ok {
+  border: 1px solid rgba(20, 232, 140, 0.4);
+  background: rgba(20, 232, 140, 0.14);
+  color: var(--green);
+}
+
+.ppf-muted {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.ppf-receiving-helper {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.62);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* Access-key reminder */
+.ppf-shop-reminder {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid rgba(201, 151, 37, 0.4);
+  border-left: 4px solid #c99725;
+  border-radius: 8px;
+  background: rgba(201, 151, 37, 0.08);
+}
+
+.ppf-shop-reminder .eyebrow {
+  color: #c99725;
+}
+
+.ppf-shop-reminder p:last-child {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.85rem;
+}
+
+/* Files list */
+.ppf-files {
+  display: grid;
+  gap: 12px;
+}
+
+.ppf-files .eyebrow {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.ppf-files-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ppf-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ppf-file-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ppf-file-name {
+  font-weight: 650;
+  color: var(--surface-strong);
+  overflow-wrap: anywhere;
+}
+
+.ppf-file-price {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.82rem;
+}
+
+.ppf-file-side {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
+.ppf-status-badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ppf-status-badge[data-status="paid"],
+.ppf-status-badge[data-status="claimed"] {
+  border-color: rgba(20, 232, 140, 0.4);
+  background: rgba(20, 232, 140, 0.12);
+  color: var(--green);
+}
+
+.ppf-status-badge[data-status="payment_pending"] {
+  border-color: rgba(201, 151, 37, 0.4);
+  background: rgba(201, 151, 37, 0.12);
+  color: #e3b955;
+}
+
+.ppf-file-open {
+  color: var(--green);
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.ppf-file-open:hover {
+  text-decoration: underline;
+}
+
+.ppf-files-empty {
+  display: grid;
+  gap: 4px;
+  padding: 22px 16px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  text-align: center;
+}
+
+.ppf-files-empty-title {
+  margin: 0;
+  font-weight: 650;
+  color: var(--surface-strong);
+}
+
+/* Settings screen */
+.ppf-settings-block {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.ppf-settings-block .eyebrow {
+  color: rgba(255, 255, 255, 0.62);
+}
+
+@media (max-width: 640px) {
+  .ppf-shop-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ppf-shop-cta {
+    width: 100%;
+  }
+
+  .ppf-shop-tabs {
+    flex-wrap: wrap;
+  }
+
+  .ppf-file-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ppf-file-side {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
