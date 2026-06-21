@@ -323,6 +323,7 @@ export function PaidPrivateFilePanel({
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   const autoReleaseRef = useRef(false);
+  const buyerAutoClaimRef = useRef(false);
   // Dashboard auto-release: orders this browser has already fired a silent
   // release for, so the periodic dashboard scan never re-releases the same order.
   const dashboardReleasedRef = useRef<Set<string>>(new Set());
@@ -1527,6 +1528,36 @@ export function PaidPrivateFilePanel({
     downloadUrl,
   ]);
 
+  // Buyer auto-claim: once the seller releases the key (release "ready") for a
+  // paid order, fetch + decrypt + download automatically so the buyer never has
+  // to hunt for a button (the modal can be dismissed). Fires once; the in-transit
+  // Download button is the manual fallback. Resets when no longer paid+ready.
+  useEffect(() => {
+    if (mode !== "receive" || !loadedOrder) {
+      return;
+    }
+    const ready =
+      isOrderPaid(loadedOrder) && loadedOrder.release?.status === "ready";
+    if (!ready || downloadUrl || loadedOrder.status === "claimed") {
+      buyerAutoClaimRef.current = false;
+      return;
+    }
+    if (buyerAutoClaimRef.current || busyAction !== "idle") {
+      return;
+    }
+    buyerAutoClaimRef.current = true;
+    void onUnlockFile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    mode,
+    loadedOrder?.orderId,
+    loadedOrder?.release?.status,
+    loadedOrder?.payment?.status,
+    loadedOrder?.status,
+    downloadUrl,
+    busyAction,
+  ]);
+
   const isBusy = busyAction !== "idle";
   const mustAcknowledgeAccessKey =
     Boolean(newSellerAccessKey) && !accessKeyAcknowledged;
@@ -1999,6 +2030,7 @@ export function PaidPrivateFilePanel({
             addressCopied={addressCopied}
             onCopyAddress={() => void onCopyPaymentAddress()}
             onDevPay={() => void onDevPay()}
+            onDownload={() => void onUnlockFile()}
           />
         )}
       </div>
@@ -2052,6 +2084,7 @@ function BuyerCheckout({
   addressCopied,
   onCopyAddress,
   onDevPay,
+  onDownload,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
@@ -2072,6 +2105,7 @@ function BuyerCheckout({
   addressCopied: boolean;
   onCopyAddress: () => void;
   onDevPay: () => void;
+  onDownload: () => void;
 }) {
   const phase = getBuyerFlowPhase({
     order: loadedOrder,
@@ -2127,17 +2161,40 @@ function BuyerCheckout({
                 ) : null}
               </div>
             ) : phase === "in-transit" ? (
-              <div
-                className="ppf-buyer-status"
-                data-tone="transit"
-                role="status"
-              >
-                <span className="ppf-buyer-spinner" aria-hidden="true" />
-                <div>
-                  <p className="eyebrow">{copy.receive.inTransitTitle}</p>
-                  <p>{copy.receive.inTransitBody}</p>
+              loadedOrder.release?.status === "ready" ? (
+                <div
+                  className="ppf-buyer-status"
+                  data-tone="ready"
+                  role="status"
+                >
+                  <div>
+                    <p className="eyebrow">{copy.receive.modalTitle}</p>
+                    <p>{copy.receive.modalBody}</p>
+                  </div>
+                  <button
+                    type="button"
+                    className="button-primary ppf-buyer-download"
+                    onClick={onDownload}
+                    disabled={busyAction === "unlocking"}
+                  >
+                    {busyAction === "unlocking"
+                      ? copy.receive.modalPreparingLabel
+                      : copy.receive.modalDownloadLabel}
+                  </button>
                 </div>
-              </div>
+              ) : (
+                <div
+                  className="ppf-buyer-status"
+                  data-tone="transit"
+                  role="status"
+                >
+                  <span className="ppf-buyer-spinner" aria-hidden="true" />
+                  <div>
+                    <p className="eyebrow">{copy.receive.inTransitTitle}</p>
+                    <p>{copy.receive.inTransitBody}</p>
+                  </div>
+                </div>
+              )
             ) : phase === "awaiting-payment" && payment?.paymentAddress ? (
               <div className="ppf-buyer-pay">
                 <div className="ppf-buyer-pay-head">
