@@ -2259,14 +2259,24 @@ a {
 }
 
 .ppf-file-open {
-  color: var(--green);
+  padding: 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--surface-strong);
+  font: inherit;
+  font-size: 0.78rem;
   font-weight: 650;
-  text-decoration: none;
   white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
 }
 
 .ppf-file-open:hover {
-  text-decoration: underline;
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .ppf-file-manage {
