@@ -782,7 +782,14 @@ export function PaidPrivateFilePanel({
       // Auto-create the payment intent so the QR + address appear with NO
       // button. createPaymentIntentForOrder is idempotent server-side (it
       // returns the existing payment), so this is safe on every (re)load.
+      // BUT never bind a payment when the logged-in SELLER is viewing their own
+      // order — that would make the seller's browser the buyer and lock the real
+      // buyer out. The seller should only copy the link and send it on.
+      const viewingOwnOrder = Boolean(
+        seller?.sellerId && body.order.seller?.sellerId === seller.sellerId,
+      );
       if (
+        !viewingOwnOrder &&
         !body.order.payment &&
         body.order.status !== "paid" &&
         body.order.status !== "claimed"
@@ -1097,7 +1104,32 @@ export function PaidPrivateFilePanel({
       setErrorMessage(copy.errors.paymentRequired);
       return;
     }
-    const download = pendingDownloadRef.current;
+    // The seller's envelope can arrive over the mixnet BEFORE this buyer ran its
+    // own claim (the claim is what stashes the signed ciphertext URL). If the URL
+    // is missing, claim NOW to fetch it, then decrypt with the envelope we just
+    // received over Nym. This removes the send-before-buyer-ready race.
+    let download = pendingDownloadRef.current;
+    if (!download) {
+      try {
+        const claim = await postJson<ClaimResponse>(
+          `/api/transfers/${encodeURIComponent(keyOnly.orderId)}/claim`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
+          },
+        );
+        setLoadedOrder(claim.order);
+        setPayment(claim.order.payment);
+        if (claim.download) {
+          pendingDownloadRef.current = claim.download;
+          download = claim.download;
+        }
+      } catch (error) {
+        setErrorMessage(formatError(error, copy.errors.serverError));
+        return;
+      }
+    }
     if (!download) {
       setErrorMessage(copy.errors.paymentRequired);
       return;
@@ -2675,12 +2707,11 @@ function SellerFilesList({
                   >
                     {manageLabel}
                   </button>
-                  <a
-                    className="ppf-file-open"
-                    href={withProductLocale(file.sharePath, locale)}
-                  >
-                    {copy.dashboard.fileOpenLabel}
-                  </a>
+                  <FileShareCopyButton
+                    sharePath={file.sharePath}
+                    locale={locale}
+                    copy={copy}
+                  />
                 </div>
               </li>
             );
@@ -2688,6 +2719,41 @@ function SellerFilesList({
         </ul>
       )}
     </div>
+  );
+}
+
+// Copy the buyer payment link to the clipboard. The seller must NEVER open this
+// link in their own browser — doing so auto-creates a payment intent and binds
+// the order's buyer slot to the seller's browser, so the real buyer can no longer
+// claim. The seller's only action is to copy it and send it to the buyer.
+function FileShareCopyButton({
+  sharePath,
+  locale,
+  copy,
+}: {
+  sharePath: string;
+  locale: ProductLocale;
+  copy: PaidPrivateFileCopy;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="ppf-file-open"
+      onClick={() => {
+        const url = new URL(
+          withProductLocale(sharePath, locale),
+          window.location.origin,
+        ).toString();
+        void navigator.clipboard.writeText(url);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied
+        ? copy.dashboard.fileLinkCopiedLabel
+        : copy.dashboard.fileCopyLinkLabel}
+    </button>
   );
 }
 

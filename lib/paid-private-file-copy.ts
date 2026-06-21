@@ -89,6 +89,8 @@ export interface PaidPrivateFileCopy {
     filesEmptyBody: string;
     filesLoading: string;
     fileOpenLabel: string;
+    fileCopyLinkLabel: string;
+    fileLinkCopiedLabel: string;
     settingsTitle: string;
     settingsIdentityTitle: string;
     settingsDisplayNameLabel: string;
@@ -304,6 +306,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       filesEmptyBody: "Crie seu primeiro arquivo pago para comecar a vender.",
       filesLoading: "Carregando arquivos...",
       fileOpenLabel: "Abrir",
+      fileCopyLinkLabel: "Copiar link",
+      fileLinkCopiedLabel: "Link copiado",
       settingsTitle: "Configuracoes",
       settingsIdentityTitle: "Identidade da loja",
       settingsDisplayNameLabel: "Nome publico",
@@ -528,6 +532,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       filesEmptyBody: "Create your first paid file to start selling.",
       filesLoading: "Loading files...",
       fileOpenLabel: "Open",
+      fileCopyLinkLabel: "Copy link",
+      fileLinkCopiedLabel: "Link copied",
       settingsTitle: "Settings",
       settingsIdentityTitle: "Shop identity",
       settingsDisplayNameLabel: "Public name",
