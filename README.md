@@ -146,6 +146,8 @@ Each payment intent in this mode pops one free address from the pool, binds it t
 
 Both `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET` and `PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET` are required for their endpoints: if a secret is unset, the corresponding request is rejected (not silently accepted). This is the same trust model as the CipherPay webhook — an HMAC-authenticated local reporter — but it never sends the wallet, keys, or the file over the wire, only the signed "paid" report.
 
+The watcher learns which addresses to watch from a signed watchlist endpoint `POST /api/transfers/payments/zcash/watchlist` (also signed with `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`), which returns the deposit addresses currently assigned to pending orders. This indirection exists because Zallet `0.1.0-alpha.3`'s `z_listunspent` does **not** return a per-note receiving address; the watcher instead derives per-order Unified Addresses with `z_getaddressforaccount` and queries `z_listunspent(0, 9999999, true, [address])` once per watched address. See [scripts/README-zallet.md](scripts/README-zallet.md) for the local bridge scripts (`zallet-pool-filler.mjs`, `zallet-payment-watcher.mjs`) and how to run them next to a Zallet wallet (over an SSH tunnel when the wallet is on another host).
+
 ## Seller Workspaces
 
 Sellers can create a no-email workspace:
@@ -184,9 +186,15 @@ npm test
 npm run build
 ```
 
+## Deployment
+
+Deployed on Railway as the standalone service `paidprivatefile` (`paidprivatefile-production.up.railway.app`), built with Nixpacks and Node 20 pinned (`engines.node` + `NIXPACKS_NODE_VERSION=20`; Next 16 requires Node >= 20.9). Set strong `PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET` and `PAID_PRIVATE_FILE_AUTH_SECRET` — they otherwise fall back to public dev defaults.
+
+Storage caveat: order and deposit-pool state live under `PAID_PRIVATE_FILE_RUNTIME_DIR`, which defaults to the OS temp dir. On Railway that is **ephemeral** — a restart or redeploy wipes pending orders and the address pool (refill the pool and avoid redeploys while an order is settling). For durable operation, mount a Railway volume and point `PAID_PRIVATE_FILE_RUNTIME_DIR` at it; for real scale, move to object storage plus a transactional database.
+
 ## Current Status
 
-Prototype moving toward real `nym-claim-v1`. The system supports no-email seller workspaces, public seller routes, local encrypted-file order creation, seller wallet/price configuration, browser-side Nym receiver startup, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, standalone `nym-client` WebSocket delivery, local Nym outbox fallback, signed ciphertext URLs inside the Nym claim payload, and browser-side decryption. The integrated `zkglobalcredit.tech` implementation now uses the same lower-friction buyer direction: open link, auto-detect a private receiver when available, pay in ZEC, then open locally.
+Prototype moving toward real `nym-claim-v1`. The system supports no-email seller workspaces, public seller routes, local encrypted-file order creation, seller wallet/price configuration, browser-side Nym receiver startup, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, standalone `nym-client` WebSocket delivery, local Nym outbox fallback, signed ciphertext URLs inside the Nym claim payload, and browser-side decryption. Real on-chain ZEC payment is wired via the `zcash-onchain` provider and a local Zallet bridge (per-order deposit Unified Addresses from a pool, a signed watchlist, and a signed payment webhook), validated against Zallet `0.1.0-alpha.3`. The remaining piece for a fully private flow is live Nym delivery (planned as seller-browser-direct send, no server nym-client). The integrated `zkglobalcredit.tech` implementation now uses the same lower-friction buyer direction: open link, auto-detect a private receiver when available, pay in ZEC, then open locally.
 
 Key custody is pure seller-held in every path: the server has no file key and no way to wrap it. The seller browser keeps `file_key` and `release_secret` in localStorage (`zectime_paid_link_seller_release_<orderId>`) and releases a buyer-wrapped key envelope via `POST /api/transfers/:orderId/key-release` after payment. The tradeoff is that the seller must keep the tab open to release the key; the seller panel auto-releases on payment confirmation and also exposes a manual "Release key" button. Until the seller releases, the buyer's claim is blocked with a clear "awaiting seller release" state.
 

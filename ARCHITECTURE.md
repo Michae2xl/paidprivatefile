@@ -240,6 +240,8 @@ Webhook settlement rules:
 - under-payment or under-confirmation -> `200 { ok: true, ignored: true, reason }` without settling, so the watcher retries as confirmations grow (never an error).
 - replaying the same `txid` after paid is idempotent; a paid/claimed order never regresses.
 
+Watcher detail (Zallet `0.1.0-alpha.3`): `z_listunspent` does **not** return a per-note receiving address, so the watcher cannot read the address off a note. Instead it pulls the live deposit addresses from a third signed endpoint — `POST /api/transfers/payments/zcash/watchlist` (signed with `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`; returns the addresses assigned to pending orders) — and queries `z_listunspent(0, 9999999, true, [address])` once per watched address; any unspent notes are aggregated (sum value, min confirmations) and reported to the webhook above. Deposit addresses are diversified Unified Addresses of a single Zallet account (`z_getaddressforaccount`), so no per-order account is required. The local bridge scripts are `scripts/zallet-pool-filler.mjs` and `scripts/zallet-payment-watcher.mjs` (see `scripts/README-zallet.md`).
+
 ## Seller Workspaces
 
 Seller accounts are intentionally no-email in the prototype:
