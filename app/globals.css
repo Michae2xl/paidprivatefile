@@ -296,6 +296,49 @@ a {
   color: var(--ink);
 }
 
+/* Compact, static flow strip — sits above the menu, no card / animation. */
+.zectime-flow-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.zectime-flow-strip li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: rgba(255, 254, 248, 0.45);
+}
+
+.zectime-flow-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255, 254, 248, 0.28);
+}
+
+.zectime-flow-strip li[data-state="done"] {
+  color: rgba(255, 254, 248, 0.72);
+}
+
+.zectime-flow-strip li[data-state="done"] .zectime-flow-dot {
+  background: #c99725;
+}
+
+.zectime-flow-strip li[data-state="active"] {
+  color: #fffef8;
+}
+
+.zectime-flow-strip li[data-state="active"] .zectime-flow-dot {
+  background: #14e88c;
+}
+
 .zectime-paid-panel {
   display: grid;
   grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1fr);

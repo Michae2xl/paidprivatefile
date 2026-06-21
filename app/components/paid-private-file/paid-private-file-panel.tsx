@@ -1258,6 +1258,7 @@ export function PaidPrivateFilePanel({
             <h1>{copy.shell.title}</h1>
           </div>
           <p className="hero-copy">{copy.shell.body}</p>
+          <TransferMotion copy={copy} stage={flowMotionStage} />
           <div className="zectime-paid-tabs" role="tablist">
             <button
               type="button"
@@ -1551,8 +1552,6 @@ export function PaidPrivateFilePanel({
               ) : null}
             </div>
 
-            <TransferMotion copy={copy} stage={flowMotionStage} />
-
             {canPublishFile ? (
               <form className="zk-hub-form" onSubmit={onCreateLink}>
                 <label className="zk-hub-form-field">
@@ -1737,8 +1736,6 @@ export function PaidPrivateFilePanel({
                   : copy.receive.loadLabel}
               </button>
             </form>
-
-            <TransferMotion copy={copy} stage={flowMotionStage} />
 
             {loadedOrder ? (
               <div className="zectime-paid-result">
@@ -1928,63 +1925,36 @@ function TransferMotion({
   copy: PaidPrivateFileCopy;
   stage: FlowMotionStage;
 }) {
-  const steps: Array<{
-    stage: FlowMotionStage;
-    label: string;
-    body: string;
-  }> = [
-    {
-      stage: "transfer",
-      label: copy.motion.transferLabel,
-      body: copy.motion.transferBody,
-    },
-    {
-      stage: "payment",
-      label: copy.motion.paymentLabel,
-      body: copy.motion.paymentBody,
-    },
-    {
-      stage: "done",
-      label: copy.motion.doneLabel,
-      body: copy.motion.doneBody,
-    },
+  const steps: Array<{ stage: FlowMotionStage; label: string }> = [
+    { stage: "transfer", label: copy.motion.transferLabel },
+    { stage: "payment", label: copy.motion.paymentLabel },
+    { stage: "done", label: copy.motion.doneLabel },
   ];
   const activeIndex = steps.findIndex((step) => step.stage === stage);
 
+  // Compact, static stage strip (no card / orbit / animation): a slim row that
+  // sits above the menu and reflects the current flow stage.
   return (
-    <div className="zectime-transfer-motion" data-stage={stage}>
-      <div className="zectime-motion-head">
-        <div>
-          <p className="eyebrow">{copy.motion.title}</p>
-          <p>{copy.motion.body}</p>
-        </div>
-        <div className="zectime-motion-orbit" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
-      </div>
-      <div className="zectime-motion-line" aria-hidden="true">
-        <span />
-      </div>
-      <ol>
-        {steps.map((step, index) => {
-          const state =
-            index < activeIndex
-              ? "done"
-              : index === activeIndex
-                ? "active"
-                : "pending";
-          return (
-            <li key={step.stage} data-state={state}>
-              <span className="zectime-motion-dot" aria-hidden="true" />
-              <strong>{step.label}</strong>
-              <span>{step.body}</span>
-            </li>
-          );
-        })}
-      </ol>
-    </div>
+    <ol
+      className="zectime-flow-strip"
+      data-stage={stage}
+      aria-label={copy.motion.title}
+    >
+      {steps.map((step, index) => {
+        const state =
+          index < activeIndex
+            ? "done"
+            : index === activeIndex
+              ? "active"
+              : "pending";
+        return (
+          <li key={step.stage} data-state={state}>
+            <span className="zectime-flow-dot" aria-hidden="true" />
+            <span>{step.label}</span>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
