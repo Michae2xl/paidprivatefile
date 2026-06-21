@@ -103,6 +103,16 @@ export interface PaidPrivateFileCopy {
     statusPaymentPending: string;
     statusPaid: string;
     statusClaimed: string;
+    statusDetecting: string;
+    statusPaidReady: string;
+    fileManageLabel: string;
+    fileReleaseLabel: string;
+    manageTitle: string;
+    manageLoading: string;
+    manageError: string;
+    manageStatusLabel: string;
+    secretMissingTitle: string;
+    secretMissingBody: string;
   };
   send: {
     title: string;
@@ -308,6 +318,17 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       statusPaymentPending: "Aguardando pagamento",
       statusPaid: "Pago",
       statusClaimed: "Entregue",
+      statusDetecting: "Detectando pagamento",
+      statusPaidReady: "Pago - pronto para entregar",
+      fileManageLabel: "Gerenciar",
+      fileReleaseLabel: "Liberar chave",
+      manageTitle: "Liberar chave do arquivo",
+      manageLoading: "Carregando pedido...",
+      manageError: "Nao foi possivel carregar este pedido.",
+      manageStatusLabel: "Status",
+      secretMissingTitle: "Segredo em outro dispositivo",
+      secretMissingBody:
+        "Este arquivo foi criado em outro dispositivo/navegador. Abra a loja la para liberar a chave. A custodia e do vendedor: a chave so pode ser liberada do navegador que criou o arquivo.",
     },
     send: {
       title: "Criar arquivo privado pago",
@@ -521,6 +542,17 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       statusPaymentPending: "Awaiting payment",
       statusPaid: "Paid",
       statusClaimed: "Delivered",
+      statusDetecting: "Detecting payment",
+      statusPaidReady: "Paid - ready to deliver",
+      fileManageLabel: "Manage",
+      fileReleaseLabel: "Release key",
+      manageTitle: "Release file key",
+      manageLoading: "Loading order...",
+      manageError: "Could not load this order.",
+      manageStatusLabel: "Status",
+      secretMissingTitle: "Secret on another device",
+      secretMissingBody:
+        "This file was created on another device/browser. Open it there to release the key. Custody is seller-held: the key can only be released from the browser that created the file.",
     },
     send: {
       title: "Create paid private file",

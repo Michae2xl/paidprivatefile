@@ -2269,6 +2269,59 @@ a {
   text-decoration: underline;
 }
 
+.ppf-file-manage {
+  padding: 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--surface-strong);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+
+.ppf-file-manage:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ppf-file-manage-cta {
+  border-color: rgba(20, 232, 140, 0.45);
+  background: rgba(20, 232, 140, 0.14);
+  color: var(--green);
+}
+
+.ppf-file-manage-cta:hover {
+  border-color: rgba(20, 232, 140, 0.7);
+  background: rgba(20, 232, 140, 0.2);
+}
+
+/* Manage / release detail screen */
+.ppf-manage {
+  display: grid;
+  gap: 16px;
+}
+
+.ppf-manage-head {
+  display: grid;
+  gap: 4px;
+}
+
+.ppf-manage-head .eyebrow {
+  color: var(--green);
+}
+
+.ppf-manage-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .ppf-files-empty {
   display: grid;
   gap: 4px;

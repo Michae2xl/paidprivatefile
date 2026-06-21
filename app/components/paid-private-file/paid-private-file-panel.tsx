@@ -217,7 +217,7 @@ interface BrowserNymClient {
 
 type Mode = "send" | "receive";
 type SellerAuthMode = "create" | "login";
-type SellerScreen = "dashboard" | "files" | "settings" | "create";
+type SellerScreen = "dashboard" | "files" | "settings" | "create" | "manage";
 type FlowMotionStage = "transfer" | "payment" | "done";
 type BusyAction =
   | "idle"
@@ -255,6 +255,16 @@ export function PaidPrivateFilePanel({
   const [sellerScreen, setSellerScreen] = useState<SellerScreen>("dashboard");
   const [sellerFiles, setSellerFiles] = useState<SellerFile[]>([]);
   const [sellerFilesStatus, setSellerFilesStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  // Manage/release screen: a single file opened from the dashboard list. We hold
+  // the full order (GET /api/transfers/:id) so SellerReleasePanel can read
+  // release.status, and a load status so the screen can show loading/error.
+  const [manageOrderId, setManageOrderId] = useState<string | null>(null);
+  const [manageOrder, setManageOrder] = useState<TransferPublicOrder | null>(
+    null,
+  );
+  const [manageStatus, setManageStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
   const [settingsSaveStatus, setSettingsSaveStatus] = useState<
@@ -313,6 +323,9 @@ export function PaidPrivateFilePanel({
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   const autoReleaseRef = useRef(false);
+  // Dashboard auto-release: orders this browser has already fired a silent
+  // release for, so the periodic dashboard scan never re-releases the same order.
+  const dashboardReleasedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!initialOrderId) {
@@ -457,6 +470,49 @@ export function PaidPrivateFilePanel({
     void loadSellerFiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seller?.sellerId, sellerScreen]);
+
+  // Open a single file's manage/release screen from the dashboard list. The files
+  // summary does NOT carry release.status, so we fetch the full order here and
+  // hand it to SellerReleasePanel (the same machinery used in create-success).
+  async function loadManageOrder(orderId: string) {
+    setManageStatus("loading");
+    setManageOrder(null);
+    setReleaseMessage("");
+    setSellerBuyerCode("");
+    setSellerCodeConfirmed(false);
+    try {
+      const body = await postJson<{ order: TransferPublicOrder }>(
+        `/api/transfers/${encodeURIComponent(orderId)}`,
+        { method: "GET" },
+      );
+      setManageOrder(body.order);
+      setManageStatus("ready");
+    } catch {
+      setManageStatus("error");
+    }
+  }
+
+  function onOpenManage(orderId: string) {
+    setManageOrderId(orderId);
+    setSellerScreen("manage");
+    void loadManageOrder(orderId);
+  }
+
+  // Manage screen state writes flow through the shared release helpers, which call
+  // applyOrderState (it updates createdOrder/loadedOrder). Mirror the released
+  // order into manageOrder so the open manage screen reflects the new release
+  // status immediately after a manual release.
+  useEffect(() => {
+    if (sellerScreen !== "manage" || !manageOrderId) {
+      return;
+    }
+    const released =
+      loadedOrder?.orderId === manageOrderId ? loadedOrder : null;
+    if (released) {
+      setManageOrder(released);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedOrder, sellerScreen, manageOrderId]);
 
   async function onCreateSeller() {
     setErrorMessage("");
@@ -1340,6 +1396,75 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createdOrder, loadedOrder, busyAction]);
 
+  // Dashboard auto-release: while a logged-in seller has the shop dashboard open,
+  // periodically (~8s) fetch the full order for every "paid" file in the list and
+  // auto-release the key for any that are still seller_pending AND whose local
+  // release secret lives in THIS browser. This is what unblocks an existing paid
+  // order without the seller having to do anything — and it never fires for files
+  // created on another device (loadSellerReleaseDraft returns null there).
+  useEffect(() => {
+    if (mode !== "send" || !seller) {
+      return;
+    }
+    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+      return;
+    }
+    // Candidate orders: paid summaries whose release secret is on this browser.
+    const candidates = sellerFiles
+      .filter((file) => file.status === "paid")
+      .map((file) => file.orderId)
+      .filter((orderId) => Boolean(loadSellerReleaseDraft(orderId)));
+    if (candidates.length === 0) {
+      return;
+    }
+
+    let active = true;
+    async function scanOnce() {
+      for (const orderId of candidates) {
+        if (!active) {
+          return;
+        }
+        if (dashboardReleasedRef.current.has(orderId)) {
+          continue;
+        }
+        try {
+          const body = await postJson<{ order: TransferPublicOrder }>(
+            `/api/transfers/${encodeURIComponent(orderId)}`,
+            { method: "GET" },
+          );
+          if (!active) {
+            return;
+          }
+          const order = body.order;
+          if (
+            order.release?.status === "seller_pending" &&
+            isOrderPaid(order) &&
+            loadSellerReleaseDraft(orderId)
+          ) {
+            // Guard before awaiting so a slow release can't double-fire.
+            dashboardReleasedRef.current.add(orderId);
+            await onReleaseSellerKey(order, { silent: true });
+          } else if (order.release?.status === "ready") {
+            dashboardReleasedRef.current.add(orderId);
+          }
+        } catch {
+          // Transient failures are non-fatal; retry on the next tick.
+        }
+      }
+    }
+
+    void scanOnce();
+    const interval = window.setInterval(() => {
+      void scanOnce();
+    }, 8000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, seller?.sellerId, sellerScreen, sellerFiles]);
+
   // Buyer-side polling: while a buyer order is loaded and not yet downloaded,
   // poll the public order status so the flow advances on its own (waiting to
   // pay -> in transit -> confirmed). Stops once the file is opened locally
@@ -1484,6 +1609,19 @@ export function PaidPrivateFilePanel({
             onScreenChange={setSellerScreen}
             files={sellerFiles}
             filesStatus={sellerFilesStatus}
+            onOpenManage={onOpenManage}
+            manageOrder={manageOrder}
+            manageStatus={manageStatus}
+            onReloadManage={() =>
+              manageOrderId ? void loadManageOrder(manageOrderId) : undefined
+            }
+            releaseMessage={releaseMessage}
+            buyerCode={sellerBuyerCode}
+            codeConfirmed={sellerCodeConfirmed}
+            onConfirmCodeChange={setSellerCodeConfirmed}
+            onRevealCode={(order) => void onRevealBuyerCode(order)}
+            onRelease={(order) => void onReleaseSellerKey(order)}
+            releaseBusy={busyAction === "release"}
             newSellerAccessKey={newSellerAccessKey}
             displayNameInput={sellerDisplayName}
             onDisplayNameChange={setSellerDisplayName}
@@ -2193,6 +2331,17 @@ function SellerDashboard({
   onScreenChange,
   files,
   filesStatus,
+  onOpenManage,
+  manageOrder,
+  manageStatus,
+  onReloadManage,
+  releaseMessage,
+  buyerCode,
+  codeConfirmed,
+  onConfirmCodeChange,
+  onRevealCode,
+  onRelease,
+  releaseBusy,
   newSellerAccessKey,
   displayNameInput,
   onDisplayNameChange,
@@ -2211,6 +2360,17 @@ function SellerDashboard({
   onScreenChange: (screen: SellerScreen) => void;
   files: SellerFile[];
   filesStatus: "idle" | "loading" | "ready" | "error";
+  onOpenManage: (orderId: string) => void;
+  manageOrder: TransferPublicOrder | null;
+  manageStatus: "idle" | "loading" | "ready" | "error";
+  onReloadManage: () => void;
+  releaseMessage: string;
+  buyerCode: string;
+  codeConfirmed: boolean;
+  onConfirmCodeChange: (confirmed: boolean) => void;
+  onRevealCode: (order: TransferPublicOrder) => void;
+  onRelease: (order: TransferPublicOrder) => void;
+  releaseBusy: boolean;
   newSellerAccessKey: string;
   displayNameInput: string;
   onDisplayNameChange: (value: string) => void;
@@ -2227,7 +2387,8 @@ function SellerDashboard({
     { screen: "files", label: copy.dashboard.tabFiles },
     { screen: "settings", label: copy.dashboard.tabSettings },
   ];
-  const activeTab = screen === "create" ? "dashboard" : screen;
+  const activeTab =
+    screen === "create" || screen === "manage" ? "dashboard" : screen;
 
   return (
     <section className="frame ppf-shop surface-reveal">
@@ -2282,6 +2443,31 @@ function SellerDashboard({
           </button>
           {children}
         </div>
+      ) : screen === "manage" ? (
+        <div className="ppf-shop-screen">
+          <button
+            type="button"
+            className="ppf-shop-back"
+            onClick={() => onScreenChange("dashboard")}
+          >
+            ← {copy.dashboard.backToDashboard}
+          </button>
+          <SellerManageScreen
+            copy={copy}
+            locale={locale}
+            order={manageOrder}
+            status={manageStatus}
+            onReload={onReloadManage}
+            releaseMessage={releaseMessage}
+            buyerCode={buyerCode}
+            codeConfirmed={codeConfirmed}
+            onConfirmCodeChange={onConfirmCodeChange}
+            onRevealCode={onRevealCode}
+            onRelease={onRelease}
+            releaseBusy={releaseBusy}
+            isBusy={isBusy}
+          />
+        </div>
       ) : screen === "settings" ? (
         <SellerSettingsScreen
           copy={copy}
@@ -2302,6 +2488,7 @@ function SellerDashboard({
             locale={locale}
             files={files}
             filesStatus={filesStatus}
+            onOpenManage={onOpenManage}
           />
         </div>
       ) : (
@@ -2318,6 +2505,7 @@ function SellerDashboard({
             locale={locale}
             files={files}
             filesStatus={filesStatus}
+            onOpenManage={onOpenManage}
           />
         </div>
       )}
@@ -2380,11 +2568,13 @@ function SellerFilesList({
   locale,
   files,
   filesStatus,
+  onOpenManage,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
   files: SellerFile[];
   filesStatus: "idle" | "loading" | "ready" | "error";
+  onOpenManage: (orderId: string) => void;
 }) {
   return (
     <div className="ppf-files">
@@ -2400,26 +2590,133 @@ function SellerFilesList({
         </div>
       ) : (
         <ul className="ppf-files-list">
-          {files.map((file) => (
-            <li key={file.orderId} className="ppf-file-row">
-              <div className="ppf-file-main">
-                <span className="ppf-file-name">{file.fileName}</span>
-                <span className="ppf-file-price">{file.displayZec} ZEC</span>
-              </div>
-              <div className="ppf-file-side">
-                <span className="ppf-status-badge" data-status={file.status}>
-                  {formatFileStatus(file.status, copy)}
-                </span>
-                <a
-                  className="ppf-file-open"
-                  href={withProductLocale(file.sharePath, locale)}
-                >
-                  {copy.dashboard.fileOpenLabel}
-                </a>
-              </div>
-            </li>
-          ))}
+          {files.map((file) => {
+            // A paid summary is the seller's cue to deliver: surface a release
+            // CTA. For any other status, "Manage" opens the same detail screen.
+            const isPaid = file.status === "paid";
+            const manageLabel = isPaid
+              ? copy.dashboard.fileReleaseLabel
+              : copy.dashboard.fileManageLabel;
+            return (
+              <li key={file.orderId} className="ppf-file-row">
+                <div className="ppf-file-main">
+                  <span className="ppf-file-name">{file.fileName}</span>
+                  <span className="ppf-file-price">{file.displayZec} ZEC</span>
+                </div>
+                <div className="ppf-file-side">
+                  <span className="ppf-status-badge" data-status={file.status}>
+                    {formatFileStatus(file.status, copy)}
+                  </span>
+                  <button
+                    type="button"
+                    className={
+                      isPaid
+                        ? "ppf-file-manage ppf-file-manage-cta"
+                        : "ppf-file-manage"
+                    }
+                    onClick={() => onOpenManage(file.orderId)}
+                  >
+                    {manageLabel}
+                  </button>
+                  <a
+                    className="ppf-file-open"
+                    href={withProductLocale(file.sharePath, locale)}
+                  >
+                    {copy.dashboard.fileOpenLabel}
+                  </a>
+                </div>
+              </li>
+            );
+          })}
         </ul>
+      )}
+    </div>
+  );
+}
+
+// Per-file manage / release detail. Loads the full order (the files summary lacks
+// release.status), shows the status, and either renders SellerReleasePanel (the
+// shared manual-release machinery) or — when this browser does not hold the local
+// release secret — a clear "secret on another device" callout, since seller-held
+// custody means the key can only be released from the creating browser.
+function SellerManageScreen({
+  copy,
+  locale,
+  order,
+  status,
+  onReload,
+  releaseMessage,
+  buyerCode,
+  codeConfirmed,
+  onConfirmCodeChange,
+  onRevealCode,
+  onRelease,
+  releaseBusy,
+  isBusy,
+}: {
+  copy: PaidPrivateFileCopy;
+  locale: ProductLocale;
+  order: TransferPublicOrder | null;
+  status: "idle" | "loading" | "ready" | "error";
+  onReload: () => void;
+  releaseMessage: string;
+  buyerCode: string;
+  codeConfirmed: boolean;
+  onConfirmCodeChange: (confirmed: boolean) => void;
+  onRevealCode: (order: TransferPublicOrder) => void;
+  onRelease: (order: TransferPublicOrder) => void;
+  releaseBusy: boolean;
+  isBusy: boolean;
+}) {
+  if (status === "loading" || (status === "idle" && !order)) {
+    return <p className="ppf-muted">{copy.dashboard.manageLoading}</p>;
+  }
+  if (status === "error" || !order) {
+    return (
+      <div className="ppf-files-empty">
+        <p className="ppf-files-empty-title">{copy.dashboard.manageError}</p>
+        <button type="button" className="button-secondary" onClick={onReload}>
+          {copy.dashboard.fileManageLabel}
+        </button>
+      </div>
+    );
+  }
+
+  // Seller-held custody: the wrap secret lives only in the browser that created
+  // the file. If it is absent here, no release is possible from this device.
+  const hasSecret = Boolean(loadSellerReleaseDraft(order.orderId));
+
+  return (
+    <div className="ppf-manage">
+      <div className="ppf-manage-head">
+        <p className="eyebrow">{copy.dashboard.manageTitle}</p>
+        <p className="ppf-file-name">{order.file.fileName}</p>
+        <p className="ppf-file-price">{order.price.displayZec} ZEC</p>
+      </div>
+      <div className="ppf-manage-status">
+        <span className="ppf-muted">{copy.dashboard.manageStatusLabel}</span>
+        <span className="ppf-status-badge" data-status={order.status}>
+          {formatFileStatus(order.status, copy)}
+        </span>
+      </div>
+      {hasSecret ? (
+        <SellerReleasePanel
+          order={order}
+          locale={locale}
+          busy={releaseBusy}
+          releaseMessage={releaseMessage}
+          buyerCode={buyerCode}
+          codeConfirmed={codeConfirmed}
+          onConfirmCodeChange={onConfirmCodeChange}
+          onRevealCode={() => onRevealCode(order)}
+          onRelease={() => onRelease(order)}
+          disabled={isBusy}
+        />
+      ) : (
+        <div className="ppf-shop-reminder" role="note" data-tone="warning">
+          <p className="eyebrow">{copy.dashboard.secretMissingTitle}</p>
+          <p>{copy.dashboard.secretMissingBody}</p>
+        </div>
       )}
     </div>
   );
@@ -2508,7 +2805,11 @@ function SellerSettingsScreen({
   );
 }
 
-function formatFileStatus(
+// Pure mapping of a file summary status to its dashboard label. Kept exported so
+// it can be unit-tested without React; the dashboard "YOUR FILES" list and the
+// manage screen both render off this. A paid file is the seller's cue to deliver,
+// so it reads "ready to deliver" rather than a bare "Paid".
+export function formatFileStatus(
   status: TransferPublicOrder["status"],
   copy: PaidPrivateFileCopy,
 ): string {
@@ -2516,7 +2817,7 @@ function formatFileStatus(
     case "payment_pending":
       return copy.dashboard.statusPaymentPending;
     case "paid":
-      return copy.dashboard.statusPaid;
+      return copy.dashboard.statusPaidReady;
     case "claimed":
       return copy.dashboard.statusClaimed;
     case "created":
