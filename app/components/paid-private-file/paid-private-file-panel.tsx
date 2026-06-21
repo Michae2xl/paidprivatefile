@@ -246,6 +246,10 @@ export function PaidPrivateFilePanel({
     network: string;
     defaultAddress: string;
   } | null>(null);
+  const [ufvkPreview, setUfvkPreview] = useState<{
+    status: "idle" | "checking" | "valid" | "invalid";
+    address?: string;
+  }>({ status: "idle" });
   const [createdOrder, setCreatedOrder] = useState<TransferPublicOrder | null>(
     null,
   );
@@ -285,6 +289,45 @@ export function PaidPrivateFilePanel({
     void loadOrder(initialOrderId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialOrderId]);
+
+  // Live preview: as the seller types a viewing key, validate it (debounced) and
+  // show the derived receiving address before the shop is created.
+  useEffect(() => {
+    const key = sellerUfvk.trim();
+    if (!key.toLowerCase().startsWith("uview1") || key.length < 40) {
+      setUfvkPreview({ status: "idle" });
+      return;
+    }
+    let active = true;
+    setUfvkPreview({ status: "checking" });
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const res = await fetch("/api/zcash/ufvk-preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ufvk: key }),
+          });
+          const data = (await res.json()) as {
+            valid?: boolean;
+            defaultAddress?: string | null;
+          };
+          if (!active) return;
+          if (res.ok && data.valid && data.defaultAddress) {
+            setUfvkPreview({ status: "valid", address: data.defaultAddress });
+          } else {
+            setUfvkPreview({ status: "invalid" });
+          }
+        } catch {
+          if (active) setUfvkPreview({ status: "invalid" });
+        }
+      })();
+    }, 600);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [sellerUfvk]);
 
   useEffect(() => {
     return () => {
@@ -1295,34 +1338,39 @@ export function PaidPrivateFilePanel({
                   </div>
 
                   <div className="zk-hub-form">
-                    <label className="zk-hub-form-field">
-                      <span className="zk-hub-form-label">
-                        {copy.seller.handleLabel}
-                      </span>
-                      <input
-                        value={sellerHandle}
-                        onChange={(event) =>
-                          setSellerHandle(event.target.value)
-                        }
-                        placeholder={copy.seller.handlePlaceholder}
-                        disabled={isBusy}
-                      />
-                    </label>
                     {sellerAuthMode === "create" ? (
                       <>
-                        <label className="zk-hub-form-field">
-                          <span className="zk-hub-form-label">
-                            {copy.seller.displayNameLabel}
-                          </span>
-                          <input
-                            value={sellerDisplayName}
-                            onChange={(event) =>
-                              setSellerDisplayName(event.target.value)
-                            }
-                            placeholder={copy.seller.displayNamePlaceholder}
-                            disabled={isBusy}
-                          />
-                        </label>
+                        <section className="zk-hub-form-section">
+                          <p className="zk-hub-form-section-title">
+                            {copy.seller.sectionIdentityTitle}
+                          </p>
+                          <label className="zk-hub-form-field">
+                            <span className="zk-hub-form-label">
+                              {copy.seller.handleLabel}
+                            </span>
+                            <input
+                              value={sellerHandle}
+                              onChange={(event) =>
+                                setSellerHandle(event.target.value)
+                              }
+                              placeholder={copy.seller.handlePlaceholder}
+                              disabled={isBusy}
+                            />
+                          </label>
+                          <label className="zk-hub-form-field">
+                            <span className="zk-hub-form-label">
+                              {copy.seller.displayNameLabel}
+                            </span>
+                            <input
+                              value={sellerDisplayName}
+                              onChange={(event) =>
+                                setSellerDisplayName(event.target.value)
+                              }
+                              placeholder={copy.seller.displayNamePlaceholder}
+                              disabled={isBusy}
+                            />
+                          </label>
+                        </section>
                         <section className="zk-hub-form-section">
                           <p className="zk-hub-form-section-title">
                             {copy.seller.sectionPayoutTitle}
@@ -1359,6 +1407,25 @@ export function PaidPrivateFilePanel({
                               {copy.seller.ufvkHint}
                             </span>
                           </label>
+                          {ufvkPreview.status !== "idle" ? (
+                            <div
+                              className="zk-hub-ufvk-preview"
+                              data-state={ufvkPreview.status}
+                            >
+                              {ufvkPreview.status === "checking" ? (
+                                <span>{copy.seller.ufvkPreviewChecking}</span>
+                              ) : ufvkPreview.status === "valid" ? (
+                                <>
+                                  <span className="zk-hub-ufvk-preview-label">
+                                    {copy.seller.ufvkPreviewReceives}
+                                  </span>
+                                  <code>{ufvkPreview.address}</code>
+                                </>
+                              ) : (
+                                <span>{copy.seller.ufvkPreviewInvalid}</span>
+                              )}
+                            </div>
+                          ) : null}
                           {sellerUfvk.trim() ? (
                             <label className="zk-hub-form-check">
                               <input
@@ -1375,20 +1442,35 @@ export function PaidPrivateFilePanel({
                         </section>
                       </>
                     ) : (
-                      <label className="zk-hub-form-field">
-                        <span className="zk-hub-form-label">
-                          {copy.seller.accessKeyLabel}
-                        </span>
-                        <input
-                          value={sellerAccessKey}
-                          onChange={(event) =>
-                            setSellerAccessKey(event.target.value)
-                          }
-                          placeholder={copy.seller.accessKeyPlaceholder}
-                          autoComplete="off"
-                          disabled={isBusy}
-                        />
-                      </label>
+                      <>
+                        <label className="zk-hub-form-field">
+                          <span className="zk-hub-form-label">
+                            {copy.seller.handleLabel}
+                          </span>
+                          <input
+                            value={sellerHandle}
+                            onChange={(event) =>
+                              setSellerHandle(event.target.value)
+                            }
+                            placeholder={copy.seller.handlePlaceholder}
+                            disabled={isBusy}
+                          />
+                        </label>
+                        <label className="zk-hub-form-field">
+                          <span className="zk-hub-form-label">
+                            {copy.seller.accessKeyLabel}
+                          </span>
+                          <input
+                            value={sellerAccessKey}
+                            onChange={(event) =>
+                              setSellerAccessKey(event.target.value)
+                            }
+                            placeholder={copy.seller.accessKeyPlaceholder}
+                            autoComplete="off"
+                            disabled={isBusy}
+                          />
+                        </label>
+                      </>
                     )}
                     <button
                       type="button"

@@ -58,9 +58,13 @@ export interface PaidPrivateFileCopy {
     ufvkConfirmedBody: string;
     ufvkFingerprintLabel: string;
     ufvkAddressLabel: string;
+    sectionIdentityTitle: string;
     sectionPayoutTitle: string;
     sectionPayoutNote: string;
     ufvkAckLabel: string;
+    ufvkPreviewChecking: string;
+    ufvkPreviewReceives: string;
+    ufvkPreviewInvalid: string;
   };
   send: {
     title: string;
@@ -201,11 +205,15 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "A plataforma vai derivar um endereco unico por pedido a partir desta chave.",
       ufvkFingerprintLabel: "Fingerprint",
       ufvkAddressLabel: "Endereco que recebe",
+      sectionIdentityTitle: "Identidade da loja",
       sectionPayoutTitle: "Receber pagamentos (nao-custodial)",
       sectionPayoutNote:
         "O comprador paga um endereco unico por pedido, derivado da sua chave de visualizacao — o dinheiro vai direto pra sua conta. Voce nao cola nenhum endereco.",
       ufvkAckLabel:
         "Entendi: vou usar uma conta dedicada, nao a minha carteira principal.",
+      ufvkPreviewChecking: "Verificando a chave...",
+      ufvkPreviewReceives: "Recebe em",
+      ufvkPreviewInvalid: "Chave de visualizacao invalida",
     },
     send: {
       title: "Criar arquivo privado pago",
@@ -352,11 +360,15 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "The platform will derive a unique per-order address from this key.",
       ufvkFingerprintLabel: "Fingerprint",
       ufvkAddressLabel: "Receiving address",
+      sectionIdentityTitle: "Shop identity",
       sectionPayoutTitle: "Get paid (non-custodial)",
       sectionPayoutNote:
         "Buyers pay a unique address per order, derived from your viewing key — funds go straight to your account. You never paste an address.",
       ufvkAckLabel:
         "I understand: I'll use a dedicated account, not my main wallet.",
+      ufvkPreviewChecking: "Checking the key...",
+      ufvkPreviewReceives: "Receives at",
+      ufvkPreviewInvalid: "Invalid viewing key",
     },
     send: {
       title: "Create paid private file",

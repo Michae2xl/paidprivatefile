@@ -379,20 +379,75 @@ a {
 
 /* Warning callout (dedicated-account rule). */
 .zectime-paid-warning {
+  position: relative;
   display: grid;
   gap: 5px;
-  padding: 12px 14px;
-  border: 1px solid rgba(196, 121, 12, 0.45);
-  border-left: 3px solid #c4790c;
+  padding: 12px 14px 12px 38px;
+  border: 1px solid rgba(201, 151, 37, 0.5);
+  border-left: 4px solid #c99725;
   border-radius: 8px;
-  background: rgba(245, 196, 117, 0.16);
+  background: rgba(201, 151, 37, 0.12);
+}
+
+.zectime-paid-warning::before {
+  content: "\26A0";
+  position: absolute;
+  left: 13px;
+  top: 11px;
+  font-size: 1rem;
+  line-height: 1.2;
+  color: #b07d10;
+}
+
+.zectime-paid-warning .eyebrow {
+  color: #8a6a12;
 }
 
 .zectime-paid-warning p:not(.eyebrow) {
   margin: 0;
   font-size: 0.82rem;
   line-height: 1.5;
-  color: rgba(21, 21, 17, 0.8);
+  color: rgba(21, 21, 17, 0.82);
+}
+
+/* Live derived-address preview shown while typing the UFVK. */
+.zk-hub-ufvk-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-dark);
+  border-radius: 7px;
+  background: rgba(20, 20, 15, 0.03);
+  font-size: 0.8rem;
+  color: rgba(21, 21, 17, 0.7);
+}
+
+.zk-hub-ufvk-preview code {
+  font-size: 0.76rem;
+  word-break: break-all;
+  color: var(--ink);
+}
+
+.zk-hub-ufvk-preview-label {
+  font-weight: 600;
+}
+
+.zk-hub-ufvk-preview[data-state="valid"] {
+  border-color: rgba(29, 158, 117, 0.5);
+  background: rgba(29, 158, 117, 0.1);
+  color: #0f6e56;
+}
+
+.zk-hub-ufvk-preview[data-state="valid"] code {
+  color: #0f6e56;
+}
+
+.zk-hub-ufvk-preview[data-state="invalid"] {
+  border-color: rgba(226, 75, 74, 0.5);
+  background: rgba(226, 75, 74, 0.08);
+  color: #a32d2d;
 }
 
 .zk-hub-form-check {
