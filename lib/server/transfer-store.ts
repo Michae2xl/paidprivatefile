@@ -20,10 +20,19 @@ import {
   type CipherPayProvider,
 } from "./cipherpay-client";
 import {
+  bindOrderDeposit,
+  findOrderIdByBoundAddress,
+  listBindings,
+  nextDiversifierIndex,
+  type DepositBinding,
+} from "./deposit-bindings";
+import {
   assignDepositAddress,
   findOrderIdByDepositAddress,
 } from "./deposit-pool";
 import { ServerError } from "./error-kinds";
+import { getScannerClient, type ScannerClient } from "./scanner-client";
+import { getSellerUfvk } from "./seller-store";
 import {
   queueNymDelivery,
   type NymDeliveryReceipt,
@@ -377,6 +386,73 @@ export async function listSellerTransferPublicOrders(
     .map(publicOrder);
 }
 
+export interface ScanWatchlistEntry {
+  orderId: string;
+  sellerId: string;
+  ufvk: string;
+  address: string;
+  diversifierIndex: number;
+  startHeight: number;
+  amountZats: number;
+}
+
+// Non-custodial marketplace (Phase 1): one entry per OPEN order (status
+// payment_pending) that has a UFVK binding. The scanner pulls this, groups by
+// UFVK, scans from min(startHeight), trial-decrypts, and POSTs the webhook on a
+// match. Each seller's UFVK is decrypted here for the scanner to consume — this
+// payload is HMAC-authenticated and MUST NOT be exposed to buyers.
+export async function listScanWatchlistEntries(): Promise<
+  ScanWatchlistEntry[]
+> {
+  const bindings = await listBindings();
+  const ufvkCache = new Map<string, string | null>();
+  const entries: ScanWatchlistEntry[] = [];
+
+  for (const binding of bindings) {
+    const order = await readOrderOrNull(binding.orderId);
+    if (!order || order.status !== "payment_pending" || !order.payment) {
+      continue;
+    }
+    const ufvk = await resolveSellerUfvkCached(binding, ufvkCache);
+    if (!ufvk) {
+      continue;
+    }
+    entries.push({
+      orderId: binding.orderId,
+      sellerId: binding.sellerId,
+      ufvk,
+      address: binding.address,
+      diversifierIndex: binding.diversifierIndex,
+      startHeight: binding.startHeight,
+      amountZats: order.price.amountZats,
+    });
+  }
+  return entries;
+}
+
+async function resolveSellerUfvkCached(
+  binding: DepositBinding,
+  cache: Map<string, string | null>,
+): Promise<string | null> {
+  if (cache.has(binding.sellerId)) {
+    return cache.get(binding.sellerId) ?? null;
+  }
+  const ufvk = await getSellerUfvk(binding.sellerId);
+  cache.set(binding.sellerId, ufvk);
+  return ufvk;
+}
+
+async function readOrderOrNull(orderId: string): Promise<TransferOrder | null> {
+  try {
+    return await readOrder(orderId);
+  } catch (error) {
+    if (error instanceof ServerError && error.kind === "validation") {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export async function createPaymentIntentForOrder(
   orderId: string,
   buyerPublicKeyJwk: JsonWebKey,
@@ -464,7 +540,13 @@ async function createOrderInvoice(input: {
   const { order, buyerPublicKeyHash, successUrl } = input;
 
   if (zcashOnchainEnabled()) {
-    const receivingAddress = await assignDepositAddress(order.orderId);
+    // Branch point for the non-custodial marketplace: if this order's seller
+    // has a registered UFVK, derive a unique per-order diversified address from
+    // it (UFVK path). Otherwise fall back to the pre-registered global pool
+    // (back-compat single-seller path) — the pool is NOT removed.
+    const receivingAddress =
+      (await deriveSellerDepositAddress(order)) ??
+      (await assignDepositAddress(order.orderId));
     if (!receivingAddress) {
       throw new ServerError(
         "cli_unavailable",
@@ -497,6 +579,49 @@ async function createOrderInvoice(input: {
     successUrl,
   });
   return { ...invoice, receivingAddress: null };
+}
+
+// Non-custodial marketplace (Phase 1): derive a unique per-order diversified
+// deposit address from the order's seller UFVK and persist the binding so the
+// scanner watchlist + webhook can map a deposit back to this order. Returns
+// null when the order has no seller UFVK (caller then uses the pool path).
+async function deriveSellerDepositAddress(
+  order: TransferOrder,
+  scanner?: ScannerClient,
+): Promise<string | null> {
+  const sellerId = order.seller?.sellerId;
+  if (!sellerId) {
+    return null;
+  }
+  const ufvk = await getSellerUfvk(sellerId);
+  if (!ufvk) {
+    return null;
+  }
+
+  // Resolve the scanner lazily: only sellers with a UFVK reach the scanner, so
+  // the pool path (no UFVK) never requires PPF_SCANNER_URL to be configured.
+  const scannerClient = scanner ?? getScannerClient();
+  const diversifierIndex = await nextDiversifierIndex(sellerId);
+  const derived = await scannerClient.deriveAddress({ ufvk, diversifierIndex });
+  await bindOrderDeposit(order.orderId, {
+    address: derived.address,
+    sellerId,
+    diversifierIndex: derived.actualIndex,
+    // MVP: startHeight defaults to 0 (full rescan) unless
+    // PPF_SCAN_DEFAULT_START_HEIGHT is configured to a recent height. Phase 2
+    // will read the chain tip from the scanner at order-creation time.
+    startHeight: defaultScanStartHeight(),
+  });
+  return derived.address;
+}
+
+function defaultScanStartHeight(): number {
+  const raw = process.env.PPF_SCAN_DEFAULT_START_HEIGHT;
+  if (!raw) {
+    return 0;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 export async function registerNymSessionForOrder(
@@ -654,6 +779,12 @@ export async function markTransferPaidOnchain(input: {
 export async function findOrderIdForDeposit(
   receivingAddress: string,
 ): Promise<string | null> {
+  // Resolve BOTH the new per-order UFVK bindings and the legacy pre-registered
+  // pool. Bindings are checked first; the pool remains the back-compat path.
+  const bound = await findOrderIdByBoundAddress(receivingAddress);
+  if (bound) {
+    return bound;
+  }
   return findOrderIdByDepositAddress(receivingAddress);
 }
 

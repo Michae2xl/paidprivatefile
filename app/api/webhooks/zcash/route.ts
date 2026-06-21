@@ -19,11 +19,14 @@ const MAX_BODY_BYTES = 16 * 1024;
 const DEFAULT_MIN_CONFIRMATIONS = 10;
 const TXID_PATTERN = /^[0-9a-f]{64}$/u;
 
+const SELLER_ID_PATTERN = /^sel_[a-f0-9]{24}$/u;
+
 interface ZcashDepositReport {
   receivingAddress: string;
   amountZats: number;
   txid: string;
   confirmations: number;
+  sellerId: string | null;
 }
 
 export async function POST(request: Request) {
@@ -52,6 +55,16 @@ export async function POST(request: Request) {
       throw new ServerError(
         "validation",
         "Deposit address did not match the order payment session",
+      );
+    }
+
+    // Non-custodial marketplace (Phase 1): when the scanner reports a sellerId,
+    // it must match the order's seller. This binds the deposit to the seller
+    // whose UFVK derived the address and blocks cross-seller misattribution.
+    if (report.sellerId && order.seller?.sellerId !== report.sellerId) {
+      throw new ServerError(
+        "validation",
+        "Deposit sellerId did not match the order seller",
       );
     }
 
@@ -125,11 +138,23 @@ function parseDepositReport(rawBody: string): ZcashDepositReport {
     );
   }
 
+  let sellerId: string | null = null;
+  if (body.sellerId !== undefined && body.sellerId !== null) {
+    if (
+      typeof body.sellerId !== "string" ||
+      !SELLER_ID_PATTERN.test(body.sellerId.trim())
+    ) {
+      throw new ServerError("validation", "sellerId must be a valid seller id");
+    }
+    sellerId = body.sellerId.trim();
+  }
+
   return {
     receivingAddress,
     amountZats: amountZats as number,
     txid,
     confirmations: confirmations as number,
+    sellerId,
   };
 }
 

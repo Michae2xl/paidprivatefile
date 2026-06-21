@@ -238,6 +238,14 @@ export function PaidPrivateFilePanel({
   const [newSellerAccessKey, setNewSellerAccessKey] = useState("");
   const [accessKeyCopied, setAccessKeyCopied] = useState(false);
   const [accessKeyAcknowledged, setAccessKeyAcknowledged] = useState(false);
+  // Non-custodial marketplace (Phase 1): the shop viewing key (UFVK).
+  const [sellerUfvk, setSellerUfvk] = useState("");
+  const [ufvkAcknowledged, setUfvkAcknowledged] = useState(false);
+  const [ufvkConfirmation, setUfvkConfirmation] = useState<{
+    ufvkFingerprint: string;
+    network: string;
+    defaultAddress: string;
+  } | null>(null);
   const [createdOrder, setCreatedOrder] = useState<TransferPublicOrder | null>(
     null,
   );
@@ -400,11 +408,32 @@ export function PaidPrivateFilePanel({
       setAccessKeyCopied(false);
       setAccessKeyAcknowledged(false);
       setSellerAccessKey("");
+
+      // Optional non-custodial path: if the seller pasted a viewing key, register
+      // it now so the platform can derive per-order deposit addresses. The shop
+      // stays valid without a UFVK (back-compat with the pool flow).
+      if (sellerUfvk.trim()) {
+        await registerSellerUfvk();
+      }
     } catch (error) {
       setErrorMessage(formatError(error, copy.errors.serverError));
     } finally {
       setBusyAction("idle");
     }
+  }
+
+  async function registerSellerUfvk() {
+    setUfvkConfirmation(null);
+    const confirmation = await postJson<{
+      ufvkFingerprint: string;
+      network: string;
+      defaultAddress: string;
+    }>("/api/sellers/me/ufvk", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ufvk: sellerUfvk.trim() }),
+    });
+    setUfvkConfirmation(confirmation);
   }
 
   async function onLoginSeller() {
@@ -1311,6 +1340,48 @@ export function PaidPrivateFilePanel({
                             {copy.send.payoutAddressHint}
                           </span>
                         </label>
+                        <div
+                          className="zectime-paid-warning"
+                          role="note"
+                          data-tone="warning"
+                        >
+                          <p className="eyebrow">
+                            {copy.seller.ufvkWarningTitle}
+                          </p>
+                          <p>{copy.seller.ufvkWarningBody}</p>
+                        </div>
+                        <label className="zk-hub-form-field">
+                          <span className="zk-hub-form-label">
+                            {copy.seller.ufvkLabel}
+                          </span>
+                          <textarea
+                            value={sellerUfvk}
+                            onChange={(event) =>
+                              setSellerUfvk(event.target.value)
+                            }
+                            placeholder={copy.seller.ufvkPlaceholder}
+                            autoComplete="off"
+                            spellCheck={false}
+                            rows={3}
+                            disabled={isBusy}
+                          />
+                          <span className="zk-hub-form-hint">
+                            {copy.seller.ufvkHint}
+                          </span>
+                        </label>
+                        {sellerUfvk.trim() ? (
+                          <label className="zk-hub-form-check">
+                            <input
+                              type="checkbox"
+                              checked={ufvkAcknowledged}
+                              onChange={(event) =>
+                                setUfvkAcknowledged(event.target.checked)
+                              }
+                              disabled={isBusy}
+                            />
+                            <span>{copy.seller.ufvkWarningTitle}</span>
+                          </label>
+                        ) : null}
                       </>
                     ) : (
                       <label className="zk-hub-form-field">
@@ -1331,7 +1402,12 @@ export function PaidPrivateFilePanel({
                     <button
                       type="button"
                       className="button-secondary"
-                      disabled={isBusy}
+                      disabled={
+                        isBusy ||
+                        (sellerAuthMode === "create" &&
+                          sellerUfvk.trim().length > 0 &&
+                          !ufvkAcknowledged)
+                      }
                       onClick={() =>
                         sellerAuthMode === "create"
                           ? void onCreateSeller()
@@ -1379,6 +1455,25 @@ export function PaidPrivateFilePanel({
                       {copy.seller.accessKeyBlocker}
                     </p>
                   ) : null}
+                </div>
+              ) : null}
+
+              {ufvkConfirmation ? (
+                <div className="zectime-key-vault" data-tone="ok">
+                  <div>
+                    <p className="eyebrow">{copy.seller.ufvkConfirmedTitle}</p>
+                    <p>{copy.seller.ufvkConfirmedBody}</p>
+                  </div>
+                  <dl className="zk-hub-detail-list">
+                    <dt>{copy.seller.ufvkFingerprintLabel}</dt>
+                    <dd>
+                      <code>{ufvkConfirmation.ufvkFingerprint}</code>
+                    </dd>
+                    <dt>{copy.seller.ufvkAddressLabel}</dt>
+                    <dd>
+                      <code>{ufvkConfirmation.defaultAddress}</code>
+                    </dd>
+                  </dl>
                 </div>
               ) : null}
             </div>

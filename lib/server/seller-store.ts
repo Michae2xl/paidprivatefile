@@ -1,4 +1,6 @@
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   createHmac,
   randomBytes,
@@ -9,12 +11,24 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ServerError } from "./error-kinds";
+import {
+  getScannerClient,
+  type ScannerClient,
+  type ScannerNetwork,
+} from "./scanner-client";
 import { resolveWebRuntimeRoot } from "./web-session";
 
 export const SELLER_SESSION_COOKIE = "paidprivatefile_seller";
 
+// Schema v2 adds the optional UFVK fields for the non-custodial marketplace.
+// v1 profiles are still readable (the UFVK fields are simply absent), so the
+// existing single-seller / global-pool flow keeps working untouched.
+export type SellerSchema =
+  | "paidprivatefile.seller.v1"
+  | "paidprivatefile.seller.v2";
+
 export interface SellerProfile {
-  schema: "paidprivatefile.seller.v1";
+  schema: SellerSchema;
   sellerId: string;
   handle: string;
   displayName: string;
@@ -22,6 +36,12 @@ export interface SellerProfile {
   accessKeyHash: string;
   createdAt: string;
   updatedAt: string;
+  // Non-custodial marketplace (Phase 1). All optional for back-compat.
+  // ufvkEncrypted is iv:tag:ciphertext (hex), AES-256-GCM. NEVER expose it.
+  ufvkEncrypted?: string;
+  // sha256 hex of the UFVK; safe to expose (mirrors how a fingerprint is safe).
+  ufvkFingerprint?: string;
+  network?: ScannerNetwork;
 }
 
 export interface PublicSellerProfile {
@@ -32,6 +52,15 @@ export interface PublicSellerProfile {
   publicPath: string;
   createdAt: string;
   updatedAt: string;
+  // Only the fingerprint is exposed publicly; never the UFVK itself.
+  ufvkFingerprint?: string;
+  network?: ScannerNetwork;
+}
+
+export interface RegisterSellerUfvkResult {
+  ufvkFingerprint: string;
+  network: ScannerNetwork;
+  defaultAddress: string;
 }
 
 export interface CreateSellerResult {
@@ -95,8 +124,14 @@ export async function authenticateSeller(input: {
 }): Promise<PublicSellerProfile> {
   const handle = normalizeSellerHandle(input.handle);
   const profile = await getSellerProfileByHandle(handle);
-  if (!profile || !safeEqual(profile.accessKeyHash, hashAccessKey(input.accessKey))) {
-    throw new ServerError("auth_required", "Invalid seller handle or access key");
+  if (
+    !profile ||
+    !safeEqual(profile.accessKeyHash, hashAccessKey(input.accessKey))
+  ) {
+    throw new ServerError(
+      "auth_required",
+      "Invalid seller handle or access key",
+    );
   }
   return publicSeller(profile);
 }
@@ -144,7 +179,10 @@ export async function updateSellerProfile(
     throw new ServerError("auth_required", "Seller session is invalid");
   }
   if (input.displayName !== undefined) {
-    profile.displayName = normalizeDisplayName(input.displayName, profile.handle);
+    profile.displayName = normalizeDisplayName(
+      input.displayName,
+      profile.handle,
+    );
   }
   if (input.defaultPayoutAddress !== undefined) {
     profile.defaultPayoutAddress = normalizeZcashUnifiedAddress(
@@ -154,6 +192,70 @@ export async function updateSellerProfile(
   profile.updatedAt = new Date().toISOString();
   await atomicWriteJson(sellerProfilePath(profile.sellerId), profile);
   return publicSeller(profile);
+}
+
+// Non-custodial marketplace (Phase 1): register a seller's pasted viewing key
+// (UFVK), optionally bound to a UA. The scanner validates it; we reject
+// invalid / non-mainnet keys and non-matching UAs, then store the UFVK
+// encrypted at rest and keep only the fingerprint exposable.
+export async function registerSellerUfvk(
+  sellerId: string,
+  input: { ufvk: string; ua?: string | null },
+  scanner: ScannerClient = getScannerClient(),
+): Promise<RegisterSellerUfvkResult> {
+  const profile = await getSellerProfileById(sellerId);
+  if (!profile) {
+    throw new ServerError("auth_required", "Seller session is invalid");
+  }
+  const ufvk = normalizeUfvk(input.ufvk);
+  const ua = input.ua ? normalizeZcashUnifiedAddress(input.ua) : undefined;
+
+  // Encryption key is required before we touch the scanner; fail fast.
+  const encrypted = encryptUfvk(ufvk);
+
+  const validation = await scanner.validateUfvk(ua ? { ufvk, ua } : { ufvk });
+  if (!validation.valid) {
+    throw new ServerError("validation", "The viewing key (UFVK) is not valid");
+  }
+  if (validation.network !== "main") {
+    throw new ServerError(
+      "validation",
+      "Only mainnet viewing keys are accepted",
+    );
+  }
+  if (ua && validation.uaMatches === false) {
+    throw new ServerError(
+      "validation",
+      "The unified address does not match the viewing key",
+    );
+  }
+
+  const now = new Date().toISOString();
+  const next: SellerProfile = {
+    ...profile,
+    schema: "paidprivatefile.seller.v2",
+    ufvkEncrypted: encrypted,
+    ufvkFingerprint: validation.fingerprint,
+    network: validation.network,
+    updatedAt: now,
+  };
+  await atomicWriteJson(sellerProfilePath(next.sellerId), next);
+
+  return {
+    ufvkFingerprint: validation.fingerprint,
+    network: validation.network,
+    defaultAddress: validation.defaultAddress,
+  };
+}
+
+// Internal use only (e.g. derive, scan-watchlist). NEVER return this to a
+// client or log it.
+export async function getSellerUfvk(sellerId: string): Promise<string | null> {
+  const profile = await getSellerProfileById(sellerId);
+  if (!profile || !profile.ufvkEncrypted) {
+    return null;
+  }
+  return decryptUfvk(profile.ufvkEncrypted);
 }
 
 export async function getSellerFromRequest(
@@ -208,7 +310,9 @@ export function normalizeSellerHandle(value: string): string {
 }
 
 export function publicSeller(profile: SellerProfile): PublicSellerProfile {
-  return {
+  // NEVER include ufvkEncrypted here (mirrors accessKeyHash stripping). Only the
+  // fingerprint and network are safe to expose.
+  const result: PublicSellerProfile = {
     sellerId: profile.sellerId,
     handle: profile.handle,
     displayName: profile.displayName,
@@ -217,6 +321,13 @@ export function publicSeller(profile: SellerProfile): PublicSellerProfile {
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
   };
+  if (profile.ufvkFingerprint) {
+    result.ufvkFingerprint = profile.ufvkFingerprint;
+  }
+  if (profile.network) {
+    result.network = profile.network;
+  }
+  return result;
 }
 
 async function findSellerIdByHandle(handle: string): Promise<string | null> {
@@ -272,8 +383,12 @@ function verifySellerSessionToken(
 }
 
 function normalizeSellerProfile(value: SellerProfile): SellerProfile {
-  return {
-    schema: "paidprivatefile.seller.v1",
+  const hasUfvk =
+    typeof value.ufvkEncrypted === "string" && value.ufvkEncrypted.length > 0;
+  const profile: SellerProfile = {
+    schema: hasUfvk
+      ? "paidprivatefile.seller.v2"
+      : (value.schema ?? "paidprivatefile.seller.v1"),
     sellerId: value.sellerId,
     handle: normalizeSellerHandle(value.handle),
     displayName: normalizeDisplayName(value.displayName, value.handle),
@@ -284,6 +399,20 @@ function normalizeSellerProfile(value: SellerProfile): SellerProfile {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
+  if (hasUfvk) {
+    profile.ufvkEncrypted = value.ufvkEncrypted;
+  }
+  if (typeof value.ufvkFingerprint === "string" && value.ufvkFingerprint) {
+    profile.ufvkFingerprint = value.ufvkFingerprint;
+  }
+  if (
+    value.network === "main" ||
+    value.network === "test" ||
+    value.network === "regtest"
+  ) {
+    profile.network = value.network;
+  }
+  return profile;
 }
 
 function normalizeDisplayName(
@@ -296,10 +425,7 @@ function normalizeDisplayName(
 
 function normalizeZcashUnifiedAddress(value: string): string {
   const cleaned = value.trim();
-  if (
-    cleaned.length > 512 ||
-    !ZCASH_UNIFIED_ADDRESS_PATTERN.test(cleaned)
-  ) {
+  if (cleaned.length > 512 || !ZCASH_UNIFIED_ADDRESS_PATTERN.test(cleaned)) {
     throw new ServerError(
       "validation",
       "Seller payout address must be a Zcash unified address",
@@ -324,6 +450,78 @@ function generateAccessKey(): string {
 
 function hashAccessKey(accessKey: string): string {
   return createHash("sha256").update(accessKey).digest("hex");
+}
+
+const UFVK_PATTERN = /^uview1[a-z0-9]{16,}$/iu;
+const MAX_UFVK_LENGTH = 4096;
+
+function normalizeUfvk(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new ServerError("validation", "Viewing key (UFVK) must be a string");
+  }
+  const cleaned = value.trim();
+  if (cleaned.length > MAX_UFVK_LENGTH || !UFVK_PATTERN.test(cleaned)) {
+    throw new ServerError(
+      "validation",
+      "Viewing key must be a Zcash unified full viewing key (uview1...)",
+    );
+  }
+  return cleaned;
+}
+
+// AES-256-GCM at rest. Stored as iv:tag:ciphertext (hex). The key comes from
+// PAID_PRIVATE_FILE_SELLER_UFVK_KEY (32-byte hex). No plaintext is persisted.
+function ufvkEncryptionKey(): Buffer {
+  const raw = process.env.PAID_PRIVATE_FILE_SELLER_UFVK_KEY?.trim();
+  if (!raw) {
+    throw new ServerError(
+      "validation",
+      "Seller UFVK encryption key is not configured",
+    );
+  }
+  if (!/^[0-9a-f]{64}$/iu.test(raw)) {
+    throw new ServerError(
+      "validation",
+      "Seller UFVK encryption key must be 32 bytes hex",
+    );
+  }
+  return Buffer.from(raw, "hex");
+}
+
+function encryptUfvk(ufvk: string): string {
+  const key = ufvkEncryptionKey();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(ufvk, "utf8"),
+    cipher.final(),
+  ]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString("hex")}:${tag.toString("hex")}:${ciphertext.toString("hex")}`;
+}
+
+function decryptUfvk(encrypted: string): string {
+  const key = ufvkEncryptionKey();
+  const parts = encrypted.split(":");
+  if (parts.length !== 3) {
+    throw new ServerError("validation", "Stored UFVK is corrupt");
+  }
+  const [ivHex, tagHex, dataHex] = parts;
+  try {
+    const decipher = createDecipheriv(
+      "aes-256-gcm",
+      key,
+      Buffer.from(ivHex, "hex"),
+    );
+    decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(dataHex, "hex")),
+      decipher.final(),
+    ]);
+    return plaintext.toString("utf8");
+  } catch {
+    throw new ServerError("validation", "Stored UFVK could not be decrypted");
+  }
 }
 
 async function atomicWriteJson(path: string, value: unknown): Promise<void> {

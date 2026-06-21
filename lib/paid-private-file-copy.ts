@@ -49,6 +49,15 @@ export interface PaidPrivateFileCopy {
     accessKeyCopiedLabel: string;
     accessKeyConfirmLabel: string;
     accessKeyBlocker: string;
+    ufvkLabel: string;
+    ufvkPlaceholder: string;
+    ufvkHint: string;
+    ufvkWarningTitle: string;
+    ufvkWarningBody: string;
+    ufvkConfirmedTitle: string;
+    ufvkConfirmedBody: string;
+    ufvkFingerprintLabel: string;
+    ufvkAddressLabel: string;
   };
   send: {
     title: string;
@@ -176,6 +185,18 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeyConfirmLabel: "Eu guardei esta chave",
       accessKeyBlocker:
         "Confirme que guardou a chave para liberar a publicacao do arquivo.",
+      ufvkLabel: "Chave de visualizacao da loja (UFVK)",
+      ufvkPlaceholder: "uview1...",
+      ufvkHint:
+        "A plataforma usa esta chave somente para detectar pagamentos. Ela nao permite gastar.",
+      ufvkWarningTitle: "Use uma conta ZEC dedicada",
+      ufvkWarningBody:
+        "Crie uma conta de carteira separada so para esta loja e cole a UFVK dela. A chave de visualizacao revela todo o historico da conta para a plataforma. NUNCA use a UFVK da sua carteira principal.",
+      ufvkConfirmedTitle: "Chave de visualizacao registrada",
+      ufvkConfirmedBody:
+        "A plataforma vai derivar um endereco unico por pedido a partir desta chave.",
+      ufvkFingerprintLabel: "Fingerprint",
+      ufvkAddressLabel: "Endereco padrao",
     },
     send: {
       title: "Criar arquivo privado pago",
@@ -308,6 +329,18 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeyConfirmLabel: "I saved this key",
       accessKeyBlocker:
         "Confirm that you saved the key to unlock file publishing.",
+      ufvkLabel: "Shop viewing key (UFVK)",
+      ufvkPlaceholder: "uview1...",
+      ufvkHint:
+        "The platform uses this key only to detect payments. It cannot spend.",
+      ufvkWarningTitle: "Use a dedicated ZEC account",
+      ufvkWarningBody:
+        "Create a separate wallet account just for this shop and paste its UFVK. A viewing key reveals the account's full history to the platform. NEVER use your main wallet's UFVK.",
+      ufvkConfirmedTitle: "Viewing key registered",
+      ufvkConfirmedBody:
+        "The platform will derive a unique per-order address from this key.",
+      ufvkFingerprintLabel: "Fingerprint",
+      ufvkAddressLabel: "Default address",
     },
     send: {
       title: "Create paid private file",
