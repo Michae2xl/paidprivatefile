@@ -31,6 +31,11 @@ const securityHeaders: Array<{ key: string; value: string }> = [
     key: "Permissions-Policy",
     value: "camera=(), microphone=(), geolocation=(), interest-cohort=()",
   },
+  // Cross-origin isolation: required for the in-browser Nym client's WASM
+  // (SharedArrayBuffer / threaded web workers). Without these the buyer's
+  // Nym receiver cannot start. All embedded resources are same-origin.
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+  { key: "Cross-Origin-Embedder-Policy", value: "require-corp" },
 ];
 
 if (isProduction) {
