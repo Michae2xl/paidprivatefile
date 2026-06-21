@@ -488,6 +488,15 @@ export function PaidPrivateFilePanel({
       );
       setManageOrder(body.order);
       setManageStatus("ready");
+      // If the key is already released and this browser holds the secret, re-emit
+      // it over the mixnet now: a buyer who is listening but missed the one-shot
+      // delivery (stuck on "queued") then receives it. Re-clicking Manage re-sends.
+      if (
+        body.order.release?.status === "ready" &&
+        loadSellerReleaseDraft(orderId)
+      ) {
+        void onResendKeyOverNym(body.order);
+      }
     } catch {
       setManageStatus("error");
     }
@@ -1350,6 +1359,61 @@ export function PaidPrivateFilePanel({
       } else {
         setErrorMessage(formatError(error, copy.errors.serverError));
       }
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
+  // Re-send the wrapped key over Nym for an ALREADY-released order. The seller's
+  // browser still holds the file-key secret, so it re-wraps for the buyer (read
+  // from the release challenge) and re-emits over the mixnet. Used when the
+  // one-shot delivery did not reach a buyer who is now listening ("queued").
+  async function onResendKeyOverNym(order: TransferPublicOrder): Promise<void> {
+    setErrorMessage("");
+    setBusyAction("release");
+    try {
+      const draft = loadSellerReleaseDraft(order.orderId);
+      if (!draft) {
+        throw new Error(
+          locale === "pt"
+            ? "Esta maquina nao tem o segredo local do vendedor para este arquivo."
+            : "This browser does not hold the seller release secret for this file.",
+        );
+      }
+      const challenge = await postJson<KeyReleaseResponse>(
+        `/api/transfers/${encodeURIComponent(order.orderId)}/key-release`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ releaseSecret: draft.releaseSecret }),
+        },
+      );
+      if (
+        !challenge.release.buyerPublicKeyJwk ||
+        !challenge.release.buyerNymAddress
+      ) {
+        throw new Error(
+          locale === "pt"
+            ? "O comprador ainda nao registrou a sessao Nym para receber."
+            : "The buyer has not registered a Nym session to receive yet.",
+        );
+      }
+      const keyEnvelope = await wrapPaidLinkFileKeyForBuyer(
+        draft.fileKey,
+        challenge.release.buyerPublicKeyJwk,
+      );
+      await sendKeyEnvelopeOverNym({
+        orderId: order.orderId,
+        keyEnvelope,
+        buyerNymAddress: challenge.release.buyerNymAddress,
+      });
+      setReleaseMessage(
+        locale === "pt"
+          ? "Chave reenviada pela Nym. O comprador (aba aberta) deve receber em segundos."
+          : "Key re-sent over Nym. The buyer (tab open) should receive it shortly.",
+      );
+    } catch (error) {
+      setReleaseMessage(formatError(error, copy.errors.serverError));
     } finally {
       setBusyAction("idle");
     }
