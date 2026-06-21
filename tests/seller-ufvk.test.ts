@@ -104,6 +104,26 @@ describe("seller-store UFVK registration", () => {
     expect(decrypted).toBe(VALID_UFVK);
   });
 
+  it("creates a shop directly from a UFVK, deriving the receiving address", async () => {
+    const created = await createSellerProfile({
+      handle: "ufvk-create",
+      displayName: "UFVK Create",
+      ufvk: VALID_UFVK,
+    });
+    // Receiving address is derived from the key (no separate wallet pasted).
+    expect(created.seller.defaultPayoutAddress).toBe(DEFAULT_ADDRESS);
+    const profile = await getSellerProfileById(created.seller.sellerId);
+    expect(profile?.ufvkFingerprint).toBe(FINGERPRINT);
+    expect(profile?.ufvkEncrypted).toBeTruthy();
+    expect(JSON.stringify(profile)).not.toContain(VALID_UFVK);
+  });
+
+  it("rejects shop creation with neither a UFVK nor a payout address", async () => {
+    await expect(
+      createSellerProfile({ handle: "no-key", displayName: "No Key" }),
+    ).rejects.toThrow();
+  });
+
   it("never leaks the UFVK through publicSeller()", async () => {
     const sellerId = await newSeller();
     await registerSellerUfvk(sellerId, { ufvk: VALID_UFVK, ua: VALID_UA });

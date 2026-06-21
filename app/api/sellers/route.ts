@@ -25,10 +25,15 @@ export async function POST(request: Request) {
       handle: requireString(body.handle, "handle"),
       displayName:
         typeof body.displayName === "string" ? body.displayName : undefined,
-      defaultPayoutAddress: requireString(
-        body.defaultPayoutAddress,
-        "defaultPayoutAddress",
-      ),
+      defaultPayoutAddress:
+        typeof body.defaultPayoutAddress === "string"
+          ? body.defaultPayoutAddress
+          : undefined,
+      ufvk:
+        typeof body.ufvk === "string" && body.ufvk.trim()
+          ? body.ufvk
+          : undefined,
+      ua: typeof body.ua === "string" && body.ua.trim() ? body.ua : undefined,
     });
     const response = NextResponse.json(created, {
       status: 201,

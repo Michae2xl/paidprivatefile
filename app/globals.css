@@ -352,6 +352,64 @@ a {
   cursor: not-allowed;
 }
 
+/* Framed logical section inside the seller form (e.g. "get paid"). */
+.zk-hub-form-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-dark);
+  border-radius: 10px;
+  background: rgba(20, 20, 15, 0.02);
+}
+
+.zk-hub-form-section-title {
+  margin: 0;
+  color: #c99725;
+  font-size: 0.68rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.zk-hub-form-section-note {
+  margin: -4px 0 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: rgba(21, 21, 17, 0.6);
+}
+
+/* Warning callout (dedicated-account rule). */
+.zectime-paid-warning {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 1px solid rgba(196, 121, 12, 0.45);
+  border-left: 3px solid #c4790c;
+  border-radius: 8px;
+  background: rgba(245, 196, 117, 0.16);
+}
+
+.zectime-paid-warning p:not(.eyebrow) {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: rgba(21, 21, 17, 0.8);
+}
+
+.zk-hub-form-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: rgba(21, 21, 17, 0.8);
+}
+
+.zk-hub-form-check input[type="checkbox"] {
+  width: auto;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
 .zk-hub-file-picker {
   display: grid;
   grid-template-columns: auto 1fr;

@@ -58,6 +58,9 @@ export interface PaidPrivateFileCopy {
     ufvkConfirmedBody: string;
     ufvkFingerprintLabel: string;
     ufvkAddressLabel: string;
+    sectionPayoutTitle: string;
+    sectionPayoutNote: string;
+    ufvkAckLabel: string;
   };
   send: {
     title: string;
@@ -123,6 +126,7 @@ export interface PaidPrivateFileCopy {
     missingFile: string;
     invalidPrice: string;
     invalidPayoutAddress: string;
+    ufvkRequired: string;
     missingOrder: string;
     missingNymAddress: string;
     nymUnavailable: string;
@@ -196,7 +200,12 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkConfirmedBody:
         "A plataforma vai derivar um endereco unico por pedido a partir desta chave.",
       ufvkFingerprintLabel: "Fingerprint",
-      ufvkAddressLabel: "Endereco padrao",
+      ufvkAddressLabel: "Endereco que recebe",
+      sectionPayoutTitle: "Receber pagamentos (nao-custodial)",
+      sectionPayoutNote:
+        "O comprador paga um endereco unico por pedido, derivado da sua chave de visualizacao — o dinheiro vai direto pra sua conta. Voce nao cola nenhum endereco.",
+      ufvkAckLabel:
+        "Entendi: vou usar uma conta dedicada, nao a minha carteira principal.",
     },
     send: {
       title: "Criar arquivo privado pago",
@@ -268,6 +277,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       invalidPrice: "Informe um preco valido em ZEC.",
       invalidPayoutAddress:
         "Informe uma Unified Address Zcash valida para receber.",
+      ufvkRequired:
+        "Cole a chave de visualizacao (UFVK) de uma conta dedicada e confirme o aviso.",
       missingOrder: "Cole um link ou order id valido.",
       missingNymAddress:
         "Informe um endereco Nym para receber a chave privada.",
@@ -340,7 +351,12 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkConfirmedBody:
         "The platform will derive a unique per-order address from this key.",
       ufvkFingerprintLabel: "Fingerprint",
-      ufvkAddressLabel: "Default address",
+      ufvkAddressLabel: "Receiving address",
+      sectionPayoutTitle: "Get paid (non-custodial)",
+      sectionPayoutNote:
+        "Buyers pay a unique address per order, derived from your viewing key — funds go straight to your account. You never paste an address.",
+      ufvkAckLabel:
+        "I understand: I'll use a dedicated account, not my main wallet.",
     },
     send: {
       title: "Create paid private file",
@@ -410,6 +426,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       missingFile: "Choose a file before creating the link.",
       invalidPrice: "Enter a valid ZEC price.",
       invalidPayoutAddress: "Enter a valid Zcash Unified Address to receive.",
+      ufvkRequired:
+        "Paste a dedicated account's viewing key (UFVK) and confirm the warning.",
       missingOrder: "Paste a valid link or order id.",
       missingNymAddress: "Enter a Nym address to receive the private key.",
       nymUnavailable: "Could not start the browser Nym receiver.",

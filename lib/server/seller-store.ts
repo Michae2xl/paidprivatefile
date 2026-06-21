@@ -82,25 +82,80 @@ const RESERVED_HANDLES = new Set([
 ]);
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 
-export async function createSellerProfile(input: {
-  handle: string;
-  displayName?: string | null;
-  defaultPayoutAddress: string;
-}): Promise<CreateSellerResult> {
+export async function createSellerProfile(
+  input: {
+    handle: string;
+    displayName?: string | null;
+    // Either a viewing key (preferred, non-custodial) or an explicit payout
+    // address must be provided. When a UFVK is given, the receiving address is
+    // DERIVED from it — the seller never pastes a separate wallet.
+    defaultPayoutAddress?: string | null;
+    ufvk?: string | null;
+    ua?: string | null;
+  },
+  scanner: ScannerClient = getScannerClient(),
+): Promise<CreateSellerResult> {
   const handle = normalizeSellerHandle(input.handle);
   const displayName = normalizeDisplayName(input.displayName, handle);
-  const defaultPayoutAddress = normalizeZcashUnifiedAddress(
-    input.defaultPayoutAddress,
-  );
   if (await findSellerIdByHandle(handle)) {
     throw new ServerError("flow_conflict", "Seller handle is already taken");
+  }
+
+  let defaultPayoutAddress: string;
+  let ufvkEncrypted: SellerProfile["ufvkEncrypted"];
+  let ufvkFingerprint: SellerProfile["ufvkFingerprint"];
+  let network: SellerProfile["network"];
+
+  const ufvkInput = input.ufvk?.trim();
+  if (ufvkInput) {
+    // Non-custodial: validate the viewing key and derive the shop's receiving
+    // address from it. The platform can detect payments, never spend.
+    const ufvk = normalizeUfvk(ufvkInput);
+    const ua = input.ua ? normalizeZcashUnifiedAddress(input.ua) : undefined;
+    const encrypted = encryptUfvk(ufvk);
+    const validation = await scanner.validateUfvk(ua ? { ufvk, ua } : { ufvk });
+    if (!validation.valid) {
+      throw new ServerError(
+        "validation",
+        "The viewing key (UFVK) is not valid",
+      );
+    }
+    if (validation.network !== "main") {
+      throw new ServerError(
+        "validation",
+        "Only mainnet viewing keys are accepted",
+      );
+    }
+    if (ua && validation.uaMatches === false) {
+      throw new ServerError(
+        "validation",
+        "The unified address does not match the viewing key",
+      );
+    }
+    defaultPayoutAddress = normalizeZcashUnifiedAddress(
+      ua ?? validation.defaultAddress,
+    );
+    ufvkEncrypted = encrypted;
+    ufvkFingerprint = validation.fingerprint;
+    network = validation.network;
+  } else if (input.defaultPayoutAddress) {
+    defaultPayoutAddress = normalizeZcashUnifiedAddress(
+      input.defaultPayoutAddress,
+    );
+  } else {
+    throw new ServerError(
+      "validation",
+      "A shop viewing key (UFVK) or payout address is required",
+    );
   }
 
   const sellerId = createSellerId();
   const accessKey = generateAccessKey();
   const now = new Date().toISOString();
   const profile: SellerProfile = {
-    schema: "paidprivatefile.seller.v1",
+    schema: ufvkEncrypted
+      ? "paidprivatefile.seller.v2"
+      : "paidprivatefile.seller.v1",
     sellerId,
     handle,
     displayName,
@@ -108,6 +163,7 @@ export async function createSellerProfile(input: {
     accessKeyHash: hashAccessKey(accessKey),
     createdAt: now,
     updatedAt: now,
+    ...(ufvkEncrypted ? { ufvkEncrypted, ufvkFingerprint, network } : {}),
   };
 
   await mkdir(sellerProfileDir(), { recursive: true, mode: 0o700 });

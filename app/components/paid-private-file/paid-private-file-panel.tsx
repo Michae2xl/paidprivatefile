@@ -388,19 +388,22 @@ export function PaidPrivateFilePanel({
   async function onCreateSeller() {
     setErrorMessage("");
     setNewSellerAccessKey("");
-    if (!isLikelyZcashUnifiedAddress(sellerPayoutAddress)) {
-      setErrorMessage(copy.errors.invalidPayoutAddress);
+    if (!sellerUfvk.trim() || !ufvkAcknowledged) {
+      setErrorMessage(copy.errors.ufvkRequired);
       return;
     }
     setBusyAction("seller");
     try {
+      setUfvkConfirmation(null);
+      // Non-custodial: the shop is created from the viewing key; the receiving
+      // address is DERIVED from it server-side (no separate wallet to paste).
       const body = await postJson<SellerCreateResponse>("/api/sellers", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           handle: sellerHandle,
           displayName: sellerDisplayName,
-          defaultPayoutAddress: sellerPayoutAddress.trim(),
+          ufvk: sellerUfvk.trim(),
         }),
       });
       applySeller(body.seller);
@@ -409,12 +412,9 @@ export function PaidPrivateFilePanel({
       setAccessKeyAcknowledged(false);
       setSellerAccessKey("");
 
-      // Optional non-custodial path: if the seller pasted a viewing key, register
-      // it now so the platform can derive per-order deposit addresses. The shop
-      // stays valid without a UFVK (back-compat with the pool flow).
-      if (sellerUfvk.trim()) {
-        await registerSellerUfvk();
-      }
+      // Read back the confirmation (fingerprint + derived receiving address) for
+      // the success panel; the key itself is already stored from creation.
+      await registerSellerUfvk();
     } catch (error) {
       setErrorMessage(formatError(error, copy.errors.serverError));
     } finally {
@@ -1323,65 +1323,56 @@ export function PaidPrivateFilePanel({
                             disabled={isBusy}
                           />
                         </label>
-                        <label className="zk-hub-form-field">
-                          <span className="zk-hub-form-label">
-                            {copy.send.payoutAddressLabel}
-                          </span>
-                          <input
-                            value={sellerPayoutAddress}
-                            onChange={(event) =>
-                              setSellerPayoutAddress(event.target.value)
-                            }
-                            placeholder={copy.send.payoutAddressPlaceholder}
-                            autoComplete="off"
-                            disabled={isBusy}
-                          />
-                          <span className="zk-hub-form-hint">
-                            {copy.send.payoutAddressHint}
-                          </span>
-                        </label>
-                        <div
-                          className="zectime-paid-warning"
-                          role="note"
-                          data-tone="warning"
-                        >
-                          <p className="eyebrow">
-                            {copy.seller.ufvkWarningTitle}
+                        <section className="zk-hub-form-section">
+                          <p className="zk-hub-form-section-title">
+                            {copy.seller.sectionPayoutTitle}
                           </p>
-                          <p>{copy.seller.ufvkWarningBody}</p>
-                        </div>
-                        <label className="zk-hub-form-field">
-                          <span className="zk-hub-form-label">
-                            {copy.seller.ufvkLabel}
-                          </span>
-                          <textarea
-                            value={sellerUfvk}
-                            onChange={(event) =>
-                              setSellerUfvk(event.target.value)
-                            }
-                            placeholder={copy.seller.ufvkPlaceholder}
-                            autoComplete="off"
-                            spellCheck={false}
-                            rows={3}
-                            disabled={isBusy}
-                          />
-                          <span className="zk-hub-form-hint">
-                            {copy.seller.ufvkHint}
-                          </span>
-                        </label>
-                        {sellerUfvk.trim() ? (
-                          <label className="zk-hub-form-check">
-                            <input
-                              type="checkbox"
-                              checked={ufvkAcknowledged}
+                          <p className="zk-hub-form-section-note">
+                            {copy.seller.sectionPayoutNote}
+                          </p>
+                          <div
+                            className="zectime-paid-warning"
+                            role="note"
+                            data-tone="warning"
+                          >
+                            <p className="eyebrow">
+                              {copy.seller.ufvkWarningTitle}
+                            </p>
+                            <p>{copy.seller.ufvkWarningBody}</p>
+                          </div>
+                          <label className="zk-hub-form-field">
+                            <span className="zk-hub-form-label">
+                              {copy.seller.ufvkLabel}
+                            </span>
+                            <textarea
+                              value={sellerUfvk}
                               onChange={(event) =>
-                                setUfvkAcknowledged(event.target.checked)
+                                setSellerUfvk(event.target.value)
                               }
+                              placeholder={copy.seller.ufvkPlaceholder}
+                              autoComplete="off"
+                              spellCheck={false}
+                              rows={3}
                               disabled={isBusy}
                             />
-                            <span>{copy.seller.ufvkWarningTitle}</span>
+                            <span className="zk-hub-form-hint">
+                              {copy.seller.ufvkHint}
+                            </span>
                           </label>
-                        ) : null}
+                          {sellerUfvk.trim() ? (
+                            <label className="zk-hub-form-check">
+                              <input
+                                type="checkbox"
+                                checked={ufvkAcknowledged}
+                                onChange={(event) =>
+                                  setUfvkAcknowledged(event.target.checked)
+                                }
+                                disabled={isBusy}
+                              />
+                              <span>{copy.seller.ufvkAckLabel}</span>
+                            </label>
+                          ) : null}
+                        </section>
                       </>
                     ) : (
                       <label className="zk-hub-form-field">
