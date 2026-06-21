@@ -96,6 +96,7 @@ interface KeyReleaseResponse {
       | "released";
     buyerPublicKeyHash: string | null;
     buyerPublicKeyJwk: JsonWebKey | null;
+    buyerNymAddress: string | null;
     releasedAt: string | null;
   };
 }
@@ -140,7 +141,7 @@ interface CreateTransferResponse {
 
 interface ClaimResponse {
   order: TransferPublicOrder;
-  deliveryMode: "http-dev-fallback" | "nym";
+  deliveryMode: "http-dev-fallback" | "nym" | "browser-nym";
   keyEnvelope?: PaidLinkKeyEnvelope;
   download?: {
     url: string;
@@ -182,6 +183,11 @@ interface BrowserNymClient {
     start: (opts?: Record<string, unknown>) => Promise<void>;
     stop: () => Promise<void>;
     selfAddress: () => Promise<string | undefined>;
+    send: (args: {
+      payload: { message: string | Uint8Array; mimeType?: string };
+      recipient: string;
+      replySurbs?: number;
+    }) => Promise<void>;
   };
   events: {
     subscribeToTextMessageReceivedEvent: (
@@ -243,6 +249,13 @@ export function PaidPrivateFilePanel({
   const [showManualNymAddress, setShowManualNymAddress] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFileName, setDownloadFileName] = useState("");
+  // Browser-direct Nym: the buyer's claim returns the signed ciphertext URL but
+  // NOT the key envelope (the seller delivers that over the mixnet). We stash
+  // the URL here so the Nym receive handler can fetch the file once the key
+  // arrives over Nym.
+  const pendingDownloadRef = useRef<{ url: string; expiresAt: string } | null>(
+    null,
+  );
   const [errorMessage, setErrorMessage] = useState("");
   const [releaseMessage, setReleaseMessage] = useState("");
   const [nymStatus, setNymStatus] = useState<BrowserNymStatus>("idle");
@@ -519,6 +532,7 @@ export function PaidPrivateFilePanel({
     setBusyAction("loading");
     setDownloadUrl("");
     setDownloadFileName("");
+    pendingDownloadRef.current = null;
 
     try {
       const body = await postJson<{ order: TransferPublicOrder }>(
@@ -651,6 +665,13 @@ export function PaidPrivateFilePanel({
         return;
       }
 
+      // Browser-direct Nym: the claim returns the signed ciphertext URL but no
+      // key envelope (the seller sends that over the mixnet). Stash the URL and
+      // wait for the key to arrive via the in-browser Nym receiver.
+      if (claim.deliveryMode === "browser-nym" && claim.download) {
+        pendingDownloadRef.current = claim.download;
+      }
+
       setNymStatus("waiting");
       setNymMessage(copy.receive.nymWaitingLabel);
     } catch (error) {
@@ -664,6 +685,60 @@ export function PaidPrivateFilePanel({
     }
   }
 
+  // Shared Nym client bootstrap used by BOTH the buyer receiver (subscribes to
+  // inbound text messages) and the seller sender (uses client.send). It reuses
+  // the existing client when one is already running, starts the SDK, and polls
+  // selfAddress() until the gateway handshake completes.
+  async function bootstrapBrowserNymClient(options: {
+    subscribe: boolean;
+  }): Promise<{ client: BrowserNymClient; address: string }> {
+    const existing = browserNymClientRef.current;
+    if (existing) {
+      const existingAddress = (await existing.client.selfAddress()) ?? "";
+      if (existingAddress) {
+        return { client: existing, address: existingAddress };
+      }
+    }
+
+    const nymModule = await import("@nymproject/sdk-full-fat");
+    const nym = (await nymModule.createNymMixnetClient({
+      autoConvertStringMimeTypes: [
+        nymModule.MimeTypes.ApplicationJson,
+        nymModule.MimeTypes.TextPlain,
+      ],
+    })) as BrowserNymClient;
+
+    if (options.subscribe) {
+      browserNymUnsubscribeRef.current?.();
+      browserNymUnsubscribeRef.current =
+        nym.events.subscribeToTextMessageReceivedEvent((event) => {
+          void handleNymTextMessage(event.args.payload);
+        });
+    }
+
+    const clientId = getOrCreateBrowserNymClientId();
+    await nym.client.start({
+      clientId,
+      nymApiUrl:
+        process.env.NEXT_PUBLIC_NYM_API_URL ??
+        "https://validator.nymtech.net/api",
+      forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
+    });
+    // selfAddress() can be empty until the gateway handshake completes, so
+    // poll for the address instead of reading it once right after start.
+    let address = await nym.client.selfAddress();
+    for (let attempt = 0; attempt < 90 && !address; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      address = await nym.client.selfAddress();
+    }
+    if (!address) {
+      throw new Error("Nym client did not return an address");
+    }
+
+    browserNymClientRef.current = nym;
+    return { client: nym, address };
+  }
+
   async function startBrowserNym(): Promise<string> {
     if (browserNymClientRef.current && buyerNymAddress.trim()) {
       return buyerNymAddress.trim();
@@ -674,40 +749,7 @@ export function PaidPrivateFilePanel({
     setNymMessage(copy.receive.nymStartingLabel);
     setBusyAction("nym");
     try {
-      const nymModule = await import("@nymproject/sdk-full-fat");
-      const nym = (await nymModule.createNymMixnetClient({
-        autoConvertStringMimeTypes: [
-          nymModule.MimeTypes.ApplicationJson,
-          nymModule.MimeTypes.TextPlain,
-        ],
-      })) as BrowserNymClient;
-
-      browserNymUnsubscribeRef.current?.();
-      browserNymUnsubscribeRef.current =
-        nym.events.subscribeToTextMessageReceivedEvent((event) => {
-          void handleNymTextMessage(event.args.payload);
-        });
-
-      const clientId = getOrCreateBrowserNymClientId();
-      await nym.client.start({
-        clientId,
-        nymApiUrl:
-          process.env.NEXT_PUBLIC_NYM_API_URL ??
-          "https://validator.nymtech.net/api",
-        forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
-      });
-      // selfAddress() can be empty until the gateway handshake completes, so
-      // poll for the buyer address instead of reading it once right after start.
-      let address = await nym.client.selfAddress();
-      for (let attempt = 0; attempt < 90 && !address; attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        address = await nym.client.selfAddress();
-      }
-      if (!address) {
-        throw new Error("Nym client did not return an address");
-      }
-
-      browserNymClientRef.current = nym;
+      const { address } = await bootstrapBrowserNymClient({ subscribe: true });
       setBuyerNymAddress(address);
       setNymStatus("ready");
       setNymMessage(copy.receive.nymReadyLabel);
@@ -721,20 +763,79 @@ export function PaidPrivateFilePanel({
     }
   }
 
+  // Seller-side browser-direct Nym send: reuse the shared client bootstrap, then
+  // deliver the wrapped key envelope straight to the buyer's Nym address over
+  // the mixnet. The SDK exposes client.send({ payload: { message, mimeType },
+  // recipient }); the buyer receiver decodes it via subscribeToTextMessage.
+  async function sendKeyEnvelopeOverNym(input: {
+    orderId: string;
+    keyEnvelope: PaidLinkKeyEnvelope;
+    buyerNymAddress: string;
+  }): Promise<void> {
+    const { client } = await bootstrapBrowserNymClient({ subscribe: false });
+    const message = JSON.stringify({
+      schema: "paidprivatefile.nym.claim.v1",
+      orderId: input.orderId,
+      keyEnvelope: input.keyEnvelope,
+    });
+    await client.client.send({
+      payload: { message, mimeType: "application/json" },
+      recipient: input.buyerNymAddress,
+    });
+  }
+
   async function handleNymTextMessage(payload: string): Promise<void> {
+    // Legacy full payload (server-relayed) carries the manifest + file URL.
     const parsed = parseNymClaimPayload(payload);
-    if (!parsed) {
+    if (parsed) {
+      if (loadedOrder && parsed.orderId !== loadedOrder.orderId) {
+        return;
+      }
+      const keyPair = loadBuyerKeyPair(parsed.orderId);
+      if (!keyPair) {
+        setErrorMessage(copy.errors.paymentRequired);
+        return;
+      }
+      await openClaimPayload(parsed, keyPair);
       return;
     }
-    if (loadedOrder && parsed.orderId !== loadedOrder.orderId) {
+
+    // Browser-direct Nym (frente B): the seller sends only { schema, orderId,
+    // keyEnvelope }. The buyer reconstructs the manifest from the loaded order
+    // and uses the signed download URL stashed from its own claim response.
+    const keyOnly = parseNymKeyOnlyPayload(payload);
+    if (!keyOnly) {
       return;
     }
-    const keyPair = loadBuyerKeyPair(parsed.orderId);
+    if (!loadedOrder || keyOnly.orderId !== loadedOrder.orderId) {
+      return;
+    }
+    const keyPair = loadBuyerKeyPair(keyOnly.orderId);
     if (!keyPair) {
       setErrorMessage(copy.errors.paymentRequired);
       return;
     }
-    await openClaimPayload(parsed, keyPair);
+    const download = pendingDownloadRef.current;
+    if (!download) {
+      setErrorMessage(copy.errors.paymentRequired);
+      return;
+    }
+    await openClaimPayload(
+      {
+        schema: "paidprivatefile.nym.claim.v1",
+        orderId: loadedOrder.orderId,
+        manifest: {
+          orderId: loadedOrder.orderId,
+          fileName: loadedOrder.file.fileName,
+          mimeType: loadedOrder.file.mimeType,
+          encryptedFileSha256: loadedOrder.file.encryptedFileSha256,
+          encryptionIv: loadedOrder.file.encryptionIv,
+        },
+        keyEnvelope: keyOnly.keyEnvelope,
+        encryptedFileDownload: download,
+      },
+      keyPair,
+    );
   }
 
   async function openClaimPayload(
@@ -902,6 +1003,33 @@ export function PaidPrivateFilePanel({
       );
       applyOrderState(released.order);
       setReleaseMessage(formatReleaseStatus("released", locale));
+
+      // Frente B: keep the server key-release POST above (record + fallback),
+      // then deliver the envelope to the buyer DIRECTLY over the Nym mixnet.
+      // The server never relays the key in this mode.
+      if (browserNymDeliveryEnabled() && challenge.release.buyerNymAddress) {
+        try {
+          await sendKeyEnvelopeOverNym({
+            orderId: order.orderId,
+            keyEnvelope,
+            buyerNymAddress: challenge.release.buyerNymAddress,
+          });
+          setReleaseMessage(
+            locale === "pt"
+              ? "Chave liberada e enviada ao comprador pela Nym."
+              : "Key released and delivered to the buyer over Nym.",
+          );
+        } catch (nymError) {
+          setReleaseMessage(
+            formatError(
+              nymError,
+              locale === "pt"
+                ? "Chave liberada, mas o envio pela Nym falhou: "
+                : "Key released, but Nym delivery failed: ",
+            ),
+          );
+        }
+      }
     } catch (error) {
       if (silent) {
         setReleaseMessage(formatError(error, copy.errors.serverError));
@@ -2041,6 +2169,29 @@ function parseNymClaimPayload(value: string): NymClaimPayload | null {
   };
 }
 
+// Browser-direct Nym payload: { schema, orderId, keyEnvelope } only. The buyer
+// supplies the manifest + file URL from its own loaded order and claim response.
+function parseNymKeyOnlyPayload(
+  value: string,
+): { orderId: string; keyEnvelope: PaidLinkKeyEnvelope } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || parsed.schema !== "paidprivatefile.nym.claim.v1") {
+    return null;
+  }
+  if (typeof parsed.orderId !== "string" || !isRecord(parsed.keyEnvelope)) {
+    return null;
+  }
+  return {
+    orderId: parsed.orderId,
+    keyEnvelope: parsed.keyEnvelope as unknown as PaidLinkKeyEnvelope,
+  };
+}
+
 function parseNymFileDownload(
   value: unknown,
 ): NymClaimPayload["encryptedFileDownload"] | undefined {
@@ -2064,6 +2215,12 @@ function getOrCreateBrowserNymClientId(): string {
   const next = `paidprivatefile-${crypto.randomUUID()}`;
   window.localStorage.setItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY, next);
   return next;
+}
+
+// Frente B: when on, the SELLER browser sends the wrapped key envelope over the
+// Nym mixnet directly to the buyer (the server no longer relays it over Nym).
+function browserNymDeliveryEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_PPF_BROWSER_NYM === "1";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

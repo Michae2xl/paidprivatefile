@@ -325,12 +325,13 @@ returns the release challenge:
     "status": "waiting_for_buyer | waiting_for_payment | ready_to_release | released",
     "buyerPublicKeyHash": "<hex|null>",
     "buyerPublicKeyJwk": { "...": "P-256 JWK, only when paid" },
+    "buyerNymAddress": "<nym address|null, only when paid + Nym session registered>",
     "releasedAt": "<iso|null>"
   }
 }
 ```
 
-`buyerPublicKeyJwk` is disclosed only once the order is `paid`. Release (`action: "release"`):
+`buyerPublicKeyJwk` is disclosed only once the order is `paid`. `buyerNymAddress` is disclosed only when the order is `paid` **and** the buyer has registered a Nym session; it tells the seller browser where to send the wrapped key envelope in browser-direct Nym mode (see below). Release (`action: "release"`):
 
 ```json
 {
@@ -394,11 +395,22 @@ Key custody is **pure seller-held**. There is no `wrapFileKey` path on the serve
 1. Seller browser encrypts the file, derives a random `release_secret`, and uploads only `release_secret_hash` plus the ciphertext and IV. The raw `file_key` and `release_secret` are saved in a local seller vault (localStorage key `zectime_paid_link_seller_release_<orderId>`).
 2. Buyer pays. The payment intent records the buyer P-256 public key (`buyerPublicKeyJwk`) on the order.
 3. Seller browser calls the key-release endpoint, which discloses the buyer public key only once payment is confirmed, wraps `file_key` for that buyer with ECDH-ES, and posts the envelope back.
-4. On claim, the API returns the seller-released envelope. If the seller has not released yet, claim fails with `payment_required` ("Seller key release is pending for this paid private file").
+4. On claim, the API returns the seller-released envelope (server-relayed / dev modes) or, in browser-direct Nym mode, only the signed ciphertext URL while the key envelope arrives over the mixnet (see below). If the seller has not released yet, claim fails with `payment_required` ("Seller key release is pending for this paid private file").
 
 Key release is **monotonic**: once an envelope is released it cannot be replaced (`releaseTransferKey` rejects a second release or release after claim), so a leaked `release_secret` cannot swap the file for a buyer after the sale.
 
 Nym is used to deliver the seller-wrapped key envelope privately after payment.
+
+### Browser-direct Nym key delivery (`PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1`)
+
+The fully private transport runs **browser-to-browser over the mixnet with no server `nym-client`**. Gated behind `PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1` (server) and `NEXT_PUBLIC_PPF_BROWSER_NYM=1` (client); when off, behavior is unchanged.
+
+- The buyer browser already runs an in-page Nym receiver (`@nymproject/sdk-full-fat`) and registers its `buyerNymAddress` via `POST /api/transfers/:orderId/nym-session`.
+- The seller browser releases the key as usual, reads `release.buyerNymAddress` from the release challenge, and sends `{ schema: "paidprivatefile.nym.claim.v1", orderId, keyEnvelope }` to that address with the SDK `client.send({ payload: { message, mimeType: "application/json" }, recipient })`. The server-side `key-release` POST is still made (record + monotonic guard), but the key transits the mixnet directly — the server never relays it.
+- `POST /api/transfers/:orderId/claim` returns `deliveryMode: "browser-nym"` with the signed `download` URL **and no `keyEnvelope`**. The server does **not** call `queueNymDelivery`. The claim still requires `paid` + a buyer-key binding + a registered Nym session.
+- The buyer stashes the `download` URL, shows an "awaiting key over Nym" state, and on the inbound Nym message reconstructs the manifest from its loaded order, fetches the ciphertext, unwraps the key with its private key, and decrypts locally.
+
+This is the only path where the key envelope actually transits the mixnet without a server-side Nym client. The legacy `nym` mode (server WebSocket `nym-client`) and `http-dev-fallback` mode remain for environments where the flags are off.
 
 ### Threat model and its limit (important)
 

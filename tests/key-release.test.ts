@@ -84,6 +84,7 @@ interface ReleaseChallenge {
     status: string;
     buyerPublicKeyHash: string | null;
     buyerPublicKeyJwk: JsonWebKey | null;
+    buyerNymAddress: string | null;
     releasedAt: string | null;
   };
 }
@@ -278,6 +279,30 @@ describe("pure seller-held key custody", () => {
     expect(released.release.status).toBe("released");
     expect(released.release.releasedAt).toBeTruthy();
     expect(released.order.release.status).toBe("ready");
+  });
+
+  it("exposes the buyer Nym address on the release challenge only after payment with a registered Nym session", async () => {
+    const { draft } = await encryptSecret("nym");
+    const orderId = await createSellerHeldOrder(draft);
+    const buyer = await createPaidLinkBuyerKeyPair();
+
+    // No payment yet: the seller must not learn the buyer Nym address.
+    const beforeBuyer = await keyReleaseStatus(orderId, draft.releaseSecret);
+    expect(beforeBuyer.release.buyerNymAddress).toBeNull();
+
+    await paymentIntent(orderId, buyer.publicJwk);
+    await registerNym(orderId, buyer.publicJwk);
+
+    // Bound but unpaid: still no address.
+    const beforePay = await keyReleaseStatus(orderId, draft.releaseSecret);
+    expect(beforePay.release.buyerNymAddress).toBeNull();
+
+    await devPay(orderId);
+
+    // Paid + Nym session registered: the seller can now learn where to send.
+    const ready = await keyReleaseStatus(orderId, draft.releaseSecret);
+    expect(ready.release.status).toBe("ready_to_release");
+    expect(ready.release.buyerNymAddress).toBe(testBuyerNymAddress());
   });
 
   it("persists buyer public key JWK on the payment record", async () => {

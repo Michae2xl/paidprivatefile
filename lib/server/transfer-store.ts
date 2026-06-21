@@ -189,7 +189,7 @@ export interface TransferSeller {
 export interface TransferClaim {
   order: TransferPublicOrder;
   manifest: TransferManifest;
-  deliveryMode: "http-dev-fallback" | "nym";
+  deliveryMode: "http-dev-fallback" | "nym" | "browser-nym";
   keyEnvelope?: TransferKeyEnvelope;
   download?: {
     token: string;
@@ -233,6 +233,7 @@ export interface TransferReleaseChallenge {
       | "released";
     buyerPublicKeyHash: string | null;
     buyerPublicKeyJwk: JsonWebKey | null;
+    buyerNymAddress: string | null;
     releasedAt: string | null;
   };
 }
@@ -749,6 +750,43 @@ export async function claimTransfer(
       url: `/api/transfers/${orderId}/file?token=${encodeURIComponent(token)}`,
       expiresAt: expiresAt.toISOString(),
     };
+
+    // Frente B (browser-direct Nym): the SELLER browser delivers the wrapped key
+    // envelope over the mixnet straight to the buyer. The server stops sending
+    // over Nym entirely — it only marks the order claimed and returns the signed
+    // ciphertext URL so the buyer can fetch the file. The key envelope is NOT
+    // returned over HTTP because it transits the mixnet browser-to-browser.
+    if (browserNymDeliveryEnabled()) {
+      const nymDelivery: NymDeliveryReceipt = {
+        deliveryId: `nym_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        transport: order.delivery.nymSession.transport,
+        status: "queued_local_outbox",
+        queuedAt: now.toISOString(),
+      };
+      order.status = "claimed";
+      order.updatedAt = now.toISOString();
+      order.delivery.nymSession.status = "queued";
+      order.delivery.nymSession.updatedAt = now.toISOString();
+      order.delivery.nymSession.lastDelivery = nymDelivery;
+      order.claims.push({
+        claimedAt: now.toISOString(),
+        buyerPublicKeyHash,
+        tokenExpiresAt: expiresAt.toISOString(),
+      });
+      await writeOrder(order);
+
+      return {
+        order: publicOrder(order),
+        manifest: manifestForOrder(order),
+        deliveryMode: "browser-nym",
+        download: {
+          token,
+          ...encryptedFileDownload,
+        },
+        nymDelivery,
+      };
+    }
+
     const nymDelivery = await queueNymDelivery({
       orderId,
       buyerNymAddress: order.delivery.nymSession.buyerNymAddress,
@@ -915,6 +953,7 @@ function releaseChallengeForOrder(
   order: TransferOrder,
 ): TransferReleaseChallenge {
   const release = normalizeReleaseState(order.release);
+  const delivery = normalizeDeliveryState(order.delivery);
   const hasPaidBuyer = order.payment?.status === "paid";
   const status = release.keyEnvelope
     ? "released"
@@ -931,6 +970,11 @@ function releaseChallengeForOrder(
       buyerPublicKeyHash: order.payment?.buyerPublicKeyHash ?? null,
       buyerPublicKeyJwk: hasPaidBuyer
         ? (order.payment?.buyerPublicKeyJwk ?? null)
+        : null,
+      // Browser-direct Nym delivery: the seller learns where to send only once
+      // payment is confirmed and the buyer has registered a Nym session.
+      buyerNymAddress: hasPaidBuyer
+        ? (delivery.nymSession?.buyerNymAddress ?? null)
         : null,
       releasedAt: release.releasedAt,
     },
@@ -1394,6 +1438,10 @@ function downloadTokenSecret(): string {
     process.env.ZKCGZ_TRANSFER_TOKEN_SECRET ??
     "paidprivatefile-dev-secret"
   );
+}
+
+function browserNymDeliveryEnabled(): boolean {
+  return process.env.PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY === "1";
 }
 
 function requireNymDeliveryForClaim(): boolean {

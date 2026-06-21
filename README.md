@@ -110,6 +110,8 @@ PAID_PRIVATE_FILE_AUTH_SECRET
 PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY
 PAID_PRIVATE_FILE_ALLOW_LOCAL_NYM_OUTBOX
 PAID_PRIVATE_FILE_ALLOW_HTTP_CLAIM_RESPONSE
+PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY
+NEXT_PUBLIC_PPF_BROWSER_NYM
 PAID_PRIVATE_FILE_ENABLE_DEV_PAY
 PAID_PRIVATE_FILE_TRUST_PROXY_HEADERS
 NYM_CLIENT_ENDPOINT
@@ -178,6 +180,25 @@ NEXT_PUBLIC_NYM_API_URL=https://validator.nymtech.net/api
 
 With `PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY=1`, `/api/transfers/:orderId/claim` sends the wrapped key envelope through Nym and does not include the key envelope or download URL in the HTTP response. The buyer browser starts its own Nym receiver, registers its Nym address on the order, receives the claim payload through Nym, downloads the ciphertext with the signed URL included inside that Nym payload, and decrypts locally.
 
+## Browser-direct Nym key delivery (no server nym-client)
+
+The fully private path does not need a server-side `nym-client` at all. With
+
+```txt
+PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1
+NEXT_PUBLIC_PPF_BROWSER_NYM=1
+```
+
+the **seller browser** sends the wrapped key envelope over the Nym mixnet directly to the **buyer browser**. The server never relays the key.
+
+Flow:
+
+1. The buyer pays, then registers its in-browser Nym receiver address on the order (`POST /api/transfers/:orderId/nym-session`). The receiver (`@nymproject/sdk-full-fat`) is already listening.
+2. The seller browser releases the key as usual via `POST /api/transfers/:orderId/key-release`, then reads `release.buyerNymAddress` (returned on the release challenge only after payment is confirmed and a Nym session is registered) and sends a JSON message `{ schema: "paidprivatefile.nym.claim.v1", orderId, keyEnvelope }` to that address with the SDK's `client.send({ payload: { message, mimeType: "application/json" }, recipient })`.
+3. The buyer's claim (`POST /api/transfers/:orderId/claim`) returns `deliveryMode: "browser-nym"` with the signed ciphertext `download` URL **but no `keyEnvelope`** — that key transits the mixnet browser-to-browser. The buyer shows an "awaiting key over Nym" state, then, when the Nym message arrives, fetches the ciphertext with the stored signed URL, unwraps the key with its private key, and decrypts locally.
+
+When the flags are off, the claim contract is unchanged (server-relayed `nym` mode or `http-dev-fallback`). The server-side flag gates the claim contract; the `NEXT_PUBLIC` flag tells the seller/buyer UI to use browser-to-browser delivery.
+
 ## Validation
 
 ```bash
@@ -194,7 +215,7 @@ Storage caveat: order and deposit-pool state live under `PAID_PRIVATE_FILE_RUNTI
 
 ## Current Status
 
-Prototype moving toward real `nym-claim-v1`. The system supports no-email seller workspaces, public seller routes, local encrypted-file order creation, seller wallet/price configuration, browser-side Nym receiver startup, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, standalone `nym-client` WebSocket delivery, local Nym outbox fallback, signed ciphertext URLs inside the Nym claim payload, and browser-side decryption. Real on-chain ZEC payment is wired via the `zcash-onchain` provider and a local Zallet bridge (per-order deposit Unified Addresses from a pool, a signed watchlist, and a signed payment webhook), validated against Zallet `0.1.0-alpha.3`. The remaining piece for a fully private flow is live Nym delivery (planned as seller-browser-direct send, no server nym-client). The integrated `zkglobalcredit.tech` implementation now uses the same lower-friction buyer direction: open link, auto-detect a private receiver when available, pay in ZEC, then open locally.
+Prototype moving toward real `nym-claim-v1`. The system supports no-email seller workspaces, public seller routes, local encrypted-file order creation, seller wallet/price configuration, browser-side Nym receiver startup, Nym session registration, payment intent creation, dev payment confirmation, CipherPay webhook parsing, standalone `nym-client` WebSocket delivery, local Nym outbox fallback, signed ciphertext URLs inside the Nym claim payload, and browser-side decryption. Real on-chain ZEC payment is wired via the `zcash-onchain` provider and a local Zallet bridge (per-order deposit Unified Addresses from a pool, a signed watchlist, and a signed payment webhook), validated against Zallet `0.1.0-alpha.3`. Live Nym delivery is implemented as **seller-browser-direct send** (no server nym-client): with `PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1` and `NEXT_PUBLIC_PPF_BROWSER_NYM=1`, the seller browser sends the wrapped key envelope over the mixnet straight to the buyer browser, and the claim returns the signed ciphertext URL without the key envelope. The integrated `zkglobalcredit.tech` implementation now uses the same lower-friction buyer direction: open link, auto-detect a private receiver when available, pay in ZEC, then open locally.
 
 Key custody is pure seller-held in every path: the server has no file key and no way to wrap it. The seller browser keeps `file_key` and `release_secret` in localStorage (`zectime_paid_link_seller_release_<orderId>`) and releases a buyer-wrapped key envelope via `POST /api/transfers/:orderId/key-release` after payment. The tradeoff is that the seller must keep the tab open to release the key; the seller panel auto-releases on payment confirmation and also exposes a manual "Release key" button. Until the seller releases, the buyer's claim is blocked with a clear "awaiting seller release" state.
 
