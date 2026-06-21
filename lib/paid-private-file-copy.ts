@@ -147,6 +147,21 @@ export interface PaidPrivateFileCopy {
     paidStatus: string;
     pendingStatus: string;
     paymentAddressHint: string;
+    // Dead-simple buyer flow (auto QR + polling + confirmation modal).
+    payHeadline: string;
+    payHelper: string;
+    preparingPaymentLabel: string;
+    inTransitTitle: string;
+    inTransitBody: string;
+    copyAddressLabel: string;
+    copyAddressDoneLabel: string;
+    modalTitle: string;
+    modalBody: string;
+    modalDownloadLabel: string;
+    modalPreparingLabel: string;
+    modalCloseLabel: string;
+    doneTitle: string;
+    doneBody: string;
   };
   details: {
     price: string;
@@ -340,6 +355,22 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       pendingStatus: "Aguardando pagamento",
       paymentAddressHint:
         "Seu endereco de pagamento + QR aparecem depois que voce criar o pagamento.",
+      payHeadline: "Escaneie e pague para abrir",
+      payHelper: "Escaneie o QR e pague em ZEC. So isso.",
+      preparingPaymentLabel: "Preparando seu pagamento...",
+      inTransitTitle: "Pagamento em transito",
+      inTransitBody:
+        "Recebemos seu pagamento e estamos confirmando. Pode deixar esta pagina aberta.",
+      copyAddressLabel: "Copiar endereco",
+      copyAddressDoneLabel: "Endereco copiado",
+      modalTitle: "Pagamento confirmado!",
+      modalBody: "Baixe seu arquivo.",
+      modalDownloadLabel: "Baixar arquivo",
+      modalPreparingLabel: "Preparando seu arquivo...",
+      modalCloseLabel: "Fechar",
+      doneTitle: "Concluido",
+      doneBody:
+        "Seu arquivo foi aberto neste navegador. Use o link abaixo para salvar.",
     },
     details: {
       price: "Preco",
@@ -534,6 +565,22 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       pendingStatus: "Waiting for payment",
       paymentAddressHint:
         "Your payment address + QR appear after you create the payment.",
+      payHeadline: "Scan and pay to open",
+      payHelper: "Scan the QR and pay in ZEC. That's it.",
+      preparingPaymentLabel: "Preparing your payment...",
+      inTransitTitle: "Payment in transit",
+      inTransitBody:
+        "We received your payment and are confirming it. You can keep this page open.",
+      copyAddressLabel: "Copy address",
+      copyAddressDoneLabel: "Address copied",
+      modalTitle: "Payment confirmed!",
+      modalBody: "Download your file.",
+      modalDownloadLabel: "Download file",
+      modalPreparingLabel: "Preparing your file...",
+      modalCloseLabel: "Close",
+      doneTitle: "Done",
+      doneBody:
+        "Your file was opened in this browser. Use the link below to save it.",
     },
     details: {
       price: "Price",

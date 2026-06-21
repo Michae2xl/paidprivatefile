@@ -812,6 +812,312 @@ a {
   line-height: 1.45;
 }
 
+/* ---------------------------------------------------------------------------
+   Dead-simple BUYER checkout. The QR is the hero; the buyer's only action is to
+   scan + pay. Everything else (status, modal, done) is driven by polling.
+   --------------------------------------------------------------------------- */
+.zectime-paid-panel > .ppf-buyer {
+  grid-column: 2;
+  display: grid;
+  gap: 14px;
+}
+
+.ppf-buyer-load {
+  display: grid;
+  gap: 12px;
+}
+
+.ppf-buyer-stage {
+  display: grid;
+  gap: 14px;
+}
+
+/* The pay card: the QR sits centered and glowing, the address is a quiet
+   copyable fallback below it. */
+.ppf-buyer-pay {
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+  padding: 22px 18px;
+  border: 1px solid rgba(20, 232, 140, 0.42);
+  border-radius: 12px;
+  background:
+    linear-gradient(160deg, rgba(20, 232, 140, 0.1), transparent 58%),
+    var(--surface-strong);
+}
+
+.ppf-buyer-pay-head {
+  display: grid;
+  gap: 4px;
+  text-align: center;
+}
+
+.ppf-buyer-pay-head .eyebrow {
+  color: #0f7048;
+  font-size: 0.74rem;
+}
+
+.ppf-buyer-pay .zectime-paid-qr img {
+  width: 240px;
+  height: 240px;
+}
+
+.ppf-buyer-address {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 420px;
+}
+
+.ppf-buyer-address-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ppf-buyer-address code {
+  display: block;
+  width: 100%;
+  overflow-wrap: anywhere;
+  padding: 10px 12px;
+  border: 1px solid var(--line-dark);
+  border-radius: 7px;
+  background: #f1f4ed;
+  color: var(--ink);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.ppf-buyer-devpay {
+  font-size: 0.8rem;
+}
+
+/* In-transit + preparing status row. */
+.ppf-buyer-status {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--line-dark);
+  border-radius: 12px;
+  background: var(--surface-strong);
+}
+
+.ppf-buyer-status[data-tone="transit"] {
+  border-color: rgba(66, 196, 255, 0.5);
+  background:
+    linear-gradient(160deg, rgba(66, 196, 255, 0.12), transparent 60%),
+    var(--surface-strong);
+}
+
+.ppf-buyer-status p {
+  margin: 0;
+}
+
+.ppf-buyer-status .eyebrow {
+  color: #0f7048;
+}
+
+.ppf-buyer-status p:not(.eyebrow) {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.ppf-buyer-spinner {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 3px solid rgba(20, 232, 140, 0.3);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: ppf-spin 0.9s linear infinite;
+}
+
+@keyframes ppf-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ppf-buyer-spinner {
+    animation: none;
+  }
+}
+
+/* Done state: file opened, link to save. */
+.ppf-buyer-done {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid rgba(20, 232, 140, 0.42);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(20, 232, 140, 0.18), transparent 60%), #eefbf4;
+}
+
+.ppf-buyer-done .eyebrow {
+  color: #0f7048;
+}
+
+.ppf-buyer-done p:not(.eyebrow) {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+/* Advanced (tucked-away) manual Nym toggle. A layperson never opens this. */
+.ppf-buyer-advanced {
+  border: 1px solid var(--line-dark);
+  border-radius: 10px;
+  background: rgba(20, 20, 15, 0.02);
+}
+
+.ppf-buyer-advanced > summary {
+  cursor: pointer;
+  padding: 10px 14px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 720;
+  list-style: none;
+}
+
+.ppf-buyer-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ppf-buyer-advanced > summary::before {
+  content: "+ ";
+  color: var(--green);
+  font-weight: 850;
+}
+
+.ppf-buyer-advanced[open] > summary::before {
+  content: "- ";
+}
+
+.ppf-buyer-advanced .zectime-nym-receiver {
+  margin: 0 12px 12px;
+}
+
+.ppf-buyer-manual-nym {
+  margin: 0 12px 12px;
+}
+
+/* ---------------------------------------------------------------------------
+   Payment-confirmed modal. Overlay + centered dialog matching the app surface.
+   --------------------------------------------------------------------------- */
+.ppf-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(7, 9, 8, 0.62);
+  backdrop-filter: blur(3px);
+  animation: ppf-fade-in 160ms ease;
+}
+
+.ppf-modal {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  width: min(100%, 420px);
+  padding: 32px 26px 28px;
+  border: 1px solid rgba(20, 232, 140, 0.45);
+  border-radius: 16px;
+  background:
+    linear-gradient(160deg, rgba(20, 232, 140, 0.16), transparent 58%),
+    var(--surface-strong);
+  box-shadow: var(--shadow);
+  text-align: center;
+  animation: ppf-modal-in 200ms ease;
+}
+
+.ppf-modal-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.ppf-modal-close:hover {
+  background: rgba(17, 20, 17, 0.06);
+  color: var(--ink);
+}
+
+.ppf-modal-badge {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--green);
+  color: #06301f;
+  font-size: 1.7rem;
+  font-weight: 900;
+  box-shadow: 0 0 26px -4px rgba(20, 232, 140, 0.8);
+}
+
+.ppf-modal h2 {
+  margin: 0;
+  font-family:
+    "SF Pro Display", "Helvetica Neue", "Segoe UI", ui-sans-serif, sans-serif;
+  font-size: 1.5rem;
+  font-weight: 780;
+  color: var(--ink);
+}
+
+.ppf-modal p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.ppf-modal-button {
+  margin-top: 8px;
+  min-width: 200px;
+}
+
+.ppf-modal-hint {
+  margin: 0;
+}
+
+@keyframes ppf-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ppf-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ppf-modal-overlay,
+  .ppf-modal {
+    animation: none;
+  }
+}
+
 .zectime-topbar-logos {
   display: inline-flex;
   align-items: center;
@@ -1513,8 +1819,27 @@ a {
   }
 
   .zectime-paid-panel > form.zk-hub-form,
-  .zectime-paid-panel > .zectime-seller-auth {
+  .zectime-paid-panel > .zectime-seller-auth,
+  .zectime-paid-panel > .ppf-buyer {
     grid-column: 1;
+  }
+
+  .ppf-buyer-pay {
+    padding: 18px 14px;
+  }
+
+  .ppf-buyer-pay .zectime-paid-qr img {
+    width: 220px;
+    height: 220px;
+  }
+
+  .ppf-modal {
+    padding: 28px 20px 24px;
+  }
+
+  .ppf-modal-button {
+    width: 100%;
+    min-width: 0;
   }
 
   .zectime-brand-rail {

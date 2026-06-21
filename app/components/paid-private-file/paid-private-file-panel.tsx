@@ -303,10 +303,13 @@ export function PaidPrivateFilePanel({
   const [releaseMessage, setReleaseMessage] = useState("");
   const [nymStatus, setNymStatus] = useState<BrowserNymStatus>("idle");
   const [nymMessage, setNymMessage] = useState("");
-  const [buyerVerificationCode, setBuyerVerificationCode] = useState("");
-  const [buyerKeyEpoch, setBuyerKeyEpoch] = useState(0);
   const [sellerBuyerCode, setSellerBuyerCode] = useState("");
   const [sellerCodeConfirmed, setSellerCodeConfirmed] = useState(false);
+  // Dead-simple buyer flow: a confirmation modal pops once the order flips to
+  // "paid". We track the previous payment status so it fires exactly once.
+  const [showPaidModal, setShowPaidModal] = useState(false);
+  const [addressCopied, setAddressCopied] = useState(false);
+  const buyerPaidSeenRef = useRef(false);
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   const autoReleaseRef = useRef(false);
@@ -365,37 +368,6 @@ export function PaidPrivateFilePanel({
       }
     };
   }, [downloadUrl]);
-
-  // Buyer self-verification: derive the buyer's OWN public-key fingerprint so it
-  // can be compared out-of-band with the code the seller sees. If they match,
-  // the server did not substitute the buyer key the seller wraps to.
-  useEffect(() => {
-    const orderId = loadedOrder?.orderId;
-    if (mode !== "receive" || !orderId) {
-      setBuyerVerificationCode("");
-      return;
-    }
-    const keyPair = loadBuyerKeyPair(orderId);
-    if (!keyPair) {
-      setBuyerVerificationCode("");
-      return;
-    }
-    let active = true;
-    void fingerprintPaidLinkPublicKey(keyPair.publicJwk)
-      .then((code) => {
-        if (active) {
-          setBuyerVerificationCode(code);
-        }
-      })
-      .catch(() => {
-        if (active) {
-          setBuyerVerificationCode("");
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [mode, loadedOrder?.orderId, buyerKeyEpoch]);
 
   useEffect(() => {
     const savedPayoutAddress = window.localStorage.getItem(
@@ -710,6 +682,7 @@ export function PaidPrivateFilePanel({
     setBusyAction("loading");
     setDownloadUrl("");
     setDownloadFileName("");
+    setShowPaidModal(false);
     pendingDownloadRef.current = null;
 
     try {
@@ -721,6 +694,19 @@ export function PaidPrivateFilePanel({
       setPayment(body.order.payment);
       setOrderInput(orderId);
       setMode("receive");
+      // Seed the paid-modal tracker so re-loading an already-paid order does NOT
+      // re-pop the confirmation modal; the buyer simply sees the download/done.
+      buyerPaidSeenRef.current = isOrderPaid(body.order);
+      // Auto-create the payment intent so the QR + address appear with NO
+      // button. createPaymentIntentForOrder is idempotent server-side (it
+      // returns the existing payment), so this is safe on every (re)load.
+      if (
+        !body.order.payment &&
+        body.order.status !== "paid" &&
+        body.order.status !== "claimed"
+      ) {
+        await createPaymentForOrder(body.order);
+      }
     } catch (error) {
       setErrorMessage(formatError(error, copy.errors.serverError));
     } finally {
@@ -728,23 +714,20 @@ export function PaidPrivateFilePanel({
     }
   }
 
-  async function onCreatePayment() {
-    if (!loadedOrder) {
-      return;
-    }
-
-    setErrorMessage("");
+  // Auto-create the buyer payment intent for a loaded order. Decoupled from any
+  // button: it runs the payment-intent FIRST so the payment address + QR show
+  // immediately, then registers the Nym delivery session in the BACKGROUND (the
+  // receiver is only needed for key delivery after payment, so its slow/flaky
+  // bootstrap must NOT block showing where to pay). Idempotent server-side, so
+  // it is safe to call on every (re)load. Callers own the busy state.
+  async function createPaymentForOrder(
+    order: TransferPublicOrder,
+  ): Promise<void> {
     setBusyAction("payment");
     try {
-      const keyPair = await getOrCreateBuyerKeyPair(loadedOrder.orderId);
-      setBuyerKeyEpoch((current) => current + 1);
-      // Payment intent FIRST so the payment address + QR show immediately. The
-      // Nym receiver is only needed for key delivery (after payment), so its
-      // (slow/flaky) bootstrap must NOT block showing where to pay.
+      const keyPair = await getOrCreateBuyerKeyPair(order.orderId);
       const body = await postJson<PaymentIntentResponse>(
-        `/api/transfers/${encodeURIComponent(
-          loadedOrder.orderId,
-        )}/payment-intent`,
+        `/api/transfers/${encodeURIComponent(order.orderId)}/payment-intent`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1332,6 +1315,68 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createdOrder, loadedOrder, busyAction]);
 
+  // Buyer-side polling: while a buyer order is loaded and not yet downloaded,
+  // poll the public order status so the flow advances on its own (waiting to
+  // pay -> in transit -> confirmed). Stops once the file is opened locally
+  // (downloadUrl set). Kept separate from the seller-online poll above (which is
+  // gated on mode === "send"), so the two never interfere.
+  useEffect(() => {
+    if (mode !== "receive" || !loadedOrder) {
+      return;
+    }
+    if (downloadUrl) {
+      return;
+    }
+    const orderId = loadedOrder.orderId;
+    let active = true;
+    const interval = window.setInterval(() => {
+      void (async () => {
+        try {
+          const body = await postJson<{ order: TransferPublicOrder }>(
+            `/api/transfers/${encodeURIComponent(orderId)}`,
+            { method: "GET" },
+          );
+          if (active) {
+            setLoadedOrder(body.order);
+            setPayment(body.order.payment);
+          }
+        } catch {
+          // Transient polling failures are non-fatal; retry on next tick.
+        }
+      })();
+    }, 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, loadedOrder?.orderId, downloadUrl]);
+
+  // Buyer paid-modal trigger: pop the confirmation modal exactly once, the first
+  // time polling observes the order transition into "paid". buyerPaidSeenRef is
+  // seeded in loadOrder so an already-paid order on first load does NOT re-pop.
+  useEffect(() => {
+    if (mode !== "receive" || !loadedOrder) {
+      return;
+    }
+    const paid = isOrderPaid(loadedOrder);
+    if (paid && !buyerPaidSeenRef.current && !downloadUrl) {
+      buyerPaidSeenRef.current = true;
+      setShowPaidModal(true);
+    }
+    if (!paid) {
+      buyerPaidSeenRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    mode,
+    loadedOrder?.orderId,
+    loadedOrder?.payment?.status,
+    loadedOrder?.status,
+    downloadUrl,
+  ]);
+
   const isBusy = busyAction !== "idle";
   const mustAcknowledgeAccessKey =
     Boolean(newSellerAccessKey) && !accessKeyAcknowledged;
@@ -1778,26 +1823,213 @@ export function PaidPrivateFilePanel({
             </div>
           </section>
         ) : (
-          <section className="frame zectime-paid-panel surface-reveal">
-            <div className="zectime-paid-panel-copy">
-              <p className="eyebrow">{copy.tabs.receive}</p>
-              <h2>{copy.receive.title}</h2>
-              <p>{copy.receive.body}</p>
-              <BrandRail copy={copy} />
-            </div>
+          <BuyerCheckout
+            copy={copy}
+            locale={locale}
+            orderInput={orderInput}
+            onOrderInputChange={setOrderInput}
+            onLoadOrder={onLoadOrder}
+            loadedOrder={loadedOrder}
+            payment={payment}
+            downloadUrl={downloadUrl}
+            downloadFileName={downloadFileName}
+            busyAction={busyAction}
+            isBusy={isBusy}
+            nymMessage={nymMessage}
+            buyerNymAddress={buyerNymAddress}
+            onBuyerNymAddressChange={setBuyerNymAddress}
+            showManualNymAddress={showManualNymAddress}
+            onToggleManualNymAddress={() =>
+              setShowManualNymAddress((current) => !current)
+            }
+            addressCopied={addressCopied}
+            onCopyAddress={() => void onCopyPaymentAddress()}
+            onDevPay={() => void onDevPay()}
+          />
+        )}
+      </div>
 
-            <form className="zk-hub-form" onSubmit={onLoadOrder}>
-              <label className="zk-hub-form-field">
-                <span className="zk-hub-form-label">
-                  {copy.receive.orderLabel}
-                </span>
-                <input
-                  value={orderInput}
-                  onChange={(event) => setOrderInput(event.target.value)}
-                  placeholder={copy.receive.orderPlaceholder}
-                  disabled={isBusy}
+      {mode === "receive" && showPaidModal ? (
+        <PaidConfirmationModal
+          copy={copy}
+          order={loadedOrder}
+          busy={busyAction === "unlocking"}
+          downloadUrl={downloadUrl}
+          downloadFileName={downloadFileName}
+          onDownload={() => void onUnlockFile()}
+          onClose={() => setShowPaidModal(false)}
+        />
+      ) : null}
+    </main>
+  );
+
+  async function onCopyPaymentAddress(): Promise<void> {
+    const address = payment?.paymentAddress;
+    if (!address) {
+      return;
+    }
+    await navigator.clipboard.writeText(address);
+    setAddressCopied(true);
+  }
+}
+
+// Dead-simple buyer checkout. The buyer pastes/loads a code (or arrives via the
+// ?order= link), the QR + address appear automatically, and the flow advances on
+// its own via polling: awaiting payment -> in transit -> (modal) -> done. There
+// is NO "create payment" button and NO verification-code block; the QR is the
+// hero of the screen.
+function BuyerCheckout({
+  copy,
+  locale,
+  orderInput,
+  onOrderInputChange,
+  onLoadOrder,
+  loadedOrder,
+  payment,
+  downloadUrl,
+  downloadFileName,
+  busyAction,
+  isBusy,
+  nymMessage,
+  buyerNymAddress,
+  onBuyerNymAddressChange,
+  showManualNymAddress,
+  onToggleManualNymAddress,
+  addressCopied,
+  onCopyAddress,
+  onDevPay,
+}: {
+  copy: PaidPrivateFileCopy;
+  locale: ProductLocale;
+  orderInput: string;
+  onOrderInputChange: (value: string) => void;
+  onLoadOrder: (event: FormEvent<HTMLFormElement>) => void;
+  loadedOrder: TransferPublicOrder | null;
+  payment: TransferPayment | null;
+  downloadUrl: string;
+  downloadFileName: string;
+  busyAction: BusyAction;
+  isBusy: boolean;
+  nymMessage: string;
+  buyerNymAddress: string;
+  onBuyerNymAddressChange: (value: string) => void;
+  showManualNymAddress: boolean;
+  onToggleManualNymAddress: () => void;
+  addressCopied: boolean;
+  onCopyAddress: () => void;
+  onDevPay: () => void;
+}) {
+  const phase = getBuyerFlowPhase({
+    order: loadedOrder,
+    payment,
+    downloadUrl,
+  });
+
+  return (
+    <section className="frame zectime-paid-panel surface-reveal">
+      <div className="zectime-paid-panel-copy">
+        <p className="eyebrow">{copy.tabs.receive}</p>
+        <h2>{copy.receive.title}</h2>
+        <p>{copy.receive.body}</p>
+        <BrandRail copy={copy} />
+      </div>
+
+      <div className="ppf-buyer">
+        {!loadedOrder ? (
+          <form className="zk-hub-form ppf-buyer-load" onSubmit={onLoadOrder}>
+            <label className="zk-hub-form-field">
+              <span className="zk-hub-form-label">
+                {copy.receive.orderLabel}
+              </span>
+              <input
+                value={orderInput}
+                onChange={(event) => onOrderInputChange(event.target.value)}
+                placeholder={copy.receive.orderPlaceholder}
+                disabled={isBusy}
+              />
+            </label>
+            <button className="button-primary" type="submit" disabled={isBusy}>
+              {busyAction === "loading"
+                ? `${copy.receive.loadLabel}...`
+                : copy.receive.loadLabel}
+            </button>
+          </form>
+        ) : (
+          <div className="ppf-buyer-stage">
+            <OrderDetails order={loadedOrder} copy={copy} />
+
+            {phase === "done" ? (
+              <div className="ppf-buyer-done" role="status">
+                <p className="eyebrow">{copy.receive.doneTitle}</p>
+                <p>{copy.receive.doneBody}</p>
+                {downloadUrl ? (
+                  <a
+                    className="button-primary zectime-paid-download"
+                    href={downloadUrl}
+                    download={downloadFileName}
+                  >
+                    {copy.receive.downloadLabel}
+                  </a>
+                ) : null}
+              </div>
+            ) : phase === "in-transit" ? (
+              <div
+                className="ppf-buyer-status"
+                data-tone="transit"
+                role="status"
+              >
+                <span className="ppf-buyer-spinner" aria-hidden="true" />
+                <div>
+                  <p className="eyebrow">{copy.receive.inTransitTitle}</p>
+                  <p>{copy.receive.inTransitBody}</p>
+                </div>
+              </div>
+            ) : phase === "awaiting-payment" && payment?.paymentAddress ? (
+              <div className="ppf-buyer-pay">
+                <div className="ppf-buyer-pay-head">
+                  <p className="eyebrow">{copy.receive.payHeadline}</p>
+                  <p className="zk-hub-form-hint">{copy.receive.payHelper}</p>
+                </div>
+                <PaymentQr
+                  address={payment.paymentAddress}
+                  priceZec={loadedOrder.price.displayZec}
+                  copy={copy}
                 />
-              </label>
+                <div className="ppf-buyer-address">
+                  <span className="ppf-buyer-address-label">
+                    {copy.details.paymentAddress}
+                  </span>
+                  <code>{payment.paymentAddress}</code>
+                  <button
+                    type="button"
+                    className="button-secondary"
+                    onClick={onCopyAddress}
+                  >
+                    {addressCopied
+                      ? copy.receive.copyAddressDoneLabel
+                      : copy.receive.copyAddressLabel}
+                  </button>
+                </div>
+                {payment.provider === "dev" ? (
+                  <button
+                    type="button"
+                    className="button-secondary ppf-buyer-devpay"
+                    onClick={onDevPay}
+                    disabled={isBusy}
+                  >
+                    {copy.receive.devPayLabel}
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <div className="ppf-buyer-status" role="status">
+                <span className="ppf-buyer-spinner" aria-hidden="true" />
+                <p>{copy.receive.preparingPaymentLabel}</p>
+              </div>
+            )}
+
+            <details className="ppf-buyer-advanced">
+              <summary>{copy.receive.privateReceiverLabel}</summary>
               <div className="zectime-nym-receiver">
                 <div>
                   <p className="eyebrow">{copy.receive.privateReceiverLabel}</p>
@@ -1811,7 +2043,7 @@ export function PaidPrivateFilePanel({
                 <button
                   className="button-secondary"
                   type="button"
-                  onClick={() => setShowManualNymAddress((current) => !current)}
+                  onClick={onToggleManualNymAddress}
                   disabled={isBusy}
                 >
                   {showManualNymAddress
@@ -1820,13 +2052,15 @@ export function PaidPrivateFilePanel({
                 </button>
               </div>
               {showManualNymAddress ? (
-                <label className="zk-hub-form-field">
+                <label className="zk-hub-form-field ppf-buyer-manual-nym">
                   <span className="zk-hub-form-label">
                     {copy.receive.nymAddressLabel}
                   </span>
                   <input
                     value={buyerNymAddress}
-                    onChange={(event) => setBuyerNymAddress(event.target.value)}
+                    onChange={(event) =>
+                      onBuyerNymAddressChange(event.target.value)
+                    }
                     placeholder={copy.receive.nymAddressPlaceholder}
                     disabled={isBusy}
                   />
@@ -1835,126 +2069,103 @@ export function PaidPrivateFilePanel({
                   </span>
                 </label>
               ) : null}
-              <button
-                className="button-secondary"
-                type="submit"
-                disabled={isBusy}
-              >
-                {busyAction === "loading"
-                  ? `${copy.receive.loadLabel}...`
-                  : copy.receive.loadLabel}
-              </button>
-            </form>
-
-            {loadedOrder ? (
-              <div className="zectime-paid-result">
-                <OrderDetails order={loadedOrder} copy={copy} />
-
-                <div className="zectime-paid-payment">
-                  <div>
-                    <p className="eyebrow">
-                      {loadedOrder.payment?.status === "paid"
-                        ? copy.receive.paidStatus
-                        : copy.receive.pendingStatus}
-                    </p>
-                    {payment ? (
-                      <PaymentDetails
-                        payment={payment}
-                        priceZec={loadedOrder.price.displayZec}
-                        copy={copy}
-                      />
-                    ) : null}
-                    {!loadedOrder.payment ? (
-                      <p className="zk-hub-form-hint">
-                        {copy.receive.paymentAddressHint}
-                      </p>
-                    ) : null}
-                    {loadedOrder.payment?.status === "paid" &&
-                    loadedOrder.release?.status === "seller_pending" ? (
-                      <p className="zk-hub-form-hint">
-                        {locale === "pt"
-                          ? "Pagamento confirmado. Aguardando o vendedor liberar a chave (custodia do vendedor)."
-                          : "Payment confirmed. Awaiting seller key release (seller-held custody)."}
-                      </p>
-                    ) : null}
-                    {buyerVerificationCode ? (
-                      <div className="zectime-verification-code">
-                        <p className="eyebrow">
-                          {locale === "pt"
-                            ? "Codigo de verificacao"
-                            : "Verification code"}
-                        </p>
-                        <code>{buyerVerificationCode}</code>
-                        <p className="zk-hub-form-hint">
-                          {locale === "pt"
-                            ? "Codigo de verificacao acima. Se quiser confirmar um canal privado, passe este codigo ao vendedor antes de ele liberar a chave."
-                            : "Verification code above. To confirm a private channel, share this code with the seller before they release the key."}
-                        </p>
-                      </div>
-                    ) : null}
-                  </div>
-                  <div className="zectime-paid-actions">
-                    <button
-                      type="button"
-                      className="button-secondary"
-                      onClick={() => void onCreatePayment()}
-                      disabled={
-                        isBusy || loadedOrder.payment?.status === "paid"
-                      }
-                    >
-                      {busyAction === "payment"
-                        ? `${copy.receive.payLabel}...`
-                        : copy.receive.payLabel}
-                    </button>
-                    {payment?.checkoutUrl ? (
-                      <a
-                        className="button-primary"
-                        href={payment.checkoutUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {copy.receive.checkoutLabel}
-                      </a>
-                    ) : null}
-                    {payment?.provider === "dev" &&
-                    loadedOrder.payment?.status !== "paid" ? (
-                      <button
-                        type="button"
-                        className="button-secondary"
-                        onClick={() => void onDevPay()}
-                        disabled={isBusy}
-                      >
-                        {copy.receive.devPayLabel}
-                      </button>
-                    ) : null}
-                    <button
-                      type="button"
-                      className="button-primary"
-                      onClick={() => void onUnlockFile()}
-                      disabled={isBusy || !loadedOrder.payment}
-                    >
-                      {busyAction === "unlocking"
-                        ? `${copy.receive.unlockLabel}...`
-                        : copy.receive.unlockLabel}
-                    </button>
-                  </div>
-                </div>
-
-                {downloadUrl ? (
-                  <a
-                    className="button-primary zectime-paid-download"
-                    href={downloadUrl}
-                    download={downloadFileName}
-                  >
-                    {copy.receive.downloadLabel}
-                  </a>
-                ) : null}
-              </div>
-            ) : null}
-          </section>
+            </details>
+          </div>
         )}
       </div>
-    </main>
+    </section>
+  );
+}
+
+// Accessible confirmation modal that pops when the order flips to "paid". It
+// contains the single "Download file" button (the existing claim/unlock
+// handler). If the key is not released yet (paid but seller_pending), the button
+// shows a brief "preparing your file..." state; polling + the unlock retry
+// resolve it, so the buyer never dead-ends. Closes on Esc / x / click-outside.
+function PaidConfirmationModal({
+  copy,
+  order,
+  busy,
+  downloadUrl,
+  downloadFileName,
+  onDownload,
+  onClose,
+}: {
+  copy: PaidPrivateFileCopy;
+  order: TransferPublicOrder | null;
+  busy: boolean;
+  downloadUrl: string;
+  downloadFileName: string;
+  onDownload: () => void;
+  onClose: () => void;
+}) {
+  const downloadRef = useRef<HTMLButtonElement | null>(null);
+  const preparing = order?.release?.status === "seller_pending";
+
+  useEffect(() => {
+    downloadRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="ppf-modal-overlay" role="presentation" onClick={onClose}>
+      <div
+        className="ppf-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ppf-modal-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          className="ppf-modal-close"
+          aria-label={copy.receive.modalCloseLabel}
+          onClick={onClose}
+        >
+          &times;
+        </button>
+        <div className="ppf-modal-badge" aria-hidden="true">
+          &#10003;
+        </div>
+        <h2 id="ppf-modal-title">{copy.receive.modalTitle}</h2>
+        <p>{copy.receive.modalBody}</p>
+        {downloadUrl ? (
+          <a
+            className="button-primary ppf-modal-button"
+            href={downloadUrl}
+            download={downloadFileName}
+          >
+            {copy.receive.downloadLabel}
+          </a>
+        ) : (
+          <button
+            ref={downloadRef}
+            type="button"
+            className="button-primary ppf-modal-button"
+            onClick={onDownload}
+            disabled={busy || preparing}
+          >
+            {busy || preparing
+              ? copy.receive.modalPreparingLabel
+              : copy.receive.modalDownloadLabel}
+          </button>
+        )}
+        {preparing && !downloadUrl ? (
+          <p className="zk-hub-form-hint ppf-modal-hint">
+            {copy.receive.modalPreparingLabel}
+          </p>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -2477,40 +2688,55 @@ function getFlowMotionStage({
   return "transfer";
 }
 
-function PaymentDetails({
-  payment,
-  priceZec,
-  copy,
-}: {
-  payment: TransferPayment;
-  priceZec: string;
-  copy: PaidPrivateFileCopy;
-}) {
+// Minimal structural view of an order the buyer-flow helpers read. Kept narrow
+// (only the two status fields) so the pure helpers can be unit-tested with tiny
+// fixtures while real TransferPublicOrder values still satisfy it.
+export interface BuyerOrderStatusView {
+  status: TransferPublicOrder["status"];
+  payment: { status: TransferPayment["status"] } | null;
+}
+
+// True once the order's payment is confirmed (paid), regardless of which field
+// the server surfaces it on. Used to drive the buyer paid-modal + status.
+export function isOrderPaid(
+  order: BuyerOrderStatusView | null | undefined,
+): boolean {
+  if (!order) {
+    return false;
+  }
   return (
-    <dl className="zectime-paid-details zectime-paid-payment-details">
-      <div>
-        <dt>{copy.details.invoice}</dt>
-        <dd>{payment.invoiceId}</dd>
-      </div>
-      {payment.paymentAddress ? (
-        <div className="zectime-paid-details-wide zectime-paid-payaddress">
-          <dt>{copy.details.paymentAddress}</dt>
-          <dd>{payment.paymentAddress}</dd>
-          <PaymentQr
-            address={payment.paymentAddress}
-            priceZec={priceZec}
-            copy={copy}
-          />
-        </div>
-      ) : null}
-      {payment.memo ? (
-        <div className="zectime-paid-details-wide">
-          <dt>{copy.details.paymentMemo}</dt>
-          <dd>{payment.memo}</dd>
-        </div>
-      ) : null}
-    </dl>
+    order.payment?.status === "paid" ||
+    order.status === "paid" ||
+    order.status === "claimed"
   );
+}
+
+// The dead-simple buyer flow has four visible phases. This is a pure mapping of
+// (order, payment, downloadUrl) -> phase so the receive UI stays declarative and
+// the transitions can be unit-tested without React.
+export type BuyerFlowPhase =
+  | "loading"
+  | "awaiting-payment"
+  | "in-transit"
+  | "done";
+
+export function getBuyerFlowPhase(input: {
+  order: BuyerOrderStatusView | null | undefined;
+  payment: Pick<TransferPayment, "paymentAddress"> | null | undefined;
+  downloadUrl: string;
+}): BuyerFlowPhase {
+  if (input.downloadUrl) {
+    return "done";
+  }
+  if (isOrderPaid(input.order)) {
+    return "in-transit";
+  }
+  // The QR can only render once a payment address exists; until then the buyer
+  // sees a brief "preparing" state (the auto-create payment-intent is in flight).
+  if (input.payment?.paymentAddress) {
+    return "awaiting-payment";
+  }
+  return "loading";
 }
 
 // Render a scannable QR encoding the Zcash payment URI. The data URL is
