@@ -1994,6 +1994,20 @@ a {
   flex: none;
 }
 
+.ppf-shop-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+/* Sign out sits on the dark shop header, so it needs light-on-dark styling. */
+.ppf-shop-signout {
+  color: var(--surface-strong);
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .ppf-shop-tabs {
   display: flex;
   gap: 6px;

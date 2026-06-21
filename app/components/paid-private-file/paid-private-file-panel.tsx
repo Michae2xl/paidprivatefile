@@ -518,10 +518,7 @@ export function PaidPrivateFilePanel({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            handle: sellerHandle,
-            accessKey: sellerAccessKey,
-          }),
+          body: JSON.stringify({ accessKey: sellerAccessKey }),
         },
       );
       applySeller(body.seller);
@@ -541,6 +538,34 @@ export function PaidPrivateFilePanel({
     setSellerDisplayName(nextSeller.displayName);
     setSellerPayoutAddress(nextSeller.defaultPayoutAddress);
     setSellerScreen("dashboard");
+  }
+
+  // Sign out: clear the server session cookie (best-effort) and wipe every
+  // seller field locally so the start screen (Create shop / Log in) reappears.
+  async function onLogout() {
+    setErrorMessage("");
+    try {
+      await postJson<{ ok: boolean }>("/api/seller-session", {
+        method: "DELETE",
+      });
+    } catch {
+      // Best-effort: drop the local session even if the request fails.
+    }
+    setSeller(null);
+    setSellerScreen("dashboard");
+    setSellerAuthMode("login");
+    setSellerFiles([]);
+    setSellerFilesStatus("idle");
+    setNewSellerAccessKey("");
+    setAccessKeyAcknowledged(false);
+    setAccessKeyCopied(false);
+    setSellerAccessKey("");
+    setSellerHandle("");
+    setSellerDisplayName("");
+    setSellerPayoutAddress("");
+    setSellerUfvk("");
+    setUfvkAcknowledged(false);
+    setUfvkConfirmation(null);
   }
 
   // Settings screen: persist an edited public display name via the existing
@@ -1466,6 +1491,7 @@ export function PaidPrivateFilePanel({
             onSaveSettings={() => void onSaveSettings()}
             publicLinkCopied={publicLinkCopied}
             onCopyPublicLink={() => void onCopyPublicLink()}
+            onLogout={() => void onLogout()}
             isBusy={isBusy}
           >
             {sellerScreen === "create" ? (
@@ -1714,19 +1740,9 @@ export function PaidPrivateFilePanel({
                       </>
                     ) : (
                       <>
-                        <label className="zk-hub-form-field">
-                          <span className="zk-hub-form-label">
-                            {copy.seller.handleLabel}
-                          </span>
-                          <input
-                            value={sellerHandle}
-                            onChange={(event) =>
-                              setSellerHandle(event.target.value)
-                            }
-                            placeholder={copy.seller.handlePlaceholder}
-                            disabled={isBusy}
-                          />
-                        </label>
+                        <p className="zk-hub-form-hint">
+                          {copy.seller.loginHint}
+                        </p>
                         <label className="zk-hub-form-field">
                           <span className="zk-hub-form-label">
                             {copy.seller.accessKeyLabel}
@@ -2184,6 +2200,7 @@ function SellerDashboard({
   onSaveSettings,
   publicLinkCopied,
   onCopyPublicLink,
+  onLogout,
   isBusy,
   children,
 }: {
@@ -2201,6 +2218,7 @@ function SellerDashboard({
   onSaveSettings: () => void;
   publicLinkCopied: boolean;
   onCopyPublicLink: () => void;
+  onLogout: () => void;
   isBusy: boolean;
   children: ReactNode;
 }) {
@@ -2218,13 +2236,23 @@ function SellerDashboard({
           <h2>{seller.displayName}</h2>
           <p className="ppf-shop-handle">@{seller.handle}</p>
         </div>
-        <button
-          type="button"
-          className="button-primary ppf-shop-cta"
-          onClick={() => onScreenChange("create")}
-        >
-          {copy.dashboard.createFileCta}
-        </button>
+        <div className="ppf-shop-actions">
+          <button
+            type="button"
+            className="button-primary ppf-shop-cta"
+            onClick={() => onScreenChange("create")}
+          >
+            {copy.dashboard.createFileCta}
+          </button>
+          <button
+            type="button"
+            className="button-secondary ppf-shop-signout"
+            onClick={onLogout}
+            disabled={isBusy}
+          >
+            {copy.dashboard.signOutLabel}
+          </button>
+        </div>
       </header>
 
       <nav className="ppf-shop-tabs" role="tablist">

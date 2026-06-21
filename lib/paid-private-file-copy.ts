@@ -65,9 +65,11 @@ export interface PaidPrivateFileCopy {
     ufvkPreviewChecking: string;
     ufvkPreviewReceives: string;
     ufvkPreviewInvalid: string;
+    loginHint: string;
   };
   dashboard: {
     createFileCta: string;
+    signOutLabel: string;
     backToDashboard: string;
     tabDashboard: string;
     tabFiles: string;
@@ -266,9 +268,11 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkPreviewChecking: "Verificando a chave...",
       ufvkPreviewReceives: "Recebe em",
       ufvkPreviewInvalid: "Chave de visualizacao invalida",
+      loginHint: "Entre apenas com a sua access key (ppf_...).",
     },
     dashboard: {
       createFileCta: "Criar arquivo pago",
+      signOutLabel: "Sair",
       backToDashboard: "Voltar ao painel",
       tabDashboard: "Painel",
       tabFiles: "Arquivos",
@@ -477,9 +481,11 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkPreviewChecking: "Checking the key...",
       ufvkPreviewReceives: "Receives at",
       ufvkPreviewInvalid: "Invalid viewing key",
+      loginHint: "Log in with just your access key (ppf_...).",
     },
     dashboard: {
       createFileCta: "Create paid file",
+      signOutLabel: "Sign out",
       backToDashboard: "Back to dashboard",
       tabDashboard: "Dashboard",
       tabFiles: "Files",

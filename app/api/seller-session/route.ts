@@ -17,7 +17,11 @@ const RATE_LIMIT = { maxRequests: 10, windowMs: 60_000 };
 const MAX_BODY_BYTES = 16 * 1024;
 
 export async function GET(request: Request) {
-  const throttled = enforceRateLimit(request, "seller-session/read", RATE_LIMIT);
+  const throttled = enforceRateLimit(
+    request,
+    "seller-session/read",
+    RATE_LIMIT,
+  );
   if (throttled) return throttled;
 
   try {
@@ -28,15 +32,21 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const throttled = enforceRateLimit(request, "seller-session/login", RATE_LIMIT);
+  const throttled = enforceRateLimit(
+    request,
+    "seller-session/login",
+    RATE_LIMIT,
+  );
   if (throttled) return throttled;
 
   try {
     const body = await readLimitedJsonObject(request, MAX_BODY_BYTES);
-    const seller = await authenticateSeller({
-      handle: requireString(body.handle, "handle"),
-      accessKey: requireString(body.accessKey, "accessKey"),
-    });
+    const accessKey = requireString(body.accessKey, "accessKey");
+    const handle =
+      typeof body.handle === "string" && body.handle.trim()
+        ? body.handle
+        : undefined;
+    const seller = await authenticateSeller({ handle, accessKey });
     const response = NextResponse.json({ seller });
     response.cookies.set({
       name: SELLER_SESSION_COOKIE,
@@ -54,7 +64,11 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const throttled = enforceRateLimit(request, "seller-session/logout", RATE_LIMIT);
+  const throttled = enforceRateLimit(
+    request,
+    "seller-session/logout",
+    RATE_LIMIT,
+  );
   if (throttled) return throttled;
 
   const response = NextResponse.json({ ok: true });

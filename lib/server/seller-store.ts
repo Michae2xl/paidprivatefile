@@ -5,7 +5,7 @@ import {
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ServerError } from "./error-kinds";
@@ -162,21 +162,51 @@ export async function createSellerProfile(
 }
 
 export async function authenticateSeller(input: {
-  handle: string;
+  handle?: string;
   accessKey: string;
 }): Promise<PublicSellerProfile> {
-  const handle = normalizeSellerHandle(input.handle);
-  const profile = await getSellerProfileByHandle(handle);
+  // The access key is the real secret (a high-entropy bearer token), so logging
+  // in with the key alone is enough. A handle, when given, just narrows the
+  // lookup to the handle index; without it we find the seller by the key.
+  const profile = input.handle?.trim()
+    ? await getSellerProfileByHandle(input.handle)
+    : await getSellerProfileByAccessKey(input.accessKey);
   if (
     !profile ||
     !safeEqual(profile.accessKeyHash, hashAccessKey(input.accessKey))
   ) {
-    throw new ServerError(
-      "auth_required",
-      "Invalid seller handle or access key",
-    );
+    throw new ServerError("auth_required", "Invalid access key");
   }
   return publicSeller(profile);
+}
+
+// Find a seller by their access key alone, scanning stored profiles and
+// comparing the hashed key in constant time. Volume is low and the key is
+// unique per seller, so the first match wins.
+export async function getSellerProfileByAccessKey(
+  accessKey: string,
+): Promise<SellerProfile | null> {
+  const targetHash = hashAccessKey(accessKey);
+  let entries: string[];
+  try {
+    entries = await readdir(sellerProfileDir());
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) {
+      continue;
+    }
+    const sellerId = entry.slice(0, -".json".length);
+    if (!SELLER_ID_PATTERN.test(sellerId)) {
+      continue;
+    }
+    const profile = await getSellerProfileById(sellerId);
+    if (profile && safeEqual(profile.accessKeyHash, targetHash)) {
+      return profile;
+    }
+  }
+  return null;
 }
 
 export async function getSellerProfileByHandle(
