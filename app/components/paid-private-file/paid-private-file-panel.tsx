@@ -2005,13 +2005,6 @@ function OrderDetails({
         <dt>{copy.details.price}</dt>
         <dd>{order.price.displayZec} ZEC</dd>
       </div>
-      <div className="zectime-paid-details-wide">
-        <dt>{copy.details.sellerPayoutAddress}</dt>
-        <dd>{order.sellerPayoutAddress}</dd>
-        <dd className="zectime-paid-details-hint">
-          {copy.details.sellerPayoutAddressHint}
-        </dd>
-      </div>
       {order.seller ? (
         <div>
           <dt>{copy.seller.publicRouteLabel}</dt>
