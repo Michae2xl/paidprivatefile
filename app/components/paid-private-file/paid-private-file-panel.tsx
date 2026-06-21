@@ -738,19 +738,9 @@ export function PaidPrivateFilePanel({
     try {
       const keyPair = await getOrCreateBuyerKeyPair(loadedOrder.orderId);
       setBuyerKeyEpoch((current) => current + 1);
-      const nymAddress = buyerNymAddress.trim() || (await startBrowserNym());
-      await postJson<{ order: TransferPublicOrder }>(
-        `/api/transfers/${encodeURIComponent(loadedOrder.orderId)}/nym-session`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            buyerNymAddress: nymAddress,
-            buyerPublicKeyJwk: keyPair.publicJwk,
-            transport: loadedOrder.delivery.requiredTransport,
-          }),
-        },
-      );
+      // Payment intent FIRST so the payment address + QR show immediately. The
+      // Nym receiver is only needed for key delivery (after payment), so its
+      // (slow/flaky) bootstrap must NOT block showing where to pay.
       const body = await postJson<PaymentIntentResponse>(
         `/api/transfers/${encodeURIComponent(
           loadedOrder.orderId,
@@ -766,11 +756,37 @@ export function PaidPrivateFilePanel({
       );
       setLoadedOrder(body.order);
       setPayment(body.payment);
+      // Register the Nym delivery session in the background (needed before the
+      // seller releases the key, not for the payment). A failed receiver
+      // bootstrap leaves the payment address visible and is retried at claim.
+      void registerBuyerNymSession(body.order, keyPair).catch(() => {
+        setNymStatus("error");
+        setNymMessage(copy.errors.nymUnavailable);
+      });
     } catch (error) {
       setErrorMessage(formatError(error, copy.errors.serverError));
     } finally {
       setBusyAction("idle");
     }
+  }
+
+  async function registerBuyerNymSession(
+    order: TransferPublicOrder,
+    keyPair: PaidLinkBuyerKeyPair,
+  ): Promise<void> {
+    const nymAddress = buyerNymAddress.trim() || (await startBrowserNym());
+    await postJson<{ order: TransferPublicOrder }>(
+      `/api/transfers/${encodeURIComponent(order.orderId)}/nym-session`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          buyerNymAddress: nymAddress,
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: order.delivery.requiredTransport,
+        }),
+      },
+    );
   }
 
   async function onDevPay() {
