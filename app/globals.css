@@ -464,6 +464,14 @@ a {
   line-height: 1.35;
 }
 
+.zectime-paid-details-hint {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--accent-warning, #c2410c);
+}
+
 .zectime-paid-payment-details {
   margin-top: 10px;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -98,6 +98,7 @@ export interface PaidPrivateFileCopy {
   details: {
     price: string;
     sellerPayoutAddress: string;
+    sellerPayoutAddressHint: string;
     file: string;
     size: string;
     status: string;
@@ -125,7 +126,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
   pt: {
     shell: {
       eyebrow: "Paid Private File",
-      title: "Pagamento em ZEC. Entrega privada via Nym. Arquivo abre so localmente.",
+      title:
+        "Pagamento em ZEC. Entrega privada via Nym. Arquivo abre so localmente.",
       body: "O arquivo e cifrado antes do upload. O pagamento em ZEC desbloqueia uma sessao privada Nym para entregar a chave ao comprador, sem expor o conteudo do arquivo.",
       backLabel: "Paid Private File",
     },
@@ -138,7 +140,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       nym: "Nym",
       cipherpay: "CipherPay",
       railLabel: "Zcash + Nym private rail",
-      railBody: "Pagamento em ZEC entra pelo checkout. A chave privada sai pela Nym.",
+      railBody:
+        "Pagamento em ZEC entra pelo checkout. A chave privada sai pela Nym.",
     },
     motion: {
       title: "Fluxo privado",
@@ -191,7 +194,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       submitLabel: "Criar arquivo privado pago",
       busyLabel: "Cifrando e criando link...",
       successTitle: "Arquivo privado pronto",
-      successBody: "Compartilhe o link de acesso. O arquivo so abre depois que o pagamento em ZEC for confirmado.",
+      successBody:
+        "Compartilhe o link de acesso. O arquivo so abre depois que o pagamento em ZEC for confirmado.",
       copyLinkLabel: "Copiar link",
       openLinkLabel: "Abrir link",
     },
@@ -224,7 +228,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     details: {
       price: "Preco",
-      sellerPayoutAddress: "Recebe ZEC",
+      sellerPayoutAddress: "Carteira do vendedor (nao pague aqui)",
+      sellerPayoutAddressHint:
+        "Aqui e onde o vendedor recebe. Nao envie ZEC para este endereco: pague o Endereco de pagamento mostrado depois de criar o pagamento.",
       file: "Arquivo",
       size: "Tamanho",
       status: "Status",
@@ -239,12 +245,15 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     errors: {
       missingFile: "Escolha um arquivo antes de criar o link.",
       invalidPrice: "Informe um preco valido em ZEC.",
-      invalidPayoutAddress: "Informe uma Unified Address Zcash valida para receber.",
+      invalidPayoutAddress:
+        "Informe uma Unified Address Zcash valida para receber.",
       missingOrder: "Cole um link ou order id valido.",
-      missingNymAddress: "Informe um endereco Nym para receber a chave privada.",
+      missingNymAddress:
+        "Informe um endereco Nym para receber a chave privada.",
       nymUnavailable: "Nao foi possivel iniciar o receptor Nym no browser.",
       serverError: "Falha no paid link: ",
-      paymentRequired: "Pagamento ainda nao confirmado. Aguarde o webhook ou tente novamente depois do checkout.",
+      paymentRequired:
+        "Pagamento ainda nao confirmado. Aguarde o webhook ou tente novamente depois do checkout.",
     },
   },
   en: {
@@ -263,7 +272,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       nym: "Nym",
       cipherpay: "CipherPay",
       railLabel: "Zcash + Nym private rail",
-      railBody: "ZEC payment enters through checkout. The private key exits through Nym.",
+      railBody:
+        "ZEC payment enters through checkout. The private key exits through Nym.",
     },
     motion: {
       title: "Private flow",
@@ -309,14 +319,14 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       priceHint: "Example: 0.05 ZEC. The value is converted to zatoshis.",
       payoutAddressLabel: "Wallet to receive ZEC",
       payoutAddressPlaceholder: "u1...",
-      payoutAddressHint:
-        "The buyer payment should go to this Unified Address.",
+      payoutAddressHint: "The buyer payment should go to this Unified Address.",
       noteLabel: "Note for buyer",
       notePlaceholder: "Optional",
       submitLabel: "Create paid private file",
       busyLabel: "Encrypting and creating link...",
       successTitle: "Private file ready",
-      successBody: "Share the access link. The file opens only after the ZEC payment is confirmed.",
+      successBody:
+        "Share the access link. The file opens only after the ZEC payment is confirmed.",
       copyLinkLabel: "Copy link",
       openLinkLabel: "Open link",
     },
@@ -349,7 +359,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     details: {
       price: "Price",
-      sellerPayoutAddress: "Receives ZEC",
+      sellerPayoutAddress: "Seller's wallet (do not pay here)",
+      sellerPayoutAddressHint:
+        "This is where the seller gets paid. Do not send ZEC to this address: pay the Payment address shown after you create the payment.",
       file: "File",
       size: "Size",
       status: "Status",
@@ -369,7 +381,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       missingNymAddress: "Enter a Nym address to receive the private key.",
       nymUnavailable: "Could not start the browser Nym receiver.",
       serverError: "Paid link failed: ",
-      paymentRequired: "Payment is not confirmed yet. Wait for the webhook or try again after checkout.",
+      paymentRequired:
+        "Payment is not confirmed yet. Wait for the webhook or try again after checkout.",
     },
   },
 };

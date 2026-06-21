@@ -687,8 +687,18 @@ export function PaidPrivateFilePanel({
 
   // Shared Nym client bootstrap used by BOTH the buyer receiver (subscribes to
   // inbound text messages) and the seller sender (uses client.send). It reuses
-  // the existing client when one is already running, starts the SDK, and polls
-  // selfAddress() until the gateway handshake completes.
+  // the existing client when one is already running, otherwise it spins up a
+  // FRESH client per attempt and polls selfAddress() until the gateway
+  // handshake completes.
+  //
+  // Gateway-rotation rationale: the SDK picks a gateway when a client is
+  // started, and a single slow/unreachable gateway makes selfAddress() hang
+  // forever (production users waited the full poll window for nothing). Because
+  // the SDK selects a different gateway on each FRESH start, we retry with a
+  // brand-new client a few times instead of polling one client indefinitely.
+  // Only the client that actually returns an address is kept and (for the
+  // buyer) subscribed; abandoned clients are stopped so we never double-
+  // subscribe or leak a half-open connection.
   async function bootstrapBrowserNymClient(options: {
     subscribe: boolean;
   }): Promise<{ client: BrowserNymClient; address: string }> {
@@ -701,42 +711,55 @@ export function PaidPrivateFilePanel({
     }
 
     const nymModule = await import("@nymproject/sdk-full-fat");
-    const nym = (await nymModule.createNymMixnetClient({
-      autoConvertStringMimeTypes: [
-        nymModule.MimeTypes.ApplicationJson,
-        nymModule.MimeTypes.TextPlain,
-      ],
-    })) as BrowserNymClient;
+    // The SDK pins a gateway per clientId (persisted in IndexedDB), so reusing a
+    // single id across attempts would re-draw the SAME (possibly dead) gateway
+    // and defeat rotation. The first attempt reuses the stored id for a stable
+    // address across reloads when its gateway is healthy; later attempts use a
+    // fresh ephemeral id so the SDK rotates to a different gateway.
+    const storedClientId = getStoredBrowserNymClientId();
 
-    if (options.subscribe) {
-      browserNymUnsubscribeRef.current?.();
-      browserNymUnsubscribeRef.current =
-        nym.events.subscribeToTextMessageReceivedEvent((event) => {
-          void handleNymTextMessage(event.args.payload);
-        });
+    for (
+      let attempt = 0;
+      attempt < BROWSER_NYM_GATEWAY_ATTEMPTS;
+      attempt += 1
+    ) {
+      const clientId =
+        attempt === 0 && storedClientId
+          ? storedClientId
+          : `paidprivatefile-${crypto.randomUUID()}`;
+
+      const nym = (await nymModule.createNymMixnetClient({
+        autoConvertStringMimeTypes: [
+          nymModule.MimeTypes.ApplicationJson,
+          nymModule.MimeTypes.TextPlain,
+        ],
+      })) as BrowserNymClient;
+
+      const address = await startAndAwaitNymAddress(nym, { clientId });
+      if (!address) {
+        // This attempt drew a bad gateway; drop the client (best effort) and
+        // let the next attempt draw a fresh one.
+        await stopBrowserNymClientQuietly(nym);
+        continue;
+      }
+
+      // Persist the identity that actually reached a gateway so a later reload
+      // reuses this working gateway first.
+      persistBrowserNymClientId(clientId);
+
+      if (options.subscribe) {
+        browserNymUnsubscribeRef.current?.();
+        browserNymUnsubscribeRef.current =
+          nym.events.subscribeToTextMessageReceivedEvent((event) => {
+            void handleNymTextMessage(event.args.payload);
+          });
+      }
+
+      browserNymClientRef.current = nym;
+      return { client: nym, address };
     }
 
-    const clientId = getOrCreateBrowserNymClientId();
-    await nym.client.start({
-      clientId,
-      nymApiUrl:
-        process.env.NEXT_PUBLIC_NYM_API_URL ??
-        "https://validator.nymtech.net/api",
-      forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
-    });
-    // selfAddress() can be empty until the gateway handshake completes, so
-    // poll for the address instead of reading it once right after start.
-    let address = await nym.client.selfAddress();
-    for (let attempt = 0; attempt < 90 && !address; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      address = await nym.client.selfAddress();
-    }
-    if (!address) {
-      throw new Error("Nym client did not return an address");
-    }
-
-    browserNymClientRef.current = nym;
-    return { client: nym, address };
+    throw new Error("Nym client did not return an address");
   }
 
   async function startBrowserNym(): Promise<string> {
@@ -1811,6 +1834,9 @@ function OrderDetails({
       <div className="zectime-paid-details-wide">
         <dt>{copy.details.sellerPayoutAddress}</dt>
         <dd>{order.sellerPayoutAddress}</dd>
+        <dd className="zectime-paid-details-hint">
+          {copy.details.sellerPayoutAddressHint}
+        </dd>
       </div>
       {order.seller ? (
         <div>
@@ -2207,14 +2233,75 @@ function parseNymFileDownload(
   };
 }
 
-function getOrCreateBrowserNymClientId(): string {
-  const existing = window.localStorage.getItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY);
-  if (existing) {
-    return existing;
+function getStoredBrowserNymClientId(): string | null {
+  return window.localStorage.getItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY);
+}
+
+function persistBrowserNymClientId(clientId: string): void {
+  window.localStorage.setItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY, clientId);
+}
+
+// Number of fresh-client attempts the bootstrap makes before giving up. Each
+// attempt rotates to a new SDK-selected gateway (see bootstrapBrowserNymClient).
+const BROWSER_NYM_GATEWAY_ATTEMPTS = 3;
+// Per-attempt selfAddress() poll budget, in 1s ticks. Kept short so a dead
+// gateway is abandoned quickly and the next attempt can rotate to a new one.
+const BROWSER_NYM_ADDRESS_POLLS = 40;
+
+// Minimal surface the address poll depends on, so it can be exercised in a unit
+// test without standing up the full SDK client or any React state.
+export interface StartableNymClient {
+  client: {
+    start: (opts?: Record<string, unknown>) => Promise<void>;
+    selfAddress: () => Promise<string | undefined>;
+  };
+}
+
+// One bootstrap attempt: start the client, then poll selfAddress() until the
+// gateway handshake yields an address or the per-attempt budget runs out.
+// Returns "" when the gateway never produced an address (the caller then
+// rotates to a fresh client).
+export async function startAndAwaitNymAddress(
+  nym: StartableNymClient,
+  options: {
+    clientId: string;
+    maxPolls?: number;
+    waitMs?: (ms: number) => Promise<void>;
+  },
+): Promise<string> {
+  const maxPolls = options.maxPolls ?? BROWSER_NYM_ADDRESS_POLLS;
+  const waitMs =
+    options.waitMs ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  await nym.client.start({
+    clientId: options.clientId,
+    nymApiUrl:
+      process.env.NEXT_PUBLIC_NYM_API_URL ??
+      "https://validator.nymtech.net/api",
+    forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
+  });
+
+  // selfAddress() can be empty until the gateway handshake completes, so poll
+  // for the address instead of reading it once right after start.
+  let address = (await nym.client.selfAddress()) ?? "";
+  for (let attempt = 0; attempt < maxPolls && !address; attempt += 1) {
+    await waitMs(1000);
+    address = (await nym.client.selfAddress()) ?? "";
   }
-  const next = `paidprivatefile-${crypto.randomUUID()}`;
-  window.localStorage.setItem(BUYER_NYM_CLIENT_ID_STORAGE_KEY, next);
-  return next;
+  return address;
+}
+
+// Tear down an abandoned client without ever throwing: cleanup must not mask the
+// real failure or block the next gateway-rotation attempt.
+async function stopBrowserNymClientQuietly(
+  nym: BrowserNymClient,
+): Promise<void> {
+  try {
+    await nym.client.stop();
+  } catch {
+    // Ignore: the client may already be half-open or unstartable.
+  }
 }
 
 // Frente B: when on, the SELLER browser sends the wrapped key envelope over the
