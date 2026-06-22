@@ -2812,49 +2812,6 @@ function BuyerCheckout({
                 <p>{copy.receive.preparingPaymentLabel}</p>
               </div>
             )}
-
-            <details className="ppf-buyer-advanced">
-              <summary>{copy.receive.privateReceiverLabel}</summary>
-              <div className="zectime-nym-receiver">
-                <div>
-                  <p className="eyebrow">{copy.receive.privateReceiverLabel}</p>
-                  <p>
-                    {nymMessage ||
-                      (buyerNymAddress
-                        ? copy.receive.nymReadyLabel
-                        : copy.receive.privateReceiverBody)}
-                  </p>
-                </div>
-                <button
-                  className="button-secondary"
-                  type="button"
-                  onClick={onToggleManualNymAddress}
-                  disabled={isBusy}
-                >
-                  {showManualNymAddress
-                    ? copy.receive.manualNymHideLabel
-                    : copy.receive.manualNymLabel}
-                </button>
-              </div>
-              {showManualNymAddress ? (
-                <label className="zk-hub-form-field ppf-buyer-manual-nym">
-                  <span className="zk-hub-form-label">
-                    {copy.receive.nymAddressLabel}
-                  </span>
-                  <input
-                    value={buyerNymAddress}
-                    onChange={(event) =>
-                      onBuyerNymAddressChange(event.target.value)
-                    }
-                    placeholder={copy.receive.nymAddressPlaceholder}
-                    disabled={isBusy}
-                  />
-                  <span className="zk-hub-form-hint">
-                    {copy.receive.nymAddressHint}
-                  </span>
-                </label>
-              ) : null}
-            </details>
           </div>
         )}
       </div>
