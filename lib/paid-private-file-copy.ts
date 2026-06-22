@@ -573,7 +573,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       eyebrow: "Paid Private File",
       title:
         "Pay in ZEC. Key and file delivered over Nym. Decrypted on your device.",
-      body: "The file is encrypted in your browser before upload (AES-256-GCM). After a non-custodial ZEC payment, both the decryption key and the encrypted file are delivered browser-to-browser over the Nym mixnet, and the buyer decrypts on their device. The server only ever holds ciphertext, so it can read nothing.",
+      body: "Encrypted in your browser. Paid in ZEC. The decryption key and the encrypted file reach the buyer browser-to-browser, 100% over the Nym mixnet. Decrypted only on their device. Non-custodial, end to end.",
       backLabel: "Paid Private File",
     },
     tabs: {
