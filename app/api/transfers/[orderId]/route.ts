@@ -4,7 +4,9 @@ import { createServerErrorResponse } from "../../../../lib/server/error-kinds";
 import { enforceRateLimit } from "../../../../lib/server/rate-limit";
 import { getTransferPublicOrder } from "../../../../lib/server/transfer-store";
 
-const RATE_LIMIT = { maxRequests: 60, windowMs: 60_000 };
+// Read/poll endpoint: the buyer + seller poll order status frequently, and
+// several tabs/browsers can share one client IP. Keep this generous (cheap GET).
+const RATE_LIMIT = { maxRequests: 240, windowMs: 60_000 };
 
 interface RouteContext {
   params: Promise<{ orderId: string }>;

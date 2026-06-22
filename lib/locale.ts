@@ -20,7 +20,12 @@ export async function resolveProductLocale(
   return DEFAULT_LOCALE;
 }
 
-export function withProductLocale(href: string, locale: ProductLocale): string {
-  const separator = href.includes("?") ? "&" : "?";
-  return `${href}${separator}lang=${locale}`;
+// English-only: the `?lang=` param is ignored on read, so we no longer append it
+// to generated URLs (share links, public routes, internal nav). The `locale` arg
+// is kept so the call sites do not need to change.
+export function withProductLocale(
+  href: string,
+  _locale: ProductLocale,
+): string {
+  return href;
 }

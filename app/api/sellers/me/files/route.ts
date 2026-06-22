@@ -5,7 +5,8 @@ import { enforceRateLimit } from "../../../../../lib/server/rate-limit";
 import { requireSellerFromRequest } from "../../../../../lib/server/seller-store";
 import { listOrdersForSeller } from "../../../../../lib/server/transfer-store";
 
-const RATE_LIMIT = { maxRequests: 20, windowMs: 60_000 };
+// Dashboard polls this list (~every 5s) plus mount/screen loads; cheap read.
+const RATE_LIMIT = { maxRequests: 80, windowMs: 60_000 };
 
 // Seller shop dashboard: list the authenticated seller's files (orders) as a
 // compact summary the Dashboard / Files screens render. Buyer key material is

@@ -11,7 +11,9 @@ import {
   type TransferPublicOrder,
 } from "../../../../../lib/server/transfer-store";
 
-const RATE_LIMIT = { maxRequests: 10, windowMs: 60_000 };
+// The buyer's self-healing receiver re-registers its live Nym address on a
+// ~8s heartbeat; give it headroom so a long session doesn't trip the limiter.
+const RATE_LIMIT = { maxRequests: 40, windowMs: 60_000 };
 const MAX_BODY_BYTES = 32 * 1024;
 
 interface RouteContext {
@@ -24,7 +26,11 @@ interface NymSessionResponse {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const throttled = enforceRateLimit(request, "transfers/nym-session", RATE_LIMIT);
+  const throttled = enforceRateLimit(
+    request,
+    "transfers/nym-session",
+    RATE_LIMIT,
+  );
   if (throttled) return throttled;
 
   try {
@@ -33,7 +39,9 @@ export async function POST(request: Request, context: RouteContext) {
     const registered = await registerNymSessionForOrder(orderId, {
       buyerNymAddress: requireString(body.buyerNymAddress, "buyerNymAddress"),
       transport:
-        body.transport === "nym-transfer-v1" ? "nym-transfer-v1" : "nym-claim-v1",
+        body.transport === "nym-transfer-v1"
+          ? "nym-transfer-v1"
+          : "nym-claim-v1",
       buyerPublicKeyJwk: requireJsonWebKey(body.buyerPublicKeyJwk),
     });
 
