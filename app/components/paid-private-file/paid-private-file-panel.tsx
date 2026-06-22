@@ -3026,20 +3026,21 @@ export function PaidPrivateFilePanel({
                       <p className="eyebrow">{copy.send.successTitle}</p>
                       <p>{copy.send.successBody}</p>
                     </div>
+                    <div className="zectime-paid-warning">
+                      <p className="eyebrow">{copy.send.shareWarningTitle}</p>
+                      <p>{copy.send.shareWarningBody}</p>
+                    </div>
                     <code>{shareUrl}</code>
                     <div className="zectime-paid-actions">
                       <button
                         type="button"
-                        className="button-secondary"
+                        className="button-primary"
                         onClick={() =>
                           void navigator.clipboard.writeText(shareUrl)
                         }
                       >
                         {copy.send.copyLinkLabel}
                       </button>
-                      <a className="button-primary" href={shareUrl}>
-                        {copy.send.openLinkLabel}
-                      </a>
                     </div>
                     <OrderDetails order={createdOrder} copy={copy} />
 

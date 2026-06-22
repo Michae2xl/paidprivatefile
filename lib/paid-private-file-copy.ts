@@ -146,6 +146,8 @@ export interface PaidPrivateFileCopy {
     successBody: string;
     copyLinkLabel: string;
     openLinkLabel: string;
+    shareWarningTitle: string;
+    shareWarningBody: string;
   };
   receive: {
     title: string;
@@ -436,6 +438,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "Compartilhe o link de acesso. O arquivo so abre depois que o pagamento em ZEC for confirmado.",
       copyLinkLabel: "Copiar link",
       openLinkLabel: "Abrir link",
+      shareWarningTitle: "Importante",
+      shareWarningBody:
+        "Abra este link em outro navegador ou dispositivo, não neste. O primeiro navegador que abrir o link vira o comprador, e a entrega pela Nym precisa de dois navegadores separados. Venda um arquivo por vez e mantenha esta aba aberta até o comprador confirmar o recebimento.",
     },
     receive: {
       title: "Pagar e abrir localmente",
@@ -723,6 +728,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "Share the access link. The file unlocks only after the ZEC payment confirms on-chain, then is delivered over Nym and decrypted on the buyer's device.",
       copyLinkLabel: "Copy link",
       openLinkLabel: "Open link",
+      shareWarningTitle: "Important",
+      shareWarningBody:
+        "Open this link in a different browser or device, not this one. The first browser to open the link becomes the buyer, and delivery over Nym needs two separate browsers. Sell one file at a time, and keep this tab open until the buyer confirms receipt.",
     },
     receive: {
       title: "Pay in ZEC, decrypt on your device",
