@@ -3524,13 +3524,21 @@ export function PaidPrivateFilePanel({
       />
 
       <div className="zk-hub-body zectime-paid-body">
-        <section className="frame zectime-paid-hero surface-reveal">
+        <section
+          className={`frame zectime-paid-hero surface-reveal${
+            mode === "receive" ? " zectime-paid-hero--compact" : ""
+          }`}
+        >
           <div>
             <p className="eyebrow">{copy.shell.eyebrow}</p>
             <h1>{copy.shell.title}</h1>
           </div>
-          <p className="hero-copy">{copy.shell.body}</p>
-          <TransferMotion copy={copy} stage={flowMotionStage} />
+          {mode === "receive" ? null : (
+            <>
+              <p className="hero-copy">{copy.shell.body}</p>
+              <TransferMotion copy={copy} stage={flowMotionStage} />
+            </>
+          )}
         </section>
 
         {errorMessage ? (

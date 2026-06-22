@@ -289,6 +289,20 @@ a {
   color: rgba(255, 254, 248, 0.72);
 }
 
+/* Buyer views (opened a link to buy/receive) don't need the full landing hero.
+   Shrink it to a slim header so the product + Buy / the pay flow is immediately
+   visible instead of buried below a full-screen marketing block. */
+.zectime-paid-hero.zectime-paid-hero--compact {
+  gap: 6px;
+  padding: 14px 20px;
+}
+
+.zectime-paid-hero.zectime-paid-hero--compact h1 {
+  margin: 2px 0 0;
+  font-size: clamp(1.15rem, 3.4vw, 1.55rem);
+  line-height: 1.18;
+}
+
 .zectime-paid-tabs {
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2642,6 +2656,25 @@ a {
 .ppf-file-price {
   color: rgba(255, 255, 255, 0.55);
   font-size: 0.82rem;
+}
+
+/* Buyer product listing sits on the light/cream buy card, so the shared
+   (dark-card) file styles render too faint. Make the name, price, and supply
+   dark + the price prominent. Scoped to .ppf-product-buy so the seller dashboard
+   rows (dark cards) are unaffected. */
+.ppf-product-buy .ppf-product-listing .ppf-file-name {
+  color: var(--ink);
+  font-size: 1.05rem;
+}
+
+.ppf-product-buy .ppf-product-listing .ppf-file-price {
+  color: var(--ink);
+  font-weight: 700;
+  font-size: 1.15rem;
+}
+
+.ppf-product-buy .ppf-product-listing .ppf-muted {
+  color: rgba(13, 18, 16, 0.62);
 }
 
 /* Subtle "Delivering over Nym…" indicator on a file row the dashboard auto
