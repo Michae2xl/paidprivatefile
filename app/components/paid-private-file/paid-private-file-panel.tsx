@@ -307,6 +307,10 @@ export function PaidPrivateFilePanel({
   const [sellerPayoutAddress, setSellerPayoutAddress] = useState("");
   const [sellerNote, setSellerNote] = useState("");
   const [seller, setSeller] = useState<SellerProfile | null>(null);
+  // Until loadSellerSession resolves we don't know if this visitor is a
+  // logged-in seller. Render a neutral splash instead of flashing the logged-out
+  // start screen on every refresh.
+  const [sellerSessionChecked, setSellerSessionChecked] = useState(false);
   const [sellerAuthMode, setSellerAuthMode] =
     useState<SellerAuthMode>("create");
   // Seller shop: one screen at a time (no stacking). Two tabs — Files and
@@ -629,6 +633,8 @@ export function PaidPrivateFilePanel({
       }
     } catch {
       // Anonymous sellers can still create one-off local prototype links.
+    } finally {
+      setSellerSessionChecked(true);
     }
   }
 
@@ -3054,6 +3060,16 @@ export function PaidPrivateFilePanel({
               </>
             ) : null}
           </SellerDashboard>
+        ) : mode === "send" && !sellerSessionChecked ? (
+          <section
+            className="frame zectime-paid-panel surface-reveal"
+            aria-busy="true"
+          >
+            <div className="zectime-paid-panel-copy">
+              <p className="eyebrow">{copy.shell.eyebrow}</p>
+              <span className="ppf-buyer-spinner" aria-hidden="true" />
+            </div>
+          </section>
         ) : mode === "send" ? (
           <section className="frame zectime-paid-panel surface-reveal">
             <div className="zectime-paid-panel-copy">
