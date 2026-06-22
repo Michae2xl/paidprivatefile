@@ -37,6 +37,7 @@ import {
 } from "../../../lib/purchase-summary";
 import { extractServerErrorMessage } from "../../../lib/server-error-message";
 import {
+  computeNymReceiveTimeoutMs,
   createNymFileReceiver,
   decodePacket,
   startNymFileSender,
@@ -538,6 +539,13 @@ export function PaidPrivateFilePanel({
   // landing (vs. the receiver never hearing anything). Incremented for every
   // inbound text message the buyer handler is invoked with.
   const [nymEnvelopesReceived, setNymEnvelopesReceived] = useState(0);
+  // True once the buyer has the decryption key in hand this session. Drives a
+  // calmer receiver status ("key received, receiving file") and freezes the
+  // envelope counter so the seller's pre-ack key re-sends don't keep climbing a
+  // scary number after the key already arrived. Ref mirrors it for the inbound
+  // handler closure (pinned at subscribe); state drives the diagnostic re-render.
+  const [buyerKeyReceived, setBuyerKeyReceived] = useState(false);
+  const buyerKeyReceivedRef = useRef(false);
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   // Unsubscribe handle for the inbound RAW (binary) file-chunk subscription,
@@ -560,6 +568,11 @@ export function PaidPrivateFilePanel({
   // the per-tick re-send loops do not start a second concurrent transfer for the
   // same order. Cleared when a send settles (so a failed send can be retried).
   const sellerFileSendInFlightRef = useRef<Set<string>>(new Set());
+  // Orders for which this seller browser has sent the key envelope at least once
+  // this session. Lets the re-send loop PAUSE the key send while the file is
+  // streaming (no self-competition on the single Nym gateway, no climbing buyer
+  // counter) while still guaranteeing the first key send always goes out.
+  const sellerKeySentOnceRef = useRef<Set<string>>(new Set());
   // The active in-browser file receiver (buyer side). Inbound raw chunks are
   // routed here; on complete it resolves the verified ciphertext.
   const nymFileReceiverRef = useRef<NymFileReceiver | null>(null);
@@ -1627,6 +1640,8 @@ export function PaidPrivateFilePanel({
     buyerReceivedRef.current = false;
     buyerAutoDownloadedRef.current = "";
     setNymEnvelopesReceived(0);
+    buyerKeyReceivedRef.current = false;
+    setBuyerKeyReceived(false);
     // Reset any in-flight browser-to-browser FILE transfer state from a prior
     // order so the receiver/key/fallback for THIS order start clean.
     nymFileReceiverRef.current?.abort("loading a new order");
@@ -2229,6 +2244,13 @@ export function PaidPrivateFilePanel({
         client.client.rawSend({ payload, recipient }).catch(() => undefined),
       {
         expectedSha256: order.file.encryptedFileSha256,
+        // Size-aware hard cap: a large file (e.g. ~50 MB ≈ 18 min ideal, longer
+        // with retransmits) must not hit a flat 10 min default and abort onto the
+        // HTTPS fallback mid-transfer. Scales to ~the file's expected drain time,
+        // floored at 10 min and capped at 60 min.
+        overallTimeoutMs: computeNymReceiveTimeoutMs(
+          order.file.encryptedSizeBytes,
+        ),
         onProgress: (received, total) => {
           // Record forward progress for the stall-aware fallback timer: stamp the
           // time + latest counts so a healthy slow transfer keeps re-arming the
@@ -2462,10 +2484,14 @@ export function PaidPrivateFilePanel({
     // are kept current by the effects above.
     const loadedOrder = loadedOrderRef.current;
     const downloadUrl = downloadUrlRef.current;
-    // Diagnostic: count EVERY inbound envelope (even ones we then ignore as
-    // duplicates) so the "Receiving your file…" card can show envelopes are
-    // actually reaching this receiver — proving the listener is wired up.
-    setNymEnvelopesReceived((count) => count + 1);
+    // Diagnostic: count inbound envelopes so the "Receiving your file…" card can
+    // show envelopes are actually reaching this receiver — proving the listener
+    // is wired up. FREEZE once the key is in hand: further envelopes are just the
+    // seller's pre-ack re-sends of a key we already have, and a climbing number
+    // after "key received" only worries the buyer.
+    if (!buyerKeyReceivedRef.current) {
+      setNymEnvelopesReceived((count) => count + 1);
+    }
 
     // Idempotency: the seller re-sends the same envelope until the buyer ACKs.
     // Ignore further envelopes ONLY once the file is actually in hand this
@@ -2496,6 +2522,8 @@ export function PaidPrivateFilePanel({
       // arriving back-to-back cannot each start a decrypt before downloadUrl is
       // set. If opening fails, release the guard so a later re-send can retry.
       buyerReceivedRef.current = true;
+      buyerKeyReceivedRef.current = true;
+      setBuyerKeyReceived(true);
       try {
         // The KEY + manifest arrived over the Nym text channel, but
         // openClaimPayload fetches the FILE bytes over HTTPS (the signed
@@ -2532,6 +2560,10 @@ export function PaidPrivateFilePanel({
     // already arrived (receiver waiting on the key), decrypt them now.
     if (browserNymFileTransferEnabled()) {
       nymKeyEnvelopeRef.current.set(keyOnly.orderId, keyOnly.keyEnvelope);
+      // Key is in hand: calm the receiver status + freeze the envelope counter so
+      // the seller's pre-ack re-sends don't keep worrying the buyer.
+      buyerKeyReceivedRef.current = true;
+      setBuyerKeyReceived(true);
       armBuyerHttpsFallback(loadedOrder);
       // If the FILE bytes already arrived (receiver reassembled + verified them
       // while waiting for this key), decrypt + open them now.
@@ -2546,6 +2578,10 @@ export function PaidPrivateFilePanel({
     // Commit before the await-heavy claim/decrypt below so concurrent re-sends
     // (the seller fires every ~6s) cannot each kick off a download.
     buyerReceivedRef.current = true;
+    // Key is in hand in the key-over-Nym + file-over-HTTPS config too: calm the
+    // receiver status and freeze the envelope counter, matching the flag-ON path.
+    buyerKeyReceivedRef.current = true;
+    setBuyerKeyReceived(true);
     // The seller's envelope can arrive over the mixnet BEFORE this buyer ran its
     // own claim (the claim is what stashes the signed ciphertext URL). If the URL
     // is missing, claim NOW to fetch it, then decrypt with the envelope we just
@@ -2852,6 +2888,9 @@ export function PaidPrivateFilePanel({
             keyEnvelope,
             buyerNymAddress: challenge.release.buyerNymAddress,
           });
+          // Record that the key has gone out at least once so the re-send loop can
+          // safely pause further key sends while the file streams.
+          sellerKeySentOnceRef.current.add(order.orderId);
           // Browser-to-browser FILE delivery: also stream the encrypted file
           // bytes to the buyer over Nym (single-flight; HTTPS is the fallback).
           // A purchase passes its productId so the shared PRODUCT ciphertext is
@@ -2933,15 +2972,28 @@ export function PaidPrivateFilePanel({
             : "The buyer has not registered a Nym session to receive yet.",
         );
       }
-      const keyEnvelope = await wrapPaidLinkFileKeyForBuyer(
-        draft.fileKey,
-        challenge.release.buyerPublicKeyJwk,
+      // Pause the KEY re-send while THIS order's file is actively streaming from
+      // this browser: the single Nym client would otherwise compete with itself
+      // (delaying file chunks) and pointlessly re-send a key the buyer already has,
+      // climbing the buyer's "envelopes" counter. Always send at least once; if the
+      // buyer reloads, the file send fails and clears the in-flight flag, so the
+      // re-send naturally resumes and a fresh buyer still gets the key.
+      const fileStreaming = sellerFileSendInFlightRef.current.has(
+        order.orderId,
       );
-      await sendKeyEnvelopeOverNym({
-        orderId: order.orderId,
-        keyEnvelope,
-        buyerNymAddress: challenge.release.buyerNymAddress,
-      });
+      const keyAlreadySent = sellerKeySentOnceRef.current.has(order.orderId);
+      if (!fileStreaming || !keyAlreadySent) {
+        const keyEnvelope = await wrapPaidLinkFileKeyForBuyer(
+          draft.fileKey,
+          challenge.release.buyerPublicKeyJwk,
+        );
+        await sendKeyEnvelopeOverNym({
+          orderId: order.orderId,
+          keyEnvelope,
+          buyerNymAddress: challenge.release.buyerNymAddress,
+        });
+        sellerKeySentOnceRef.current.add(order.orderId);
+      }
       // Browser-to-browser FILE delivery alongside the key re-send. Single-flight
       // guarded, so the ~6s re-send loop never starts a second transfer for the
       // same order; the buyer's HTTPS fallback covers a persistent failure. A
@@ -4044,6 +4096,7 @@ export function PaidPrivateFilePanel({
             nymMessage={nymMessage}
             nymStatus={nymStatus}
             nymEnvelopesReceived={nymEnvelopesReceived}
+            buyerKeyReceived={buyerKeyReceived}
             buyerReceiveProgress={buyerReceiveProgress}
             buyerTransferMetrics={buyerTransferMetrics}
             onReconnectNym={() => void startBrowserNym()}
@@ -4093,6 +4146,7 @@ function BuyerCheckout({
   nymMessage,
   nymStatus,
   nymEnvelopesReceived,
+  buyerKeyReceived,
   buyerReceiveProgress,
   buyerTransferMetrics,
   onReconnectNym,
@@ -4119,6 +4173,7 @@ function BuyerCheckout({
   nymMessage: string;
   nymStatus: BrowserNymStatus;
   nymEnvelopesReceived: number;
+  buyerKeyReceived: boolean;
   buyerReceiveProgress: number | null;
   buyerTransferMetrics: TransferMetrics | null;
   onReconnectNym: () => void;
@@ -4254,6 +4309,7 @@ function BuyerCheckout({
                   nymStatus={nymStatus}
                   buyerNymAddress={buyerNymAddress}
                   nymEnvelopesReceived={nymEnvelopesReceived}
+                  buyerKeyReceived={buyerKeyReceived}
                   transferMetrics={buyerTransferMetrics}
                   onReconnectNym={onReconnectNym}
                   isBusy={isBusy}
@@ -4408,6 +4464,7 @@ function NymReceiverDiagnostic({
   nymStatus,
   buyerNymAddress,
   nymEnvelopesReceived,
+  buyerKeyReceived,
   transferMetrics,
   onReconnectNym,
   isBusy,
@@ -4416,6 +4473,7 @@ function NymReceiverDiagnostic({
   nymStatus: BrowserNymStatus;
   buyerNymAddress: string;
   nymEnvelopesReceived: number;
+  buyerKeyReceived: boolean;
   // Additive perf instrumentation: the last completed Nym receive metrics, shown
   // as a compact numeric line in this (dev/diagnostic) row. null until done.
   transferMetrics: TransferMetrics | null;
@@ -4433,7 +4491,9 @@ function NymReceiverDiagnostic({
         : "down";
   const stateLabel =
     connectionState === "connected"
-      ? copy.buyerStatus.nymConnected
+      ? buyerKeyReceived
+        ? copy.buyerStatus.nymKeyReceived
+        : copy.buyerStatus.nymConnected
       : connectionState === "connecting"
         ? copy.buyerStatus.nymConnecting
         : copy.buyerStatus.nymNotConnected;
@@ -6405,10 +6465,13 @@ function browserNymFileTransferEnabled(): boolean {
   );
 }
 
-// Generous bound after the key envelope arrives before the buyer abandons the
-// Nym file transfer and falls back to the HTTPS fetch. Long enough for a paced
-// ~48 KiB/s transfer of a typical file plus mixnet latency.
-const BROWSER_NYM_FILE_FALLBACK_MS = 90_000;
+// No-PROGRESS stall window: the buyer abandons the Nym file transfer for the
+// HTTPS fetch only after this long with zero forward progress. It is RE-ARMED on
+// every chunk (armBuyerHttpsFallback), so a healthy slow transfer of a large
+// file never trips it — only a genuine stall does. Sized generously (5 min) so a
+// transient mixnet pause or gateway hiccup doesn't yank a live transfer onto the
+// fallback prematurely; the receiver's size-aware overall cap is the hard limit.
+const BROWSER_NYM_FILE_FALLBACK_MS = 300_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

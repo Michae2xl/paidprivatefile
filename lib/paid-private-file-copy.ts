@@ -314,6 +314,7 @@ export interface PaidPrivateFileCopy {
     stepDone: string;
     stepDoneBody: string;
     nymConnected: string;
+    nymKeyReceived: string;
     nymConnecting: string;
     nymNotConnected: string;
     nymAddressLabel: string;
@@ -678,6 +679,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       stepDone: "Concluido",
       stepDoneBody: "Arquivo baixado e aberto neste navegador.",
       nymConnected: "Conectado a Nym - aguardando a chave",
+      nymKeyReceived: "Conectado a Nym - chave recebida, recebendo arquivo",
       nymConnecting: "Conectando a Nym...",
       nymNotConnected: "Sem conexao Nym - tente reconectar",
       nymAddressLabel: "Seu endereco Nym",
@@ -1039,6 +1041,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       stepDone: "Done",
       stepDoneBody: "File received over Nym and decrypted on this device.",
       nymConnected: "Connected to Nym - listening for the key",
+      nymKeyReceived: "Connected to Nym - key received, receiving file",
       nymConnecting: "Connecting to Nym...",
       nymNotConnected: "Not connected to Nym - try reconnecting",
       nymAddressLabel: "Your Nym address",

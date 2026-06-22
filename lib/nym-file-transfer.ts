@@ -93,6 +93,33 @@ export const DEFAULT_GAP_TIMEOUT_MS = 30_000;
 // in one round-trip instead of one chunk per round-trip.
 export const DEFAULT_RETRANSMIT_WINDOW = 4;
 
+// Overall receive backstop bounds. The receiver's hard cap must scale with the
+// file: a flat 10 min aborted any file that simply takes longer than that to
+// drain over the mixnet (a ~50 MB transfer at ~46 KiB/s is ~18 min, far longer
+// with retransmits), which yanked it onto the HTTPS fallback mid-flight. We size
+// the cap from the file size at a deliberately conservative rate so a healthy
+// slow transfer is never aborted, floored/capped so tiny files still get a sane
+// minimum and nothing waits absurdly long.
+export const NYM_RECEIVE_MIN_TIMEOUT_MS = 600_000; // 10 min floor
+export const NYM_RECEIVE_MAX_TIMEOUT_MS = 3_600_000; // 60 min cap
+// ~15 KiB/s — well under the ~46 KiB/s gateway drain, so the estimate leaves
+// generous headroom for retransmits and transient mixnet stalls.
+const NYM_RECEIVE_SIZING_RATE_BYTES_PER_SEC = 15 * 1024;
+
+// Size-aware overall receive timeout (ms) for a ciphertext of `encryptedSizeBytes`.
+// Pure + clamped to [MIN, MAX]; non-positive/degenerate sizes fall back to MIN.
+export function computeNymReceiveTimeoutMs(encryptedSizeBytes: number): number {
+  if (!Number.isFinite(encryptedSizeBytes) || encryptedSizeBytes <= 0) {
+    return NYM_RECEIVE_MIN_TIMEOUT_MS;
+  }
+  const estimateMs =
+    (encryptedSizeBytes / NYM_RECEIVE_SIZING_RATE_BYTES_PER_SEC) * 1000;
+  return Math.min(
+    NYM_RECEIVE_MAX_TIMEOUT_MS,
+    Math.max(NYM_RECEIVE_MIN_TIMEOUT_MS, Math.ceil(estimateMs)),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Encoding / decoding
 // ---------------------------------------------------------------------------
