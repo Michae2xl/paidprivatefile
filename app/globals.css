@@ -352,6 +352,35 @@ a {
   background: rgba(255, 254, 248, 0.03);
 }
 
+/* The buyer stepper sits on the LIGHT checkout panel, so its text must be dark
+   (the base styles above are tuned for the dark seller dashboard). The dots keep
+   their amber/green accents, which read fine on light. */
+.ppf-status-stepper[data-role="buyer"] {
+  border-color: var(--line-dark);
+  background: rgba(17, 20, 17, 0.02);
+}
+
+.ppf-status-stepper[data-role="buyer"] .zectime-flow-strip li {
+  color: rgba(17, 20, 17, 0.5);
+}
+
+.ppf-status-stepper[data-role="buyer"]
+  .zectime-flow-strip
+  li[data-state="done"],
+.ppf-status-stepper[data-role="buyer"]
+  .zectime-flow-strip
+  li[data-state="active"] {
+  color: var(--ink);
+}
+
+.ppf-status-stepper[data-role="buyer"] .ppf-nym-health {
+  border-color: var(--line-dark);
+}
+
+.ppf-status-stepper[data-role="buyer"] .ppf-nym-health-line {
+  color: var(--ink);
+}
+
 .ppf-status-stepper-body {
   margin: 0;
 }
