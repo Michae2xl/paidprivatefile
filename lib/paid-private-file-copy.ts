@@ -45,9 +45,11 @@ export interface PaidPrivateFileCopy {
     loggedInLabel: string;
     accessKeySavedTitle: string;
     accessKeySavedBody: string;
+    accessKeyCalloutBody: string;
     accessKeyCopyLabel: string;
     accessKeyCopiedLabel: string;
     accessKeyConfirmLabel: string;
+    accessKeySavedAckLabel: string;
     accessKeyBlocker: string;
     ufvkLabel: string;
     ufvkPlaceholder: string;
@@ -84,6 +86,12 @@ export interface PaidPrivateFileCopy {
     receivingHelper: string;
     accessKeyReminderTitle: string;
     accessKeyReminderBody: string;
+    accessKeyRegenerateTitle: string;
+    accessKeyRegenerateWarning: string;
+    accessKeyRegenerateLabel: string;
+    accessKeyRegenerateConfirmLabel: string;
+    accessKeyRegenerateCancelLabel: string;
+    accessKeyRegeneratingLabel: string;
     filesTitle: string;
     filesEmptyTitle: string;
     filesEmptyBody: string;
@@ -333,9 +341,12 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeySavedTitle: "Chave do private shop",
       accessKeySavedBody:
         "Ela aparece uma vez e nao pode ser recuperada pelo servidor. Guarde fora do navegador antes de publicar arquivos.",
+      accessKeyCalloutBody:
+        "Esta e a unica forma de entrar de novo. Ela aparece uma unica vez — copie agora e guarde em um lugar seguro.",
       accessKeyCopyLabel: "Copiar chave",
       accessKeyCopiedLabel: "Chave copiada",
       accessKeyConfirmLabel: "Eu guardei esta chave",
+      accessKeySavedAckLabel: "Ja guardei",
       accessKeyBlocker:
         "Confirme que guardou a chave para liberar a publicacao do arquivo.",
       ufvkLabel: "Chave de visualizacao da loja (UFVK)",
@@ -380,6 +391,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeyReminderTitle: "Chave de acesso",
       accessKeyReminderBody:
         "Sua chave de acesso aparece apenas uma vez na criacao da loja. Guarde-a fora do navegador: e a unica forma de entrar de novo.",
+      accessKeyRegenerateTitle: "Gerar nova chave de acesso",
+      accessKeyRegenerateWarning:
+        "Isto substitui sua chave de acesso atual — a antiga para de funcionar imediatamente.",
+      accessKeyRegenerateLabel: "Gerar nova chave",
+      accessKeyRegenerateConfirmLabel: "Confirmar",
+      accessKeyRegenerateCancelLabel: "Cancelar",
+      accessKeyRegeneratingLabel: "Gerando...",
       filesTitle: "Seus arquivos",
       filesEmptyTitle: "Nenhum arquivo ainda",
       filesEmptyBody: "Crie seu primeiro arquivo pago para comecar a vender.",
@@ -623,9 +641,12 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeySavedTitle: "Private shop key",
       accessKeySavedBody:
         "It is shown once and cannot be recovered by the server. Save it outside the browser before publishing files.",
+      accessKeyCalloutBody:
+        "This is the only way to log back in. It is shown once — copy it now and store it somewhere safe.",
       accessKeyCopyLabel: "Copy key",
       accessKeyCopiedLabel: "Key copied",
       accessKeyConfirmLabel: "I saved this key",
+      accessKeySavedAckLabel: "I've saved it",
       accessKeyBlocker:
         "Confirm that you saved the key to unlock file publishing.",
       ufvkLabel: "Shop viewing key (UFVK)",
@@ -670,6 +691,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeyReminderTitle: "Access key",
       accessKeyReminderBody:
         "Your access key is shown only once when the shop is created. Keep it outside the browser: it is the only way to log back in.",
+      accessKeyRegenerateTitle: "Regenerate access key",
+      accessKeyRegenerateWarning:
+        "This replaces your current access key — the old one stops working immediately.",
+      accessKeyRegenerateLabel: "Regenerate",
+      accessKeyRegenerateConfirmLabel: "Confirm",
+      accessKeyRegenerateCancelLabel: "Cancel",
+      accessKeyRegeneratingLabel: "Regenerating...",
       filesTitle: "Your files",
       filesEmptyTitle: "No files yet",
       filesEmptyBody: "Create your first paid file to start selling.",

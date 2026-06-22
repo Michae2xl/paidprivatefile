@@ -68,6 +68,10 @@ export interface CreateSellerResult {
   accessKey: string;
 }
 
+export interface RotateSellerAccessKeyResult {
+  accessKey: string;
+}
+
 const SELLER_ID_PATTERN = /^sel_[a-f0-9]{24}$/u;
 const HANDLE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/u;
 const ZCASH_UNIFIED_ADDRESS_PATTERN = /^(u1|utest|uregtest)[a-z0-9]{16,}$/iu;
@@ -265,6 +269,29 @@ export async function updateSellerProfile(
   profile.updatedAt = new Date().toISOString();
   await atomicWriteJson(sellerProfilePath(profile.sellerId), profile);
   return publicSeller(profile);
+}
+
+// Recovery path for a logged-in seller who lost their access key. Only the hash
+// of the original key is stored, so the old key can never be re-shown — the only
+// safe option is to ROTATE it. We mint a brand-new key, replace ONLY the stored
+// hash (handle, UFVK, payout config, etc. are untouched), persist, and return
+// the new plaintext key exactly once. The old key stops authenticating
+// immediately because its hash no longer matches.
+export async function rotateSellerAccessKey(
+  sellerId: string,
+): Promise<RotateSellerAccessKeyResult> {
+  const profile = await getSellerProfileById(sellerId);
+  if (!profile) {
+    throw new ServerError("auth_required", "Seller session is invalid");
+  }
+  const accessKey = generateAccessKey();
+  const next: SellerProfile = {
+    ...profile,
+    accessKeyHash: hashAccessKey(accessKey),
+    updatedAt: new Date().toISOString(),
+  };
+  await atomicWriteJson(sellerProfilePath(next.sellerId), next);
+  return { accessKey };
 }
 
 // Non-custodial marketplace (Phase 1): register a seller's pasted viewing key

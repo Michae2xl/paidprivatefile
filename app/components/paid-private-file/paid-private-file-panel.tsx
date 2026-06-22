@@ -1033,6 +1033,32 @@ export function PaidPrivateFilePanel({
     setAccessKeyCopied(true);
   }
 
+  // Recovery for a logged-in seller who lost their access key. Only the hash is
+  // stored, so the only path is to ROTATE: the server mints a new key and
+  // invalidates the old one. We surface the new key through the same prominent
+  // "save it once" callout (Feature 1) by setting newSellerAccessKey and
+  // un-acknowledging it.
+  async function onRegenerateAccessKey() {
+    if (!seller) {
+      return;
+    }
+    setErrorMessage("");
+    setBusyAction("seller");
+    try {
+      const body = await postJson<{ accessKey: string }>(
+        "/api/sellers/me/access-key",
+        { method: "POST" },
+      );
+      setNewSellerAccessKey(body.accessKey);
+      setAccessKeyCopied(false);
+      setAccessKeyAcknowledged(false);
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
   async function onCreateLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setErrorMessage("");
@@ -2957,6 +2983,11 @@ export function PaidPrivateFilePanel({
             deliveringOrderIds={dashboardDelivering}
             releaseBusy={busyAction === "release"}
             newSellerAccessKey={newSellerAccessKey}
+            accessKeyCopied={accessKeyCopied}
+            accessKeyAcknowledged={accessKeyAcknowledged}
+            onCopyAccessKey={() => void onCopyNewSellerAccessKey()}
+            onAcknowledgeAccessKey={() => setAccessKeyAcknowledged(true)}
+            onRegenerateAccessKey={() => void onRegenerateAccessKey()}
             displayNameInput={sellerDisplayName}
             onDisplayNameChange={setSellerDisplayName}
             settingsSaveStatus={settingsSaveStatus}
@@ -3264,42 +3295,6 @@ export function PaidPrivateFilePanel({
                   </div>
                 </>
               }
-
-              {newSellerAccessKey ? (
-                <div className="zectime-key-vault">
-                  <div>
-                    <p className="eyebrow">{copy.seller.accessKeySavedTitle}</p>
-                    <p>{copy.seller.accessKeySavedBody}</p>
-                  </div>
-                  <code>{newSellerAccessKey}</code>
-                  <div className="zectime-paid-actions">
-                    <button
-                      type="button"
-                      className="button-secondary"
-                      onClick={() => void onCopyNewSellerAccessKey()}
-                    >
-                      {accessKeyCopied
-                        ? copy.seller.accessKeyCopiedLabel
-                        : copy.seller.accessKeyCopyLabel}
-                    </button>
-                    <label className="zectime-key-confirm">
-                      <input
-                        type="checkbox"
-                        checked={accessKeyAcknowledged}
-                        onChange={(event) =>
-                          setAccessKeyAcknowledged(event.target.checked)
-                        }
-                      />
-                      <span>{copy.seller.accessKeyConfirmLabel}</span>
-                    </label>
-                  </div>
-                  {!accessKeyAcknowledged ? (
-                    <p className="zectime-key-lock">
-                      {copy.seller.accessKeyBlocker}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
 
               {ufvkConfirmation ? (
                 <div className="zectime-key-vault" data-tone="ok">
@@ -3696,6 +3691,11 @@ function SellerDashboard({
   deliveringOrderIds,
   releaseBusy,
   newSellerAccessKey,
+  accessKeyCopied,
+  accessKeyAcknowledged,
+  onCopyAccessKey,
+  onAcknowledgeAccessKey,
+  onRegenerateAccessKey,
   displayNameInput,
   onDisplayNameChange,
   settingsSaveStatus,
@@ -3729,6 +3729,11 @@ function SellerDashboard({
   deliveringOrderIds: Set<string>;
   releaseBusy: boolean;
   newSellerAccessKey: string;
+  accessKeyCopied: boolean;
+  accessKeyAcknowledged: boolean;
+  onCopyAccessKey: () => void;
+  onAcknowledgeAccessKey: () => void;
+  onRegenerateAccessKey: () => void;
   displayNameInput: string;
   onDisplayNameChange: (value: string) => void;
   settingsSaveStatus: "idle" | "saving" | "saved";
@@ -3773,6 +3778,38 @@ function SellerDashboard({
           </button>
         </div>
       </header>
+
+      {newSellerAccessKey && !accessKeyAcknowledged ? (
+        <div
+          className="zectime-key-vault ppf-shop-access-key-callout"
+          data-tone="warn"
+          role="alert"
+        >
+          <div>
+            <p className="eyebrow">{copy.seller.accessKeySavedTitle}</p>
+            <p>{copy.seller.accessKeyCalloutBody}</p>
+          </div>
+          <code>{newSellerAccessKey}</code>
+          <div className="zectime-paid-actions">
+            <button
+              type="button"
+              className="button-secondary"
+              onClick={onCopyAccessKey}
+            >
+              {accessKeyCopied
+                ? copy.seller.accessKeyCopiedLabel
+                : copy.seller.accessKeyCopyLabel}
+            </button>
+            <button
+              type="button"
+              className="button-primary"
+              onClick={onAcknowledgeAccessKey}
+            >
+              {copy.seller.accessKeySavedAckLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <nav className="ppf-shop-tabs" role="tablist">
         {tabs.map((tab) => (
@@ -3841,6 +3878,7 @@ function SellerDashboard({
           publicLinkCopied={publicLinkCopied}
           onCopyPublicLink={onCopyPublicLink}
           newSellerAccessKey={newSellerAccessKey}
+          onRegenerateAccessKey={onRegenerateAccessKey}
           isBusy={isBusy}
         />
       ) : (
@@ -4198,6 +4236,7 @@ function SellerSettingsScreen({
   publicLinkCopied,
   onCopyPublicLink,
   newSellerAccessKey,
+  onRegenerateAccessKey,
   isBusy,
 }: {
   copy: PaidPrivateFileCopy;
@@ -4210,8 +4249,12 @@ function SellerSettingsScreen({
   publicLinkCopied: boolean;
   onCopyPublicLink: () => void;
   newSellerAccessKey: string;
+  onRegenerateAccessKey: () => void;
   isBusy: boolean;
 }) {
+  // Two-step inline confirm so a single misclick can't rotate (and invalidate)
+  // the seller's access key. "Regenerate" reveals the confirm/cancel pair.
+  const [confirmingRegenerate, setConfirmingRegenerate] = useState(false);
   const saveLabel =
     settingsSaveStatus === "saving"
       ? copy.dashboard.settingsSavingLabel
@@ -4258,6 +4301,44 @@ function SellerSettingsScreen({
           <div className="ppf-shop-reminder" role="note">
             <p className="eyebrow">{copy.dashboard.accessKeyReminderTitle}</p>
             <p>{copy.dashboard.accessKeyReminderBody}</p>
+          </div>
+          <div className="ppf-shop-reminder" data-tone="warn" role="note">
+            <p className="eyebrow">{copy.dashboard.accessKeyRegenerateTitle}</p>
+            <p>{copy.dashboard.accessKeyRegenerateWarning}</p>
+            {confirmingRegenerate ? (
+              <div className="zectime-paid-actions">
+                <button
+                  type="button"
+                  className="button-primary"
+                  onClick={() => {
+                    setConfirmingRegenerate(false);
+                    onRegenerateAccessKey();
+                  }}
+                  disabled={isBusy}
+                >
+                  {isBusy
+                    ? copy.dashboard.accessKeyRegeneratingLabel
+                    : copy.dashboard.accessKeyRegenerateConfirmLabel}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  onClick={() => setConfirmingRegenerate(false)}
+                  disabled={isBusy}
+                >
+                  {copy.dashboard.accessKeyRegenerateCancelLabel}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => setConfirmingRegenerate(true)}
+                disabled={isBusy}
+              >
+                {copy.dashboard.accessKeyRegenerateLabel}
+              </button>
+            )}
           </div>
         </section>
       )}

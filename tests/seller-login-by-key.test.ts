@@ -9,6 +9,7 @@ import {
   authenticateSeller,
   createSellerProfile,
   getSellerProfileByAccessKey,
+  rotateSellerAccessKey,
 } from "../lib/server/seller-store";
 
 const PAYOUT = "u1default00000000000000000000000000000000000000";
@@ -85,5 +86,55 @@ describe("seller login by access key alone", () => {
       authenticateSeller({ accessKey: "ppf_not_a_real_key" }),
     ).rejects.toBeInstanceOf(ServerError);
     expect(await getSellerProfileByAccessKey("ppf_not_a_real_key")).toBeNull();
+  });
+});
+
+describe("rotateSellerAccessKey", () => {
+  it("invalidates the old key and authenticates with the new one", async () => {
+    const created = await createSellerProfile({
+      handle: "rotate-shop",
+      displayName: "Rotate Shop",
+      defaultPayoutAddress: PAYOUT,
+    });
+
+    const { accessKey: newKey } = await rotateSellerAccessKey(
+      created.seller.sellerId,
+    );
+    expect(newKey).toMatch(/^ppf_/u);
+    expect(newKey).not.toBe(created.accessKey);
+
+    // The NEW key authenticates to the same seller.
+    const seller = await authenticateSeller({ accessKey: newKey });
+    expect(seller.sellerId).toBe(created.seller.sellerId);
+    expect(seller.handle).toBe("rotate-shop");
+
+    // The OLD key no longer works (its hash was replaced).
+    await expect(
+      authenticateSeller({ accessKey: created.accessKey }),
+    ).rejects.toBeInstanceOf(ServerError);
+  });
+
+  it("leaves the handle and payout config untouched", async () => {
+    const created = await createSellerProfile({
+      handle: "stable-shop",
+      displayName: "Stable Shop",
+      defaultPayoutAddress: PAYOUT,
+    });
+
+    await rotateSellerAccessKey(created.seller.sellerId);
+
+    const seller = await authenticateSeller({
+      accessKey: (await rotateSellerAccessKey(created.seller.sellerId))
+        .accessKey,
+    });
+    expect(seller.handle).toBe("stable-shop");
+    expect(seller.displayName).toBe("Stable Shop");
+    expect(seller.defaultPayoutAddress).toBe(PAYOUT);
+  });
+
+  it("rejects rotation for an unknown seller", async () => {
+    await expect(
+      rotateSellerAccessKey(`sel_${"a".repeat(24)}`),
+    ).rejects.toBeInstanceOf(ServerError);
   });
 });

@@ -2520,6 +2520,47 @@ a {
   font-size: 0.85rem;
 }
 
+/* Regenerate-access-key block: same reminder shell, warmer red-amber tone so it
+   reads as a destructive action (the old key dies on confirm). */
+.ppf-shop-reminder[data-tone="warn"] {
+  border-color: rgba(231, 111, 81, 0.45);
+  border-left-color: #e76f51;
+  background: rgba(231, 111, 81, 0.08);
+  margin-top: 12px;
+}
+
+.ppf-shop-reminder[data-tone="warn"] .eyebrow {
+  color: #e76f51;
+}
+
+.ppf-shop-reminder[data-tone="warn"] .zectime-paid-actions {
+  margin-top: 10px;
+}
+
+/* Prominent, tab-independent access-key callout shown at the TOP of the
+   logged-in shop right after creation (or a regenerate). Reuses the key-vault
+   treatment but with an amber "warn" tone so it reads as a one-time, must-copy
+   warning rather than a confirmation. */
+.ppf-shop-access-key-callout {
+  margin-bottom: 6px;
+}
+
+.zectime-key-vault[data-tone="warn"] {
+  border-color: rgba(201, 151, 37, 0.55);
+  background:
+    linear-gradient(135deg, rgba(201, 151, 37, 0.2), transparent 60%), #fffaf0;
+}
+
+.zectime-key-vault[data-tone="warn"] .eyebrow {
+  color: #8a6a14;
+}
+
+.zectime-key-vault[data-tone="warn"] code {
+  border-color: rgba(201, 151, 37, 0.32);
+  background: #fffdf6;
+  color: #8a6a14;
+}
+
 /* Files list */
 .ppf-files {
   display: grid;
