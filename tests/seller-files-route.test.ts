@@ -37,6 +37,7 @@ interface FilesEnvelope {
     fileName: string;
     displayZec: string;
     status: string;
+    productId: string | null;
     nymSessionStatus: string | null;
     deliveredVia: "nym" | "https" | null;
     createdAt: string;
@@ -86,6 +87,7 @@ async function makeSeller(handle: string): Promise<TransferSeller> {
 async function makeOrder(
   seller: TransferSeller,
   fileName: string,
+  productId?: string,
 ): Promise<string> {
   const encrypted = new Uint8Array([9, 8, 7, 6]);
   const order = await createTransferOrder({
@@ -99,6 +101,7 @@ async function makeOrder(
     amountZats: 5_000_000,
     sellerPayoutAddress: SELLER_ADDRESS,
     seller,
+    productId,
   });
   return order.orderId;
 }
@@ -146,6 +149,22 @@ describe("GET /api/sellers/me/files", () => {
     // fields are exposed as null rather than absent/undefined.
     expect(top.nymSessionStatus).toBeNull();
     expect(top.deliveredVia).toBeNull();
+    // Single-use order: no source product.
+    expect(top.productId).toBeNull();
+  });
+
+  it("exposes the source productId for purchases spawned from a product", async () => {
+    const seller = await makeSeller("product-files-shop");
+    const productId = "prd_abcdef012345678901234567";
+    const single = await makeOrder(seller, "single.pdf");
+    const purchase = await makeOrder(seller, "purchase.pdf", productId);
+
+    const response = await listFilesRoute(filesRequest(seller.sellerId));
+    expect(response.status).toBe(200);
+    const parsed = (await response.json()) as FilesEnvelope;
+    const byId = new Map(parsed.files.map((file) => [file.orderId, file]));
+    expect(byId.get(purchase)?.productId).toBe(productId);
+    expect(byId.get(single)?.productId).toBeNull();
   });
 
   it("returns an empty list when the seller has no files", async () => {

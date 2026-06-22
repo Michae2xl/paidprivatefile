@@ -187,6 +187,32 @@ export interface PaidPrivateFileCopy {
     soldOutLabel: string;
     productBadge: string;
   };
+  // Multi-buyer "product" model (Phase 3b): the BUYER-facing product page (open a
+  // product link, see the listing, Buy -> spawns an order -> existing pay/receive
+  // flow). Separate from `products` (which is the SELLER's create/dashboard copy).
+  productBuy: {
+    eyebrow: string;
+    title: string;
+    body: string;
+    loading: string;
+    errorTitle: string;
+    errorBody: string;
+    // "{left}" is replaced with the remaining unit count for a limited product.
+    supplyLimited: string;
+    supplyOpen: string;
+    soldOut: string;
+    soldOutTitle: string;
+    soldOutBody: string;
+    buyLabel: string;
+    buyingLabel: string;
+  };
+  // Multi-buyer "product" model (Phase 3b): the per-product PURCHASES sub-list in
+  // the seller dashboard. "{count}" is the number of purchases of the product.
+  purchases: {
+    title: string;
+    emptyLabel: string;
+    deliveringLabel: string;
+  };
   receive: {
     title: string;
     body: string;
@@ -519,6 +545,28 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       soldOutLabel: "Esgotado",
       productBadge: "Produto",
     },
+    productBuy: {
+      eyebrow: "Comprar produto",
+      title: "Compre este arquivo privado",
+      body: "Pague em ZEC e receba o arquivo de forma privada por uma sessao Nym apos a confirmacao do pagamento.",
+      loading: "Carregando produto...",
+      errorTitle: "Produto indisponivel",
+      errorBody:
+        "Este produto nao foi encontrado ou nao esta mais a venda. Confira o link com o vendedor.",
+      supplyLimited: "{left} restantes",
+      supplyOpen: "Disponivel",
+      soldOut: "Esgotado",
+      soldOutTitle: "Esgotado",
+      soldOutBody:
+        "Todas as unidades deste produto ja foram vendidas. Fale com o vendedor para uma nova remessa.",
+      buyLabel: "Comprar",
+      buyingLabel: "Iniciando compra...",
+    },
+    purchases: {
+      title: "Compras ({count})",
+      emptyLabel: "Nenhuma compra ainda",
+      deliveringLabel: "Entregando pela Nym...",
+    },
     receive: {
       title: "Pagar e abrir localmente",
       body: "Carregue o link, registre sua sessao Nym, pague o invoice em ZEC e abra o arquivo localmente.",
@@ -846,6 +894,28 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       supplyLimitedSummary: "{sold} / {max} sold",
       soldOutLabel: "Sold out",
       productBadge: "Product",
+    },
+    productBuy: {
+      eyebrow: "Buy product",
+      title: "Buy this private file",
+      body: "Pay in ZEC and receive the file privately over a Nym session once your payment confirms.",
+      loading: "Loading product...",
+      errorTitle: "Product unavailable",
+      errorBody:
+        "This product was not found or is no longer for sale. Check the link with the seller.",
+      supplyLimited: "{left} left",
+      supplyOpen: "Available",
+      soldOut: "Sold out",
+      soldOutTitle: "Sold out",
+      soldOutBody:
+        "Every unit of this product has sold. Contact the seller about a new batch.",
+      buyLabel: "Buy",
+      buyingLabel: "Starting purchase...",
+    },
+    purchases: {
+      title: "Purchases ({count})",
+      emptyLabel: "No purchases yet",
+      deliveringLabel: "Delivering over Nym...",
     },
     receive: {
       title: "Pay in ZEC, decrypt on your device",

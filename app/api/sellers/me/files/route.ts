@@ -24,6 +24,13 @@ export async function GET(request: Request) {
       fileName: order.file.fileName,
       displayZec: order.price.displayZec,
       status: order.status,
+      // Multi-buyer "product" model (Phase 3b): the source product id when this
+      // order is a purchase spawned from a catalog product, else null for a
+      // single-use order. The dashboard groups purchases under their product and
+      // delivers each one using the PRODUCT release draft + ciphertext (keyed by
+      // productId), not the per-order draft (which a purchase never has). Safe to
+      // expose: it is an opaque id, never key material.
+      productId: order.productId,
       // Status-only delivery flag (no key material). The dashboard badge needs
       // it to show "Delivered" only after the buyer's pure-Nym ack, not the
       // moment the buyer merely claimed the ciphertext URL.

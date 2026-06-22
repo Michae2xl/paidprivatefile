@@ -20,6 +20,7 @@ import {
   encryptPaidLinkFile,
   fingerprintPaidLinkPublicKey,
   loadBuyerKeyPair,
+  loadProductReleaseDraft,
   loadSellerReleaseDraft,
   saveBuyerKeyPair,
   saveProductReleaseDraft,
@@ -27,7 +28,9 @@ import {
   wrapPaidLinkFileKeyForBuyer,
   type PaidLinkBuyerKeyPair,
   type PaidLinkKeyEnvelope,
+  type PaidLinkSellerReleaseDraft,
 } from "../../../lib/paid-link-client-crypto";
+import { selectNextPurchaseToDeliver } from "../../../lib/product-delivery-queue";
 import { extractServerErrorMessage } from "../../../lib/server-error-message";
 import {
   createNymFileReceiver,
@@ -38,6 +41,7 @@ import {
 import { createClientTimestampDraft } from "../../../lib/timestamp-client-crypto";
 import {
   deleteSellerCiphertext,
+  getProductCiphertext,
   getSellerCiphertext,
   putProductCiphertext,
   putSellerCiphertext,
@@ -50,14 +54,48 @@ interface PaidPrivateFilePanelProps {
   locale: ProductLocale;
   copy: PaidPrivateFileCopy;
   initialOrderId?: string | null;
+  // Multi-buyer "product" model (Phase 3b): when set (and productsEnabled()), the
+  // panel opens in the PRODUCT-BUYER view for this catalog product — the buyer
+  // sees the listing + a Buy button, and a purchase spawns a fresh per-buyer
+  // order that drives the EXISTING receive flow. Ignored when the flag is off, so
+  // the single-use flow is unchanged.
+  initialProductId?: string | null;
   initialSeller?: SellerProfile | null;
   backHref?: string;
   backLabel?: string;
 }
 
+// Multi-buyer "product" model (Phase 3b): the buyer-facing listing returned by
+// GET /api/products/[id] (secret-stripped PublicProduct). The buyer view reads
+// the file name, price, and supply/sold-out state before purchasing.
+interface PublicProductListing {
+  productId: string;
+  status: "open" | "sold_out" | "closed";
+  file: {
+    fileName: string;
+    originalSizeBytes: number;
+  };
+  price: {
+    asset: "ZEC";
+    amountZats: number;
+    displayZec: string;
+  };
+  seller: SellerProfile | null;
+  supply: { mode: "open" } | { mode: "limited"; max: number };
+  salesCount: number;
+  remainingSupply: number;
+  soldOut: boolean;
+}
+
 interface TransferPublicOrder {
   orderId: string;
   status: "created" | "payment_pending" | "paid" | "claimed";
+  // Multi-buyer "product" model (Phase 3b): the source product id when this order
+  // is a purchase spawned from a catalog product, else null for a single-use
+  // order. Mirrors the server TransferPublicOrder.productId. Drives the seller's
+  // per-purchase delivery (product release draft + ciphertext) vs. the single-use
+  // per-order path.
+  productId: string | null;
   createdAt: string;
   updatedAt: string;
   file: {
@@ -165,6 +203,11 @@ interface SellerFile {
   fileName: string;
   displayZec: string;
   status: TransferPublicOrder["status"];
+  // Multi-buyer "product" model (Phase 3b): source product id when this order is
+  // a purchase of a catalog product, else null for a single-use order. Drives the
+  // dashboard grouping of purchases under their product AND the delivery source
+  // (a purchase uses the PRODUCT release draft + ciphertext, not a per-order one).
+  productId?: string | null;
   // Pure-Nym delivery state for this order. Drives the honest file badge: only a
   // "delivered" ack means "Delivered"; before that a claimed/released order is
   // still "Delivering"/"Awaiting delivery". Optional so older API responses (and
@@ -334,11 +377,22 @@ export function PaidPrivateFilePanel({
   locale,
   copy,
   initialOrderId,
+  initialProductId,
   initialSeller,
   backHref = "/",
   backLabel,
 }: PaidPrivateFilePanelProps) {
-  const [mode, setMode] = useState<Mode>(initialOrderId ? "receive" : "send");
+  // Multi-buyer "product" model (Phase 3b): only honor initialProductId when the
+  // flag is on. With the flag off a product link falls through to the ordinary
+  // start screen, so the single-use flow is byte-for-byte unchanged.
+  const productBuyerId =
+    initialProductId && productsEnabled() ? initialProductId : null;
+  // The product-buyer view is a buyer ("receive") surface: it shows a listing +
+  // pay/receive, never the seller dashboard. An order link still wins (a buyer
+  // who already purchased re-opens their order).
+  const [mode, setMode] = useState<Mode>(
+    initialOrderId || productBuyerId ? "receive" : "send",
+  );
   const [busyAction, setBusyAction] = useState<BusyAction>("idle");
   const [file, setFile] = useState<File | null>(null);
   const [priceZec, setPriceZec] = useState("0.05");
@@ -417,6 +471,17 @@ export function PaidPrivateFilePanel({
   );
   const [shareUrl, setShareUrl] = useState("");
   const [orderInput, setOrderInput] = useState(initialOrderId ?? "");
+  // Multi-buyer "product" model (Phase 3b): the product-buyer view. The listing
+  // is fetched from GET /api/products/[id]; productStatus drives the loading /
+  // sold-out / error states; productBuying tracks the in-flight purchase POST.
+  // Once a purchase succeeds we set loadedOrder and the EXISTING BuyerCheckout
+  // takes over, so none of the pay/receive UI is duplicated.
+  const [productListing, setProductListing] =
+    useState<PublicProductListing | null>(null);
+  const [productStatus, setProductStatus] = useState<
+    "idle" | "loading" | "ready" | "error" | "soldout"
+  >(productBuyerId ? "loading" : "idle");
+  const [productBuying, setProductBuying] = useState(false);
   const [loadedOrder, setLoadedOrder] = useState<TransferPublicOrder | null>(
     null,
   );
@@ -557,6 +622,13 @@ export function PaidPrivateFilePanel({
   const [dashboardDelivering, setDashboardDelivering] = useState<Set<string>>(
     () => new Set(),
   );
+  // Multi-buyer "product" model (Phase 3b): the SEQUENTIAL per-purchase delivery
+  // queue. All product purchases share one ~46 KiB/s Nym gateway, so we deliver
+  // at most ONE at a time: this holds the orderId of the purchase currently being
+  // delivered; the queue starts the next purchase only after this one settles
+  // (ack / fail / timeout). Single-use orders use the independent per-order loops
+  // above and are never placed in this queue.
+  const productDeliveryInFlightRef = useRef<string | null>(null);
   // Buyer auto-download: the object URL we have already auto-saved, so the
   // happy-path programmatic download fires exactly once per decrypted file (a
   // re-render must not re-trigger it). The "Save file" button is always a manual
@@ -570,6 +642,18 @@ export function PaidPrivateFilePanel({
     void loadOrder(initialOrderId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialOrderId]);
+
+  // Multi-buyer "product" model (Phase 3b): when the product-buyer view opens,
+  // fetch the listing so the buyer sees the file name, price, and supply before
+  // buying. Only runs when productBuyerId is set (flag on + initialProductId), so
+  // the single-use buyer flow never hits this endpoint.
+  useEffect(() => {
+    if (!productBuyerId) {
+      return;
+    }
+    void loadProductListing(productBuyerId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productBuyerId]);
 
   // Live preview: as the seller types a viewing key, validate it (debounced) and
   // show the derived receiving address before the shop is created.
@@ -1378,6 +1462,72 @@ export function PaidPrivateFilePanel({
     await loadOrder(orderId);
   }
 
+  // Multi-buyer "product" model (Phase 3b): fetch the buyer-facing product
+  // listing. Maps a 404 / closed product to the error state and an exhausted
+  // limited supply to the sold-out state so the view can hide the Buy button.
+  async function loadProductListing(productId: string) {
+    setErrorMessage("");
+    setProductStatus("loading");
+    try {
+      const res = await fetch(
+        `/api/products/${encodeURIComponent(productId)}`,
+        { method: "GET" },
+      );
+      if (!res.ok) {
+        setProductStatus("error");
+        return;
+      }
+      const body = (await res.json()) as { product: PublicProductListing };
+      setProductListing(body.product);
+      setProductStatus(
+        body.product.soldOut || body.product.status !== "open"
+          ? "soldout"
+          : "ready",
+      );
+    } catch {
+      setProductStatus("error");
+    }
+  }
+
+  // Multi-buyer "product" model (Phase 3b): buy a product. POST the purchase to
+  // spawn a FRESH per-buyer order, then DRIVE THE EXISTING receive flow against
+  // it (loadOrder registers the Nym session + shows the pay QR + receives), so no
+  // pay/receive UI is duplicated here. A sold-out 409 flips the view to sold-out
+  // instead of erroring.
+  async function onBuyProduct(productId: string) {
+    setErrorMessage("");
+    setProductBuying(true);
+    try {
+      const res = await fetch(
+        `/api/products/${encodeURIComponent(productId)}/purchase`,
+        { method: "POST" },
+      );
+      if (res.status === 409) {
+        // Sold out (or closed) between load and buy — refresh the listing so the
+        // view shows the honest sold-out state rather than a raw error.
+        setProductStatus("soldout");
+        await loadProductListing(productId).catch(() => undefined);
+        return;
+      }
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => null);
+        setErrorMessage(
+          extractServerErrorMessage(errorBody, copy.errors.serverError),
+        );
+        return;
+      }
+      const body = (await res.json()) as { order: TransferPublicOrder };
+      // Hand off to the existing buyer receive path: loadOrder sets loadedOrder
+      // + payment + the Nym session and shows the pay QR. The product listing is
+      // cleared from the view (loadedOrder now drives BuyerCheckout).
+      await loadOrder(body.order.orderId);
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    } finally {
+      setProductBuying(false);
+    }
+  }
+
   async function loadOrder(orderId: string) {
     setErrorMessage("");
     setBusyAction("loading");
@@ -1718,6 +1868,22 @@ export function PaidPrivateFilePanel({
     }
   }
 
+  // Multi-buyer "product" model (Phase 3b): resolve the seller release draft for
+  // an order. A PURCHASE (order.productId set) is delivered with the PRODUCT
+  // release draft (one product key serves every purchase — they all share the
+  // same releaseSecretHash), loaded by productId. A single-use order (no
+  // productId) keeps using its per-order draft EXACTLY as before. This is the one
+  // place the source diverges, so every release/re-send path stays unchanged for
+  // single-use orders.
+  function loadReleaseDraftForOrder(
+    order: Pick<TransferPublicOrder, "orderId" | "productId">,
+  ): PaidLinkSellerReleaseDraft | null {
+    if (order.productId) {
+      return loadProductReleaseDraft(order.productId);
+    }
+    return loadSellerReleaseDraft(order.orderId);
+  }
+
   // Seller-side browser-direct Nym send: reuse the shared client bootstrap, then
   // deliver the wrapped key envelope straight to the buyer's Nym address over
   // the mixnet. The SDK exposes client.send({ payload: { message, mimeType },
@@ -1779,15 +1945,20 @@ export function PaidPrivateFilePanel({
   async function sendFileOverNym(input: {
     orderId: string;
     buyerNymAddress: string;
+    // Multi-buyer "product" model (Phase 3b): when set, the ciphertext is the
+    // PRODUCT's (keyed by productId in IndexedDB), shared by every purchase. The
+    // transfer id stays input.orderId so the buyer's per-order receiver matches.
+    productId?: string | null;
   }): Promise<boolean> {
     let ciphertext = sellerCiphertextRef.current.get(input.orderId);
     if (!ciphertext) {
-      // Not in memory (created in a previous session / after a reload). Try the
-      // best-effort IndexedDB store this browser persisted at create time. If
-      // found, repopulate the in-memory ref and proceed with the Nym send.
-      const persisted = await getSellerCiphertext(input.orderId).catch(
-        () => null,
-      );
+      // Not in memory. Source the bytes best-effort from IndexedDB: a PURCHASE
+      // (productId set) reads the shared PRODUCT ciphertext; a single-use order
+      // reads its per-order copy — exactly as before. Repopulate the in-memory
+      // ref under the orderId so a re-send tick reuses it without another read.
+      const persisted = input.productId
+        ? await getProductCiphertext(input.productId).catch(() => null)
+        : await getSellerCiphertext(input.orderId).catch(() => null);
       if (persisted) {
         sellerCiphertextRef.current.set(input.orderId, persisted);
         ciphertext = persisted;
@@ -1859,6 +2030,10 @@ export function PaidPrivateFilePanel({
   function maybeSendFileOverNym(input: {
     orderId: string;
     buyerNymAddress: string;
+    // Multi-buyer "product" model (Phase 3b): present for a purchase. The shared
+    // PRODUCT ciphertext is NEVER deleted on ack (other purchases still need it);
+    // only a single-use order's per-order copy is freed.
+    productId?: string | null;
   }): void {
     if (!browserNymFileTransferEnabled()) {
       return;
@@ -1876,9 +2051,13 @@ export function PaidPrivateFilePanel({
         // Free the in-memory ciphertext AND the persisted copy once the buyer has
         // confirmed receipt so neither is held longer than needed. A failed send
         // keeps both so a later re-send tick (this or a later session) can retry.
+        // A PURCHASE keeps the shared PRODUCT ciphertext (every other purchase of
+        // the product still needs it); we only drop the per-order in-memory copy.
         if (acked) {
           sellerCiphertextRef.current.delete(input.orderId);
-          void deleteSellerCiphertext(input.orderId).catch(() => undefined);
+          if (!input.productId) {
+            void deleteSellerCiphertext(input.orderId).catch(() => undefined);
+          }
         }
       })
       .finally(() => {
@@ -2451,7 +2630,7 @@ export function PaidPrivateFilePanel({
     setReleaseMessage("");
     setBusyAction("release");
     try {
-      const draft = loadSellerReleaseDraft(order.orderId);
+      const draft = loadReleaseDraftForOrder(order);
       if (!draft) {
         throw new Error(
           locale === "pt"
@@ -2504,7 +2683,7 @@ export function PaidPrivateFilePanel({
     setReleaseMessage("");
     setBusyAction("release");
     try {
-      const draft = loadSellerReleaseDraft(order.orderId);
+      const draft = loadReleaseDraftForOrder(order);
       if (!draft) {
         throw new Error(
           locale === "pt"
@@ -2574,9 +2753,12 @@ export function PaidPrivateFilePanel({
           });
           // Browser-to-browser FILE delivery: also stream the encrypted file
           // bytes to the buyer over Nym (single-flight; HTTPS is the fallback).
+          // A purchase passes its productId so the shared PRODUCT ciphertext is
+          // used (and never deleted on ack); a single-use order omits it.
           maybeSendFileOverNym({
             orderId: order.orderId,
             buyerNymAddress: challenge.release.buyerNymAddress,
+            productId: order.productId,
           });
           setReleaseMessage(
             locale === "pt"
@@ -2624,7 +2806,7 @@ export function PaidPrivateFilePanel({
       setBusyAction("release");
     }
     try {
-      const draft = loadSellerReleaseDraft(order.orderId);
+      const draft = loadReleaseDraftForOrder(order);
       if (!draft) {
         throw new Error(
           locale === "pt"
@@ -2661,10 +2843,12 @@ export function PaidPrivateFilePanel({
       });
       // Browser-to-browser FILE delivery alongside the key re-send. Single-flight
       // guarded, so the ~6s re-send loop never starts a second transfer for the
-      // same order; the buyer's HTTPS fallback covers a persistent failure.
+      // same order; the buyer's HTTPS fallback covers a persistent failure. A
+      // purchase passes its productId so the shared PRODUCT ciphertext is used.
       maybeSendFileOverNym({
         orderId: order.orderId,
         buyerNymAddress: challenge.release.buyerNymAddress,
+        productId: order.productId,
       });
       if (!silent) {
         setReleaseMessage(
@@ -2772,9 +2956,12 @@ export function PaidPrivateFilePanel({
     if (sellerScreen !== "files") {
       return;
     }
-    // Candidate orders: paid summaries whose release secret is on this browser.
+    // Candidate orders: paid SINGLE-USE summaries whose per-order release secret
+    // is on this browser. Purchases (file.productId set) are excluded here — they
+    // are delivered by the sequential product-delivery loop using the PRODUCT
+    // draft, so the single-use path is byte-for-byte unchanged.
     const candidates = sellerFiles
-      .filter((file) => file.status === "paid")
+      .filter((file) => file.status === "paid" && !file.productId)
       .map((file) => file.orderId)
       .filter((orderId) => Boolean(loadSellerReleaseDraft(orderId)));
     if (candidates.length === 0) {
@@ -2845,8 +3032,15 @@ export function PaidPrivateFilePanel({
     if (sellerScreen !== "files") {
       return;
     }
+    // Single-use orders only: a purchase (file.productId set) is delivered by the
+    // sequential product-delivery loop, never this per-order re-send loop, so the
+    // single-use behavior is unchanged.
     const candidates = sellerFiles
-      .filter((file) => file.status === "paid" || file.status === "claimed")
+      .filter(
+        (file) =>
+          (file.status === "paid" || file.status === "claimed") &&
+          !file.productId,
+      )
       .map((file) => file.orderId)
       .filter((orderId) => Boolean(loadSellerReleaseDraft(orderId)));
     if (candidates.length === 0) {
@@ -2909,6 +3103,117 @@ export function PaidPrivateFilePanel({
     void resendScan();
     const interval = window.setInterval(() => {
       void resendScan();
+    }, RESEND_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, seller?.sellerId, sellerScreen, sellerFiles]);
+
+  // Multi-buyer "product" model (Phase 3b): the SEQUENTIAL per-purchase delivery
+  // loop. While a logged-in seller sits on the Files screen (flag on), it delivers
+  // the seller's PRODUCT purchases — the orders whose productId matches a product
+  // whose release draft lives in THIS browser — one at a time. All sends share
+  // the same ~46 KiB/s Nym gateway, so running several at once would stall them;
+  // selectNextPurchaseToDeliver enforces one-in-flight and only advances once the
+  // current purchase is acked (or fails/timeouts). Per purchase it reuses the same
+  // release/re-send machinery as single-use orders (onReleaseSellerKey /
+  // onResendKeyOverNym, now product-aware), so the re-send-until-acked behavior is
+  // preserved. Single-use orders are handled by the loops above and never enter
+  // this queue (they have no productId).
+  useEffect(() => {
+    if (!productsEnabled() || mode !== "send" || !seller) {
+      return;
+    }
+    if (sellerScreen !== "files") {
+      return;
+    }
+    // Cheap pre-check: nothing to do unless at least one purchase exists whose
+    // product draft is on this browser. Avoids spinning an interval otherwise.
+    const hasDeliverablePurchase = sellerFiles.some(
+      (file) =>
+        Boolean(file.productId) &&
+        Boolean(loadProductReleaseDraft(file.productId as string)),
+    );
+    if (!hasDeliverablePurchase) {
+      return;
+    }
+
+    let active = true;
+
+    async function deliverNext() {
+      // Pick the single next purchase to deliver (null when one is in flight or
+      // nothing is deliverable). hasReleaseDraft is the localStorage probe.
+      const next = selectNextPurchaseToDeliver({
+        summaries: sellerFiles,
+        inFlightOrderId: productDeliveryInFlightRef.current,
+        hasReleaseDraft: (productId) =>
+          Boolean(loadProductReleaseDraft(productId)),
+      });
+      if (!next || !active) {
+        return;
+      }
+      productDeliveryInFlightRef.current = next.orderId;
+      setDashboardDelivering((current) => {
+        if (current.has(next.orderId)) {
+          return current;
+        }
+        const updated = new Set(current);
+        updated.add(next.orderId);
+        return updated;
+      });
+      try {
+        // Fetch the full order so release.status / buyer key / Nym address are
+        // available (the files summary lacks them).
+        const body = await postJson<{ order: TransferPublicOrder }>(
+          `/api/transfers/${encodeURIComponent(next.orderId)}`,
+          { method: "GET" },
+        );
+        const order = body.order;
+        if (order.delivery.nymSession?.status === "delivered") {
+          // Already acked between the poll and now — clear and let the next tick
+          // pick the following purchase.
+          stopDeliveringIndicator(next.orderId);
+          return;
+        }
+        if (order.release?.status === "seller_pending" && isOrderPaid(order)) {
+          // Not released yet: release (which also fires key + file over Nym).
+          await onReleaseSellerKey(order, { silent: true });
+        } else if (order.release?.status === "ready") {
+          // Released but not acked: re-emit the key + file over Nym.
+          await onResendKeyOverNym(order, { silent: true });
+        }
+      } catch {
+        // Transient failure: the next tick retries this same purchase (it stays
+        // first in the deterministic queue order).
+      } finally {
+        // Free the in-flight slot so the NEXT tick can advance the queue (to this
+        // purchase again if not yet acked, or the following one once it is).
+        if (productDeliveryInFlightRef.current === next.orderId) {
+          productDeliveryInFlightRef.current = null;
+        }
+        if (next.nymSessionStatus === "delivered") {
+          stopDeliveringIndicator(next.orderId);
+        }
+      }
+    }
+
+    function stopDeliveringIndicator(orderId: string) {
+      setDashboardDelivering((current) => {
+        if (!current.has(orderId)) {
+          return current;
+        }
+        const updated = new Set(current);
+        updated.delete(orderId);
+        return updated;
+      });
+    }
+
+    void deliverNext();
+    const interval = window.setInterval(() => {
+      void deliverNext();
     }, RESEND_INTERVAL_MS);
 
     return () => {
@@ -3599,6 +3904,18 @@ export function PaidPrivateFilePanel({
               ) : null}
             </div>
           </section>
+        ) : productBuyerId && !loadedOrder ? (
+          // Multi-buyer "product" model (Phase 3b): the product-buyer view. Shows
+          // the listing + a Buy button until a purchase succeeds; loadOrder then
+          // sets loadedOrder and the BuyerCheckout below takes over the existing
+          // pay/receive flow (no duplicated pay/receive UI).
+          <ProductBuyPanel
+            copy={copy}
+            productStatus={productStatus}
+            listing={productListing}
+            buying={productBuying}
+            onBuy={() => void onBuyProduct(productBuyerId)}
+          />
         ) : (
           <BuyerCheckout
             copy={copy}
@@ -3869,6 +4186,94 @@ function BuyerCheckout({
                 <span className="ppf-buyer-spinner" aria-hidden="true" />
                 <p>{copy.receive.preparingPaymentLabel}</p>
               </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// Multi-buyer "product" model (Phase 3b): the product-buyer listing + Buy
+// button. Shown when a buyer opens a product link (flag on) before they purchase.
+// On Buy the parent POSTs the purchase and drives the EXISTING receive flow, so
+// this panel never renders pay/receive UI — it is replaced by BuyerCheckout the
+// moment loadedOrder is set. Sold-out / closed products hide the Buy button.
+function ProductBuyPanel({
+  copy,
+  productStatus,
+  listing,
+  buying,
+  onBuy,
+}: {
+  copy: PaidPrivateFileCopy;
+  productStatus: "idle" | "loading" | "ready" | "error" | "soldout";
+  listing: PublicProductListing | null;
+  buying: boolean;
+  onBuy: () => void;
+}) {
+  const supplySummary = listing
+    ? listing.supply.mode === "limited"
+      ? copy.productBuy.supplyLimited.replace(
+          "{left}",
+          String(Math.max(0, listing.remainingSupply)),
+        )
+      : copy.productBuy.supplyOpen
+    : "";
+
+  return (
+    <section className="frame zectime-paid-panel surface-reveal">
+      <div className="zectime-paid-panel-copy">
+        <p className="eyebrow">{copy.productBuy.eyebrow}</p>
+        <h2>{copy.productBuy.title}</h2>
+        <p>{copy.productBuy.body}</p>
+        <BrandRail copy={copy} />
+      </div>
+
+      <div className="ppf-buyer ppf-product-buy">
+        {productStatus === "loading" ? (
+          <div className="ppf-buyer-status" role="status">
+            <span className="ppf-buyer-spinner" aria-hidden="true" />
+            <p>{copy.productBuy.loading}</p>
+          </div>
+        ) : productStatus === "error" || !listing ? (
+          <div className="ppf-files-empty">
+            <p className="ppf-files-empty-title">
+              {copy.productBuy.errorTitle}
+            </p>
+            <p className="ppf-muted">{copy.productBuy.errorBody}</p>
+          </div>
+        ) : (
+          <div className="ppf-buyer-stage">
+            <div className="ppf-product-listing">
+              <p className="ppf-file-name">{listing.file.fileName}</p>
+              <p className="ppf-file-price">{listing.price.displayZec} ZEC</p>
+              <p className="ppf-muted">
+                {productStatus === "soldout"
+                  ? copy.productBuy.soldOut
+                  : supplySummary}
+              </p>
+            </div>
+            {productStatus === "soldout" ? (
+              <div
+                className="zectime-paid-warning"
+                role="note"
+                data-tone="warning"
+              >
+                <p className="eyebrow">{copy.productBuy.soldOutTitle}</p>
+                <p>{copy.productBuy.soldOutBody}</p>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="button-primary"
+                onClick={onBuy}
+                disabled={buying}
+              >
+                {buying
+                  ? copy.productBuy.buyingLabel
+                  : copy.productBuy.buyLabel}
+              </button>
             )}
           </div>
         )}
@@ -4186,6 +4591,8 @@ function SellerDashboard({
               locale={locale}
               products={products}
               productsStatus={productsStatus}
+              files={files}
+              deliveringOrderIds={deliveringOrderIds}
             />
           ) : null}
           <SellerFilesList
@@ -4383,22 +4790,41 @@ function FileShareCopyButton({
   );
 }
 
-// Multi-buyer "product" model (Phase 3a): the seller's catalog products in the
+// Multi-buyer "product" model (Phase 3b): the seller's catalog products in the
 // dashboard, clearly labeled and shown above the single-use files. Each row shows
 // the file name + price, a supply summary ("Open" or "3 / 10 sold"), a sold-out
-// badge, and a Copy product-link button. Phase 3b adds per-product PURCHASES
-// (the orders spawned from this product) + per-purchase delivery here.
+// badge, a Copy product-link button, AND the product's PURCHASES — every order
+// whose productId matches, with its delivery status. Delivery itself is automatic
+// (the sequential product-delivery loop); this just surfaces the per-purchase
+// state ("Delivering…" / "Delivered").
 function SellerProductsList({
   copy,
   locale,
   products,
   productsStatus,
+  files,
+  deliveringOrderIds,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
   products: SellerProductSummary[];
   productsStatus: "idle" | "loading" | "ready" | "error";
+  files: SellerFile[];
+  deliveringOrderIds: Set<string>;
 }) {
+  // Group the seller's purchases (orders carrying a productId) by product so each
+  // product row can list its own purchases. Single-use files (no productId) are
+  // ignored here — they render in SellerFilesList unchanged.
+  const purchasesByProduct = new Map<string, SellerFile[]>();
+  for (const file of files) {
+    if (!file.productId) {
+      continue;
+    }
+    const existing = purchasesByProduct.get(file.productId) ?? [];
+    existing.push(file);
+    purchasesByProduct.set(file.productId, existing);
+  }
+
   return (
     <div className="ppf-files ppf-products">
       <p className="eyebrow">{copy.products.listTitle}</p>
@@ -4420,6 +4846,7 @@ function SellerProductsList({
                     .replace("{sold}", String(product.salesCount))
                     .replace("{max}", String(product.supply.max))
                 : copy.products.supplyOpenSummary;
+            const purchases = purchasesByProduct.get(product.productId) ?? [];
             return (
               <li key={product.productId} className="ppf-file-row">
                 <div className="ppf-file-main">
@@ -4446,11 +4873,66 @@ function SellerProductsList({
                     copy={copy}
                   />
                 </div>
+                <ProductPurchasesList
+                  copy={copy}
+                  purchases={purchases}
+                  deliveringOrderIds={deliveringOrderIds}
+                />
               </li>
             );
           })}
         </ul>
       )}
+    </div>
+  );
+}
+
+// Multi-buyer "product" model (Phase 3b): the purchases of a single product. Each
+// purchase shows its delivery status using the same formatFileStatus mapping as
+// the single-use files list, plus a "Delivering over Nym…" hint while it is the
+// purchase currently being delivered by the sequential queue.
+function ProductPurchasesList({
+  copy,
+  purchases,
+  deliveringOrderIds,
+}: {
+  copy: PaidPrivateFileCopy;
+  purchases: SellerFile[];
+  deliveringOrderIds: Set<string>;
+}) {
+  if (purchases.length === 0) {
+    return (
+      <p className="ppf-muted ppf-product-purchases-empty">
+        {copy.purchases.emptyLabel}
+      </p>
+    );
+  }
+  return (
+    <div className="ppf-product-purchases">
+      <p className="ppf-product-purchases-title">
+        {copy.purchases.title.replace("{count}", String(purchases.length))}
+      </p>
+      <ul className="ppf-product-purchases-list">
+        {purchases.map((purchase) => {
+          const delivering = deliveringOrderIds.has(purchase.orderId);
+          return (
+            <li key={purchase.orderId} className="ppf-product-purchase-row">
+              <span className="ppf-status-badge" data-status={purchase.status}>
+                {formatFileStatus(
+                  purchase.status,
+                  copy,
+                  purchase.nymSessionStatus,
+                )}
+              </span>
+              {delivering ? (
+                <span className="ppf-muted ppf-product-purchase-delivering">
+                  {copy.purchases.deliveringLabel}
+                </span>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
