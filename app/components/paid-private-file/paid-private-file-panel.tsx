@@ -1372,22 +1372,31 @@ export function PaidPrivateFilePanel({
     orderId: string,
     keyPair: PaidLinkBuyerKeyPair,
   ): Promise<void> {
-    try {
-      const body = await postJson<{ order: TransferPublicOrder }>(
-        `/api/transfers/${encodeURIComponent(orderId)}/delivered`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
-        },
-      );
-      // Reflect the delivered flag locally so the buyer stepper shows "Done".
-      if (loadedOrder && body.order.orderId === loadedOrder.orderId) {
-        setLoadedOrder(body.order);
-        setPayment(body.order.payment);
+    // RETRY until the server confirms "delivered" — a single best-effort POST
+    // left the seller stuck on "not delivered" forever if that one request
+    // failed (transient/rate-limit). The seller's status only flips when this
+    // ack lands, so it must be reliable. Bounded so it can't loop indefinitely.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const body = await postJson<{ order: TransferPublicOrder }>(
+          `/api/transfers/${encodeURIComponent(orderId)}/delivered`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
+          },
+        );
+        if (loadedOrder && body.order.orderId === loadedOrder.orderId) {
+          setLoadedOrder(body.order);
+          setPayment(body.order.payment);
+        }
+        if (body.order.delivery?.nymSession?.status === "delivered") {
+          return;
+        }
+      } catch {
+        // transient/rate-limited — wait and retry below.
       }
-    } catch {
-      // Best-effort: the seller re-send loop tolerates a missed ack.
+      await new Promise((resolve) => window.setTimeout(resolve, 4000));
     }
   }
 
