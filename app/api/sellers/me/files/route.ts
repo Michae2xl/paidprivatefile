@@ -23,6 +23,10 @@ export async function GET(request: Request) {
       fileName: order.file.fileName,
       displayZec: order.price.displayZec,
       status: order.status,
+      // Status-only delivery flag (no key material). The dashboard badge needs
+      // it to show "Delivered" only after the buyer's pure-Nym ack, not the
+      // moment the buyer merely claimed the ciphertext URL.
+      nymSessionStatus: order.delivery.nymSession?.status ?? null,
       createdAt: order.createdAt,
       sharePath: `/s/${encodeURIComponent(
         seller.handle,

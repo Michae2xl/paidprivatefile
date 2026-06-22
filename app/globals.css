@@ -1085,6 +1085,125 @@ a {
   animation: ppf-spin 0.9s linear infinite;
 }
 
+/* Receiving card wrapper: the spinner status card + the always-on Nym receiver
+   diagnostic stacked together. */
+.ppf-buyer-receiving {
+  display: grid;
+  gap: 10px;
+}
+
+/* Compact, always-visible Nym receiver diagnostic inside the receiving card. */
+.ppf-nym-diag {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-dark);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  font-size: 0.82rem;
+}
+
+.ppf-nym-diag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ppf-nym-diag-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.ppf-nym-diag[data-state="connected"] .ppf-nym-diag-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px rgba(20, 232, 140, 0.18);
+}
+
+.ppf-nym-diag[data-state="connecting"] .ppf-nym-diag-dot {
+  background: #e3b955;
+  box-shadow: 0 0 0 3px rgba(201, 151, 37, 0.18);
+  animation: ppf-diag-pulse 1.1s ease-in-out infinite;
+}
+
+.ppf-nym-diag[data-state="down"] .ppf-nym-diag-dot {
+  background: #e0604e;
+  box-shadow: 0 0 0 3px rgba(224, 96, 78, 0.18);
+}
+
+@keyframes ppf-diag-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ppf-nym-diag[data-state="connecting"] .ppf-nym-diag-dot {
+    animation: none;
+  }
+}
+
+.ppf-nym-diag-state {
+  flex: 1 1 auto;
+  font-weight: 680;
+  color: var(--ink);
+  line-height: 1.3;
+}
+
+.ppf-nym-diag-reconnect {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--line-dark);
+  border-radius: 999px;
+  background: rgba(17, 20, 17, 0.04);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ppf-nym-diag-reconnect:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ppf-nym-diag-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0;
+}
+
+.ppf-nym-diag-meta > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ppf-nym-diag-meta dt {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ppf-nym-diag-meta dd {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 640;
+}
+
+.ppf-nym-diag-meta code {
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
 @keyframes ppf-spin {
   to {
     transform: rotate(360deg);
@@ -2448,6 +2567,16 @@ a {
   border-color: rgba(20, 232, 140, 0.4);
   background: rgba(20, 232, 140, 0.12);
   color: var(--green);
+}
+
+/* A claimed/paid order is NOT "Delivered" until the buyer acks over Nym. While
+   it is still in flight (not acked) keep an amber "in-progress" tone so the
+   green delivered look is reserved for the honest delivered ack. */
+.ppf-status-badge[data-status="claimed"][data-acked="false"],
+.ppf-status-badge[data-status="paid"][data-acked="false"] {
+  border-color: rgba(201, 151, 37, 0.4);
+  background: rgba(201, 151, 37, 0.12);
+  color: #e3b955;
 }
 
 .ppf-status-badge[data-status="payment_pending"] {

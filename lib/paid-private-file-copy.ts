@@ -107,6 +107,12 @@ export interface PaidPrivateFileCopy {
     statusClaimed: string;
     statusDetecting: string;
     statusPaidReady: string;
+    // Delivery is not "Delivered" until the buyer ACKs over Nym
+    // (nymSession.status === "delivered"). Before that, a paid/claimed order is
+    // still in flight: "Awaiting delivery" (released, not yet sent/claimed) and
+    // "Delivering" (claimed, key in transit over Nym, buyer not yet acked).
+    statusAwaitingDelivery: string;
+    statusDelivering: string;
     fileManageLabel: string;
     fileReleaseLabel: string;
     manageTitle: string;
@@ -209,6 +215,11 @@ export interface PaidPrivateFileCopy {
     nymAddressLabel: string;
     reconnectNymLabel: string;
     keepTabOpenHint: string;
+    // Compact diagnostic shown inside the "Receiving your file…" card so the
+    // buyer (and support) can SEE whether the in-browser Nym receiver is live.
+    receiverStatusLabel: string;
+    receiverAddressEmpty: string;
+    receiverEnvelopesLabel: string;
   };
   // Seller status stepper + robust re-send controls.
   sellerStatus: {
@@ -372,6 +383,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       statusClaimed: "Entregue",
       statusDetecting: "Detectando pagamento",
       statusPaidReady: "Pago - pronto para entregar",
+      statusAwaitingDelivery: "Aguardando entrega",
+      statusDelivering: "Entregando",
       fileManageLabel: "Gerenciar",
       fileReleaseLabel: "Liberar chave",
       manageTitle: "Liberar chave do arquivo",
@@ -479,6 +492,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       reconnectNymLabel: "Reconectar Nym",
       keepTabOpenHint:
         "Mantenha esta aba aberta. Se demorar, clique em Reconectar Nym - o vendedor reenvia a chave automaticamente.",
+      receiverStatusLabel: "Receptor Nym",
+      receiverAddressEmpty: "—",
+      receiverEnvelopesLabel: "envelopes",
     },
     sellerStatus: {
       title: "Status da entrega",
@@ -645,6 +661,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       statusClaimed: "Delivered",
       statusDetecting: "Detecting payment",
       statusPaidReady: "Paid - ready to deliver",
+      statusAwaitingDelivery: "Awaiting delivery",
+      statusDelivering: "Delivering",
       fileManageLabel: "Manage",
       fileReleaseLabel: "Release key",
       manageTitle: "Release file key",
@@ -751,6 +769,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       reconnectNymLabel: "Reconnect Nym",
       keepTabOpenHint:
         "Keep this tab open. If it stalls, click Reconnect Nym - the seller re-sends the key automatically.",
+      receiverStatusLabel: "Nym receiver",
+      receiverAddressEmpty: "—",
+      receiverEnvelopesLabel: "envelopes",
     },
     sellerStatus: {
       title: "Delivery status",

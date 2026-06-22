@@ -1,8 +1,11 @@
 // The seller dashboard "YOUR FILES" list and the manage screen both render a
-// per-file status label off a single pure mapper, formatFileStatus(status, copy).
-// These tests pin each summary status to its dashboard copy key (notably: "paid"
-// maps to the "ready to deliver" label, the seller's cue to release the key), and
-// that an unknown status falls back to "Created". No React is involved.
+// per-file status label off a single pure mapper,
+// formatFileStatus(status, copy, nymSessionStatus). These tests pin each summary
+// status to its dashboard copy key. Crucially, "Delivered" must mean the BUYER
+// acked over Nym (nymSession.status === "delivered") — NOT the moment the buyer
+// merely claimed the ciphertext URL. So a claimed/released order that has not
+// been acked reads "Delivering" / "Awaiting delivery", and only the delivered
+// ack maps to "Delivered". No React is involved.
 
 import { describe, expect, it } from "vitest";
 
@@ -18,7 +21,9 @@ const copy = {
     statusPaymentPending: "PENDING",
     statusPaid: "PAID",
     statusPaidReady: "PAID_READY",
-    statusClaimed: "CLAIMED",
+    statusClaimed: "DELIVERED",
+    statusAwaitingDelivery: "AWAITING_DELIVERY",
+    statusDelivering: "DELIVERING",
   },
 } as unknown as PaidPrivateFileCopy;
 
@@ -31,12 +36,28 @@ describe("formatFileStatus", () => {
     expect(formatFileStatus("payment_pending", copy)).toBe("PENDING");
   });
 
-  it("maps 'paid' to the ready-to-deliver label (not the bare 'Paid')", () => {
+  it("maps 'paid' (not released) to the ready-to-deliver label", () => {
     expect(formatFileStatus("paid", copy)).toBe("PAID_READY");
   });
 
-  it("maps 'claimed' to the delivered label", () => {
-    expect(formatFileStatus("claimed", copy)).toBe("CLAIMED");
+  it("maps 'paid' once the key is released + sending to 'Awaiting delivery'", () => {
+    expect(formatFileStatus("paid", copy, "queued")).toBe("AWAITING_DELIVERY");
+    expect(formatFileStatus("paid", copy, "ready_for_delivery")).toBe(
+      "AWAITING_DELIVERY",
+    );
+  });
+
+  it("maps 'claimed' but NOT yet acked to 'Delivering' (not 'Delivered')", () => {
+    expect(formatFileStatus("claimed", copy)).toBe("DELIVERING");
+    expect(formatFileStatus("claimed", copy, "queued")).toBe("DELIVERING");
+  });
+
+  it("maps 'claimed' + delivered ack to the delivered label", () => {
+    expect(formatFileStatus("claimed", copy, "delivered")).toBe("DELIVERED");
+  });
+
+  it("maps 'paid' + delivered ack to the delivered label", () => {
+    expect(formatFileStatus("paid", copy, "delivered")).toBe("DELIVERED");
   });
 
   it("falls back to the created label for an unknown status", () => {

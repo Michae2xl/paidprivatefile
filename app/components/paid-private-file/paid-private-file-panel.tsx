@@ -152,6 +152,11 @@ interface SellerFile {
   fileName: string;
   displayZec: string;
   status: TransferPublicOrder["status"];
+  // Pure-Nym delivery state for this order. Drives the honest file badge: only a
+  // "delivered" ack means "Delivered"; before that a claimed/released order is
+  // still "Delivering"/"Awaiting delivery". Optional so older API responses (and
+  // orders with no session yet) degrade to the bare status label.
+  nymSessionStatus?: string | null;
   createdAt: string;
   sharePath: string;
 }
@@ -352,8 +357,16 @@ export function PaidPrivateFilePanel({
   // overlap the next interval) and tracks the orderId the loop is bound to.
   const resendInFlightRef = useRef(false);
   const [addressCopied, setAddressCopied] = useState(false);
+  // Count of Nym envelopes this receiver has decoded this session — a visible
+  // signal in the "Receiving your file…" card that envelopes are actually
+  // landing (vs. the receiver never hearing anything). Incremented for every
+  // inbound text message the buyer handler is invoked with.
+  const [nymEnvelopesReceived, setNymEnvelopesReceived] = useState(0);
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
+  // Guards the buyer heartbeat so a slow (re)bootstrap / re-register tick cannot
+  // overlap the next interval and double-start the Nym client.
+  const buyerHeartbeatInFlightRef = useRef(false);
   const autoReleaseRef = useRef(false);
   const buyerAutoClaimRef = useRef(false);
   // Idempotency for the Nym receive handler: the seller re-sends the same key
@@ -927,6 +940,7 @@ export function PaidPrivateFilePanel({
     pendingDownloadRef.current = null;
     buyerReceivedRef.current = false;
     buyerAutoDownloadedRef.current = "";
+    setNymEnvelopesReceived(0);
 
     try {
       const body = await postJson<{ order: TransferPublicOrder }>(
@@ -1003,8 +1017,15 @@ export function PaidPrivateFilePanel({
   async function registerBuyerNymSession(
     order: TransferPublicOrder,
     keyPair: PaidLinkBuyerKeyPair,
+    // Optional explicit address: the heartbeat passes the address it just got
+    // back from startBrowserNym() so re-registration uses the LIVE receiver
+    // address without waiting for the buyerNymAddress state closure to refresh.
+    explicitNymAddress?: string,
   ): Promise<void> {
-    const nymAddress = buyerNymAddress.trim() || (await startBrowserNym());
+    const nymAddress =
+      explicitNymAddress?.trim() ||
+      buyerNymAddress.trim() ||
+      (await startBrowserNym());
     await postJson<{ order: TransferPublicOrder }>(
       `/api/transfers/${encodeURIComponent(order.orderId)}/nym-session`,
       {
@@ -1232,6 +1253,11 @@ export function PaidPrivateFilePanel({
   }
 
   async function handleNymTextMessage(payload: string): Promise<void> {
+    // Diagnostic: count EVERY inbound envelope (even ones we then ignore as
+    // duplicates) so the "Receiving your file…" card can show envelopes are
+    // actually reaching this receiver — proving the listener is wired up.
+    setNymEnvelopesReceived((count) => count + 1);
+
     // Idempotency: the seller re-sends the same envelope until the buyer ACKs.
     // Ignore further envelopes ONLY once the file is actually in hand this
     // session (downloadUrl / buyerReceivedRef) or the ack confirmed receipt
@@ -1941,6 +1967,101 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, loadedOrder?.orderId, downloadUrl]);
 
+  // BUYER HEARTBEAT — the robust pure-Nym self-heal. The likely failure mode is
+  // ADDRESS DRIFT: the seller re-reads order.delivery.nymSession.buyerNymAddress
+  // on every re-send, but the buyer's receiver can rotate to a new gateway/
+  // address (or never finish bootstrapping), so the seller keeps sending to a
+  // stale address while the live receiver listens elsewhere. While the order is
+  // paid-but-not-done, every ~8s we (a) ensure the receiver is alive and
+  // (b) RE-REGISTER the buyer's CURRENT live Nym address with the order so the
+  // seller's next re-send lands. Bounded by a single in-flight guard; tears down
+  // the moment the file is in hand (downloadUrl) or the buyer acked
+  // (nymSession "delivered"). Claim-on-demand, ack-retry and the idempotency
+  // gate (downloadUrl / buyerReceivedRef / nymSession delivered) are untouched.
+  useEffect(() => {
+    if (mode !== "receive" || !loadedOrder) {
+      return;
+    }
+    const paid = isOrderPaid(loadedOrder);
+    const delivered = loadedOrder.delivery.nymSession?.status === "delivered";
+    // Only run for a paid order whose file has NOT arrived and is NOT acked.
+    if (!paid || downloadUrl || delivered) {
+      return;
+    }
+    // Capture a non-null reference so the async closure does not have to re-narrow
+    // loadedOrder (it can flip to null on unmount between ticks).
+    const order = loadedOrder;
+    const orderId = order.orderId;
+    let active = true;
+
+    async function heartbeat() {
+      if (!active || buyerHeartbeatInFlightRef.current) {
+        return;
+      }
+      // Re-check the live latches: a download/ack may have landed between ticks.
+      if (downloadUrl || buyerReceivedRef.current) {
+        return;
+      }
+      buyerHeartbeatInFlightRef.current = true;
+      try {
+        // (a) Ensure the receiver is alive. If we have no client at all, or the
+        // last bootstrap errored / never started, (re)bootstrap it. startBrowserNym
+        // subscribes the inbound handler and updates buyerNymAddress + nymStatus,
+        // and returns the LIVE receiver address.
+        let liveAddress = "";
+        if (
+          !browserNymClientRef.current ||
+          nymStatus === "error" ||
+          nymStatus === "idle"
+        ) {
+          liveAddress = await startBrowserNym();
+        }
+        if (!active) {
+          return;
+        }
+        // (b) Re-register the buyer's CURRENT live Nym address with the order so
+        // order.delivery.nymSession.buyerNymAddress always equals the address
+        // this receiver is actually listening on. Passing the just-bootstrapped
+        // address avoids a stale-state closure registering an old address. This
+        // is the address-drift fix: the seller re-reads this on every re-send.
+        const keyPair = loadBuyerKeyPair(orderId);
+        if (keyPair) {
+          await registerBuyerNymSession(
+            order,
+            keyPair,
+            liveAddress || undefined,
+          );
+        }
+      } catch {
+        // Transient bootstrap/registration failures are non-fatal; the next tick
+        // retries. The visible receiver status surfaces a persistent failure.
+      } finally {
+        buyerHeartbeatInFlightRef.current = false;
+      }
+    }
+
+    // Fire once immediately so a freshly-paid order re-registers without waiting
+    // a full interval, then every ~8s.
+    void heartbeat();
+    const interval = window.setInterval(() => {
+      void heartbeat();
+    }, 8000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    mode,
+    loadedOrder?.orderId,
+    loadedOrder?.payment?.status,
+    loadedOrder?.status,
+    loadedOrder?.delivery.nymSession?.status,
+    downloadUrl,
+    nymStatus,
+  ]);
+
   // Buyer auto-claim: once the seller releases the key (release "ready") for a
   // paid order, fetch + decrypt + auto-download automatically so the buyer never
   // touches a button — this is the dead-simple happy path. openClaimPayload sets
@@ -2453,6 +2574,9 @@ export function PaidPrivateFilePanel({
             busyAction={busyAction}
             isBusy={isBusy}
             nymMessage={nymMessage}
+            nymStatus={nymStatus}
+            nymEnvelopesReceived={nymEnvelopesReceived}
+            onReconnectNym={() => void startBrowserNym()}
             buyerNymAddress={buyerNymAddress}
             onBuyerNymAddressChange={setBuyerNymAddress}
             showManualNymAddress={showManualNymAddress}
@@ -2496,6 +2620,9 @@ function BuyerCheckout({
   busyAction,
   isBusy,
   nymMessage,
+  nymStatus,
+  nymEnvelopesReceived,
+  onReconnectNym,
   buyerNymAddress,
   onBuyerNymAddressChange,
   showManualNymAddress,
@@ -2516,6 +2643,9 @@ function BuyerCheckout({
   busyAction: BusyAction;
   isBusy: boolean;
   nymMessage: string;
+  nymStatus: BrowserNymStatus;
+  nymEnvelopesReceived: number;
+  onReconnectNym: () => void;
   buyerNymAddress: string;
   onBuyerNymAddressChange: (value: string) => void;
   showManualNymAddress: boolean;
@@ -2609,20 +2739,31 @@ function BuyerCheckout({
               </div>
             ) : phase === "in-transit" ? (
               // Dead-simple buyer: payment is confirmed and the file has NOT
-              // arrived yet. A single "Receiving your file…" spinner card — no
-              // stepper, no Nym-health row, and crucially NO Download button
-              // (the auto-claim + auto-download fire on their own once the
-              // package lands over Nym).
-              <div
-                className="ppf-buyer-status"
-                data-tone="transit"
-                role="status"
-              >
-                <span className="ppf-buyer-spinner" aria-hidden="true" />
-                <div>
-                  <p className="eyebrow">{copy.receive.receivingTitle}</p>
-                  <p>{copy.receive.receivingBody}</p>
+              // arrived yet. A single "Receiving your file…" spinner card, plus
+              // an ALWAYS-VISIBLE compact Nym receiver diagnostic so the buyer
+              // (and support) can SEE whether the in-browser receiver is live and
+              // on which address — and reconnect it. The auto-claim + auto-
+              // download still fire on their own once the package lands over Nym.
+              <div className="ppf-buyer-receiving">
+                <div
+                  className="ppf-buyer-status"
+                  data-tone="transit"
+                  role="status"
+                >
+                  <span className="ppf-buyer-spinner" aria-hidden="true" />
+                  <div>
+                    <p className="eyebrow">{copy.receive.receivingTitle}</p>
+                    <p>{copy.receive.receivingBody}</p>
+                  </div>
                 </div>
+                <NymReceiverDiagnostic
+                  copy={copy}
+                  nymStatus={nymStatus}
+                  buyerNymAddress={buyerNymAddress}
+                  nymEnvelopesReceived={nymEnvelopesReceived}
+                  onReconnectNym={onReconnectNym}
+                  isBusy={isBusy}
+                />
               </div>
             ) : phase === "awaiting-payment" && payment?.paymentAddress ? (
               <div className="ppf-buyer-pay">
@@ -2714,6 +2855,79 @@ function BuyerCheckout({
         )}
       </div>
     </section>
+  );
+}
+
+// Compact, ALWAYS-VISIBLE Nym receiver diagnostic for the "Receiving your file…"
+// card. Shows whether the in-browser receiver is connected (mapped from the
+// BrowserNymStatus state), the buyer's short live Nym address, the count of
+// envelopes seen this session, and a Reconnect button. This is what makes the
+// receiver state observable in a screenshot — if delivery stalls, the buyer can
+// SEE whether the receiver is even connecting.
+function NymReceiverDiagnostic({
+  copy,
+  nymStatus,
+  buyerNymAddress,
+  nymEnvelopesReceived,
+  onReconnectNym,
+  isBusy,
+}: {
+  copy: PaidPrivateFileCopy;
+  nymStatus: BrowserNymStatus;
+  buyerNymAddress: string;
+  nymEnvelopesReceived: number;
+  onReconnectNym: () => void;
+  isBusy: boolean;
+}) {
+  // Map the raw receiver state to a layperson connection state + a tone for the
+  // status dot. "ready"/"waiting" = connected; "starting" = connecting;
+  // "idle"/"error" = not connected.
+  const connectionState: "connected" | "connecting" | "down" =
+    nymStatus === "ready" || nymStatus === "waiting"
+      ? "connected"
+      : nymStatus === "starting"
+        ? "connecting"
+        : "down";
+  const stateLabel =
+    connectionState === "connected"
+      ? copy.buyerStatus.nymConnected
+      : connectionState === "connecting"
+        ? copy.buyerStatus.nymConnecting
+        : copy.buyerStatus.nymNotConnected;
+  const address = buyerNymAddress.trim();
+  const shortAddress = address
+    ? shortNymAddress(address)
+    : copy.buyerStatus.receiverAddressEmpty;
+
+  return (
+    <div className="ppf-nym-diag" data-state={connectionState} role="status">
+      <div className="ppf-nym-diag-row">
+        <span className="ppf-nym-diag-dot" aria-hidden="true" />
+        <span className="ppf-nym-diag-state">
+          {copy.buyerStatus.receiverStatusLabel}: {stateLabel}
+        </span>
+        <button
+          type="button"
+          className="ppf-nym-diag-reconnect"
+          onClick={onReconnectNym}
+          disabled={isBusy}
+        >
+          {copy.buyerStatus.reconnectNymLabel}
+        </button>
+      </div>
+      <dl className="ppf-nym-diag-meta">
+        <div>
+          <dt>{copy.buyerStatus.nymAddressLabel}</dt>
+          <dd>
+            <code>{shortAddress}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{copy.buyerStatus.receiverEnvelopesLabel}</dt>
+          <dd>{nymEnvelopesReceived}</dd>
+        </div>
+      </dl>
+    </div>
   );
 }
 
@@ -3026,8 +3240,14 @@ function SellerFilesList({
                   ) : null}
                 </div>
                 <div className="ppf-file-side">
-                  <span className="ppf-status-badge" data-status={file.status}>
-                    {formatFileStatus(file.status, copy)}
+                  <span
+                    className="ppf-status-badge"
+                    data-status={file.status}
+                    data-acked={
+                      file.nymSessionStatus === "delivered" ? "true" : "false"
+                    }
+                  >
+                    {formatFileStatus(file.status, copy, file.nymSessionStatus)}
                   </span>
                   <button
                     type="button"
@@ -3159,8 +3379,16 @@ function SellerManageScreen({
       </div>
       <div className="ppf-manage-status">
         <span className="ppf-muted">{copy.dashboard.manageStatusLabel}</span>
-        <span className="ppf-status-badge" data-status={order.status}>
-          {formatFileStatus(order.status, copy)}
+        <span
+          className="ppf-status-badge"
+          data-status={order.status}
+          data-acked={delivered ? "true" : "false"}
+        >
+          {formatFileStatus(
+            order.status,
+            copy,
+            order.delivery.nymSession?.status,
+          )}
         </span>
       </div>
 
@@ -3319,14 +3547,41 @@ function SellerSettingsScreen({
 export function formatFileStatus(
   status: TransferPublicOrder["status"],
   copy: PaidPrivateFileCopy,
+  nymSessionStatus?: string | null,
 ): string {
+  // Honest delivery label: "Delivered" must mean the BUYER actually ACKed the
+  // file over Nym (nymSession.status === "delivered"). A "claimed" order only
+  // means the buyer fetched the signed ciphertext URL — the key may still be in
+  // flight and the buyer may not have opened anything. So a claimed/paid order
+  // that has not been acked reads "Delivering" / "Awaiting delivery", and only
+  // the delivered ack maps to "Delivered".
+  const acked = nymSessionStatus === "delivered";
+  // The seller's browser has released + started sending the key once the nym
+  // session has advanced past its initial "waiting for payment" state.
+  const releasedAndSending =
+    nymSessionStatus === "ready_for_delivery" ||
+    nymSessionStatus === "queued" ||
+    nymSessionStatus === "sent_nym_client";
   switch (status) {
     case "payment_pending":
       return copy.dashboard.statusPaymentPending;
     case "paid":
+      if (acked) {
+        return copy.dashboard.statusClaimed;
+      }
+      // Key released and being sent over Nym, but the buyer has not claimed yet:
+      // it is in flight, not "ready to deliver" anymore.
+      if (releasedAndSending) {
+        return copy.dashboard.statusAwaitingDelivery;
+      }
+      // Not released yet: the seller's cue that the file is ready to deliver.
       return copy.dashboard.statusPaidReady;
     case "claimed":
-      return copy.dashboard.statusClaimed;
+      // Buyer ran their claim but has not yet acked: the key is in transit over
+      // Nym, so show "Delivering" — not the misleading "Delivered".
+      return acked
+        ? copy.dashboard.statusClaimed
+        : copy.dashboard.statusDelivering;
     case "created":
     default:
       return copy.dashboard.statusCreated;
