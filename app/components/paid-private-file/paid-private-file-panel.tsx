@@ -48,6 +48,7 @@ interface PaidPrivateFilePanelProps {
   locale: ProductLocale;
   copy: PaidPrivateFileCopy;
   initialOrderId?: string | null;
+  initialSeller?: SellerProfile | null;
   backHref?: string;
   backLabel?: string;
 }
@@ -297,6 +298,7 @@ export function PaidPrivateFilePanel({
   locale,
   copy,
   initialOrderId,
+  initialSeller,
   backHref = "/",
   backLabel,
 }: PaidPrivateFilePanelProps) {
@@ -306,11 +308,17 @@ export function PaidPrivateFilePanel({
   const [priceZec, setPriceZec] = useState("0.05");
   const [sellerPayoutAddress, setSellerPayoutAddress] = useState("");
   const [sellerNote, setSellerNote] = useState("");
-  const [seller, setSeller] = useState<SellerProfile | null>(null);
-  // Until loadSellerSession resolves we don't know if this visitor is a
-  // logged-in seller. Render a neutral splash instead of flashing the logged-out
-  // start screen on every refresh.
-  const [sellerSessionChecked, setSellerSessionChecked] = useState(false);
+  const [seller, setSeller] = useState<SellerProfile | null>(
+    initialSeller ?? null,
+  );
+  // The page resolves the session server-side (from the cookie) and passes
+  // initialSeller — the seller, or null when logged out. When that happened we
+  // already know the auth state on the first paint, so the dashboard/start
+  // screen renders directly with NO loading splash and no flash on refresh. The
+  // splash + client-side check is only a fallback for when the prop is omitted.
+  const [sellerSessionChecked, setSellerSessionChecked] = useState(
+    initialSeller !== undefined,
+  );
   const [sellerAuthMode, setSellerAuthMode] =
     useState<SellerAuthMode>("create");
   // Seller shop: one screen at a time (no stacking). Two tabs — Files and
@@ -581,7 +589,9 @@ export function PaidPrivateFilePanel({
     if (savedPrice) {
       setPriceZec(savedPrice);
     }
-    void loadSellerSession();
+    if (initialSeller === undefined) {
+      void loadSellerSession();
+    }
 
     return () => {
       browserNymUnsubscribeRef.current?.();
