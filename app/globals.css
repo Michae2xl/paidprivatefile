@@ -2331,6 +2331,14 @@ a {
 
 .ppf-shop-cta {
   flex: none;
+  background: var(--green);
+  color: #04130b;
+  border-color: var(--green);
+  font-weight: 700;
+}
+
+.ppf-shop-cta:hover {
+  filter: brightness(1.06);
 }
 
 .ppf-shop-actions {

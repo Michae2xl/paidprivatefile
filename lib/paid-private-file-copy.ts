@@ -302,7 +302,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       backLabel: "Paid Private File",
     },
     tabs: {
-      send: "Enviar arquivo",
+      send: "Painel",
       receive: "Abrir link",
     },
     brand: {
@@ -600,7 +600,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       backLabel: "Paid Private File",
     },
     tabs: {
-      send: "Send file",
+      send: "Dashboard",
       receive: "Open link",
     },
     brand: {
