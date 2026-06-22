@@ -1,459 +1,227 @@
-# Paid Private File Architecture
+# Paid Private File — Architecture
 
 ## Goal
 
-Paid Private File is a paid private file-delivery system:
+Paid Private File is a **non-custodial marketplace** for selling a single file:
 
-> ZEC payment unlocks private Nym delivery. The file opens only locally.
+> Pay in ZEC to an address derived from the seller's own account. The decryption key and the encrypted file are delivered browser-to-browser over the Nym mixnet. The file is decrypted only on the buyer's device.
 
-The core invariant is simple: payment unlocks a private Nym delivery session, and the AES file key is held only by the seller's browser. The server stores ciphertext and payment metadata, but it never holds, wraps, or sees the file key. After payment, the seller's browser wraps the key for the buyer and releases only that buyer-bound envelope, which the API then delivers inside a Nym session.
+Two invariants drive the whole design:
 
-This is **pure seller-held custody**: there is no server-held key path. Orders are created with a `release_secret_hash` only (the SHA-256 of a random release secret). The seller browser keeps the raw `file_key` and `release_secret` in a local vault and is the only party that can produce the wrapped key envelope. The tradeoff is that the seller must be online (the tab open) to release the key after payment; the panel auto-releases on payment confirmation and also offers a manual "Release key" button.
+1. **Non-custodial payment.** The seller's spending keys never leave their wallet. The platform holds only a view-only Unified Full Viewing Key (UFVK) and can never spend. Each order is paid to a unique address derived from that UFVK, so funds go straight to the seller's own account.
+2. **End-to-end encryption.** The file is AES-256-GCM encrypted in the seller's browser before upload. The server only ever holds ciphertext it cannot read — it has neither the AES file key nor the buyer's private key. The key and file reach the buyer over Nym and are decrypted locally.
 
-## Components
+This is **pure seller-held key custody**. Orders are created with a `release_secret_hash` only (the SHA-256 of a random 32-byte secret). The seller browser keeps the raw `file_key` and `release_secret` locally and is the only party that can produce the buyer-wrapped key envelope. The tradeoff: the seller must keep the tab open after payment to release the key and stream the file.
 
-```txt
-Browser client
-  - creates or logs into a no-email seller workspace
-  - encrypts seller file before upload
-  - generates buyer key pair
-  - auto-detects buyer Nym/local receiver when available
-  - decrypts file locally after Nym delivery
-
-Transfer API
-  - creates seller workspaces
-  - authenticates seller sessions with handle + access key
-  - creates file orders
-  - stores ciphertext
-  - exposes public order metadata
-  - creates payment intents
-  - records buyer public key on the payment intent
-  - discloses the buyer public key to the seller only after payment
-  - stores the seller-released buyer-wrapped key envelope (never the file key)
-  - requires Nym delivery session before claim
-  - queues the seller-released wrapped key envelope after payment
-
-Transfer store
-  - persists order JSON
-  - persists encrypted file bytes
-  - indexes invoice ids
-  - signs short-lived download tokens
-
-Payment adapter
-  - creates CipherPay invoices when configured
-  - falls back to local dev invoices otherwise
-  - parses payment webhook payloads
-
-Nym transport adapter
-  - core component
-  - receives or detects buyer Nym address/session
-  - sends wrapped key over standalone nym-client WebSocket after payment
-  - keeps a local outbox fallback for tests and development
-  - optionally transfers encrypted file chunks over Nym
-
-CipherPay webhook
-  - verifies optional webhook signature
-  - maps invoice id to order id
-  - marks order paid
-```
-
-## Where Nym Enters
-
-Nym is not a payment rail and not a storage layer. It is the private delivery transport after the ZEC payment is confirmed.
-
-The architecture has three layers:
+## The three services and their boundaries
 
 ```txt
-Zcash / CipherPay
-  payment confirmation
+Next.js app (this repo, Railway, /data volume)
+  - no-email seller shops (handle + access key) and public routes /s/<handle>
+  - file orders + ciphertext storage (encrypted bytes only, never the file key)
+  - per-order deposit-address derivation (calls the scanner)
+  - payment-intent creation; records the buyer public key on the intent
+  - signed watchlist + signed payment webhook (HMAC)
+  - buyer/seller UI (browser crypto, browser Nym client)
+  - status-only delivery acknowledgement
+  - COOP/COEP headers so the browser Nym WASM client can run (next.config.ts)
 
-Paid Private File API
-  order state, ciphertext metadata, key-release policy
+Rust scanner (ppf-scanner, its own service + /data volume)
+  - SOLE holder of seller UFVKs, AES-256-GCM encrypted at rest
+  - HMAC-authed HTTP API: /validate, /sellers/register, /derive, /health
+  - confirmed-block scan loop: view-only note detection via lightwalletd gRPC
+  - mempool watcher: 0-conf "payment detected" sightings (GetMempoolStream)
+  - posts the signed payment webhook back to the app
+  - librustzcash stack (zcash_client_backend / zcash_keys / zcash_primitives)
 
-Nym
-  private delivery of the wrapped key or encrypted file chunks
+Nym mixnet (browser WASM SDK)
+  - browser-to-browser delivery of BOTH the wrapped key and the encrypted file
 ```
 
-### Core MVP: Nym Claim Mode
+The app never sees a seller's viewing key after registration — it holds only an opaque `scanRef` issued by the scanner, the derived per-order deposit addresses, and a UFVK fingerprint. The scanner never sees plaintext files, order prices beyond the watchlist amount, or buyer keys. Neither service can spend ZEC.
 
-In the core MVP, the encrypted file can still be stored in object storage, but the sensitive claim payload is delivered through Nym:
+## Where Nym enters — THE KEY CHANGE
+
+In earlier versions Nym carried only the wrapped key (`nym-claim-v1`), and the encrypted file was always fetched over HTTPS. **Now both the wrapped decryption key and the encrypted file are delivered browser-to-browser over the mixnet, seller browser → buyer browser.** HTTPS is retained only as an automatic fallback.
+
+Transport modes still labelled in the order state:
+
+- `nym-claim-v1` — the wrapped key envelope rides the mixnet.
+- `nym-transfer-v1` — the encrypted file itself rides the mixnet (the chunked transfer below).
+
+Browser-direct delivery requires no server-side `nym-client`: the seller browser and buyer browser each run `@nymproject/sdk-full-fat` and talk to each other through the mixnet directly. The server never relays the key in this path.
+
+## Order state machine
 
 ```txt
-buyer local receiver
-  -> browser reads receiver address automatically when helper is available
-  -> API stores claim session
-  -> payment confirmed
-  -> API wraps file key to buyer public key
-  -> API sends wrapped key envelope over Nym
-  -> buyer decrypts file locally
+created -> payment_pending -> paid -> claimed
 ```
 
-This mode hides the key-release delivery metadata while keeping the MVP practical. Signed HTTP file URLs are treated as development fallback, not the product privacy model.
+- `created` — seller uploaded ciphertext + metadata.
+- `payment_pending` — a buyer created a payment intent (and a per-order deposit address was bound).
+- `paid` — the payment confirmed on-chain at `>= min confirmations`.
+- `claimed` — the buyer claimed (browser-direct Nym mode marks claimed and returns the signed ciphertext URL; the key + file then transit the mixnet).
 
-Transport label:
+A claim before `paid`, before a registered Nym session, or before the seller has released the key returns `payment_required`. A 0-conf sighting records `detectedAt` and the onchain txid for the "Payment detected" UI but never flips status to paid — release stays gated on the confirmed transition.
+
+## Non-custodial payment: per-order address derivation
+
+On payment-intent creation, when `PAID_PRIVATE_FILE_ZCASH_ONCHAIN=1` and the order's seller has a registered UFVK (`scanRef`):
+
+1. The app asks the scanner for the next diversifier index for the seller and calls `POST /derive` (`{ scanRef, diversifierIndex }`) on the scanner.
+2. The scanner decrypts the UFVK in memory, derives a **diversified Unified Address**, validates it independently, and returns `{ address, actualIndex }` — never the UFVK.
+3. The app binds that address to the order (`deposit-bindings`) so the webhook can later map a deposit back to this order, and returns the address to the buyer.
+
+If the seller has no UFVK, the app falls back to the legacy pre-registered global address pool (back-compat single-seller path; not removed).
+
+## View-only payment detection (the scanner)
+
+The scanner runs two loops against hosted lightwalletd over gRPC+TLS:
+
+- **Confirmed-block scan loop** (`scanloop`): pulls the app's signed watchlist (one entry per open `payment_pending` order with a UFVK binding, carrying only the opaque `scanRef`, deposit address, diversifier index, start height, and amount). It groups entries by `scanRef`, resolves each to the stored UFVK, scans compact blocks from `min(startHeight)` to the chain tip, attributes received notes to watched diversified addresses by recipient byte-compare, and — for any note meeting `confirmations >= min` and `value >= order amount` — POSTs the signed webhook.
+- **Mempool watcher** (`mempool`): subscribes to `CompactTxStreamer.GetMempoolStream`, parses each full transaction (`Transaction::read`), and trial-decrypts its shielded outputs against the same watched UFVKs (`zcash_client_backend::decrypt_transaction`). On a match it POSTs the **same** signed webhook with `confirmations: 0` so the buyer sees "Payment detected" instantly. Detection only — it never settles, dedups on `(orderId, txid)`, and never inflates the confirmation count.
+
+The scanner is the sole holder of seller UFVKs (AES-256-GCM encrypted at rest under `PPF_SCANNER_UFVK_KEY`). It can detect payments but can never spend.
+
+## Webhook / scanner HMAC contract
+
+Three HMAC-SHA256 crossings, each over the raw request body, compared timing-safe:
+
+- **App → scanner** (`/validate`, `/sellers/register`, `/derive`): header `x-ppf-scanner-sig`, secret `PPF_SCANNER_SECRET`. A missing/invalid signature returns 401.
+- **Scanner → app watchlist pull** (`POST /api/transfers/payments/zcash/watchlist`): header `x-zcash-signature`, secret `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`. Returns the deposit addresses + `scanRef`s for open orders. The watchlist drops orders older than its TTL (24h) so abandoned orders stop being scanned.
+- **Scanner → app payment webhook** (`POST /api/webhooks/zcash`): header `x-zcash-signature` (optional `sha256=` prefix accepted), secret `PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET`. If the secret is unset the endpoint rejects (never silently accepts).
+
+Webhook body: `{ receivingAddress, amountZats, txid, confirmations, sellerId? }`.
+
+Settlement rules in the webhook handler:
+
+- Map `receivingAddress` → order; it must match `payment.receivingAddress` (else reject).
+- If `sellerId` is present it must match the order's seller, else respond `200 { ok: true, ignored: true, reason: "seller_mismatch" }` (a 200 ignore, not an error, so a diverged/stale binding doesn't spam logs — the order simply never settles).
+- `amountZats < order price` → `200 { ok: true, ignored: true, reason: "underpayment" }`.
+- `confirmations < min` → record an unconfirmed sighting (`markTransferDetectedOnchain`, stamps `detectedAt`), respond `200 { ok: true, detected: true }`. Does NOT settle.
+- `amountZats >= price` AND `confirmations >= min` → `markTransferPaidOnchain` (records `payment.onchain = { txid, amountZats, confirmations, paidAt }`, flips to `paid`, runs the Nym-session readiness transition).
+- Replaying the same `txid` after settlement is idempotent; a paid/claimed order never regresses.
+
+`min` = `PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS` (default 10).
+
+## Seller-held key custody
 
 ```txt
-nym-claim-v1
+random file_key -> AES-256-GCM -> encrypted file   (in the seller browser)
 ```
 
-### Stronger Mode: Nym Transfer Mode
+1. The seller browser encrypts the file, derives a random `release_secret`, and uploads the ciphertext + IV + `release_secret_hash`. The raw `file_key` and `release_secret` stay in a local seller vault (localStorage). The create route requires `releaseSecretHash` (64-hex) and rejects any uploaded `fileKey`.
+2. The buyer pays; the payment intent records the buyer's P-256 public key (`buyerPublicKeyJwk`) on the order.
+3. The seller browser calls `POST /api/transfers/:orderId/key-release`. The release challenge discloses the buyer public key only once payment is confirmed. The seller browser derives an ECDH wrapping key (P-256), wraps `file_key` for the buyer (`p256-ecdh-aes-gcm-v1`), and posts back the envelope.
+4. Release is **monotonic** — once an envelope is stored it cannot be replaced (a second release, or release after claim, is rejected), so a leaked `release_secret` cannot swap the file after the sale.
 
-In a later phase, Nym can carry the encrypted file itself:
+Scheme labels: `aes-256-gcm-v1` (file), `p256-ecdh-aes-gcm-v1` (key envelope).
+
+## Nym browser-to-browser key + file delivery
+
+Gated by `PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1` (server) and `NEXT_PUBLIC_PPF_BROWSER_NYM=1` (client). File-over-Nym is additionally gated by `NEXT_PUBLIC_PPF_BROWSER_NYM_FILE` (on by default when browser-nym is on).
+
+### Key delivery
+
+- The buyer browser runs an in-page Nym receiver and registers its `buyerNymAddress` via `POST /api/transfers/:orderId/nym-session`.
+- The seller browser releases the key (server POST kept for the record + monotonic guard), reads `release.buyerNymAddress` from the challenge, and sends `{ schema: "paidprivatefile.nym.claim.v1", orderId, keyEnvelope }` to that address with the SDK's `client.send({ payload: { message, mimeType: "application/json" }, recipient })`.
+- `POST /api/transfers/:orderId/claim` returns `deliveryMode: "browser-nym"` with the signed ciphertext `download` URL **and no `keyEnvelope`** (it does not queue server-side Nym delivery). The key transits the mixnet.
+
+### File delivery — the chunked transfer protocol (`lib/nym-file-transfer.ts`)
+
+A clean-room, framework-agnostic reliable-bytes layer over the SDK's binary `rawSend` / `subscribeToRawMessageReceivedEvent`. It does no key agreement (the bytes are already AES-256-GCM ciphertext and the buyer is already authenticated by the ECDH key envelope) — it is purely a reliable transport.
+
+- **Framing.** Every packet is a 48-byte header (`magic "NF"`, version, type, 32-byte orderId, `seq`, `total`, `payloadLength`) plus payload. Types: `Offer`, `Chunk`, `Ack`, `Retransmit`, `Done`.
+- **Chunking.** 32 KiB application chunks (`DEFAULT_CHUNK_SIZE`). The `Offer` carries `{ size, sha256, chunkSize, senderAddress }`.
+- **Rate pacing.** ~48 KiB/s (`DEFAULT_RATE_BYTES_PER_SEC`) via an inter-chunk sleep, because the Nym gateway drains ~46 KiB/s; unpaced sends were observed to hang.
+- **Reorder buffer.** The receiver stores chunks in a `Map<seq, bytes>` and reassembles order-independently.
+- **Selective retransmit / ARQ.** After a silence gap (`DEFAULT_GAP_TIMEOUT_MS = 30s`), or immediately on `Done`, the receiver sends a `Retransmit{seq}` for its first missing chunk to the sender's address. The sender re-streams that chunk plus a small forward window (`DEFAULT_RETRANSMIT_WINDOW = 4`), single-flight so overlapping requests are coalesced rather than self-amplifying.
+- **Integrity.** A SHA-256 over the whole ciphertext is pinned in the `Offer` and re-verified after reassembly, and also checked against the order's `encryptedFileSha256`. A mismatch rejects.
+- **Completion.** On a verified reassembly the receiver sends `Ack`; the sender's `done()` resolves on the Ack (with an ack timeout). The receiver has its own overall ceiling (`overallTimeoutMs`, default 600s).
+
+On the buyer side, the reassembled-and-verified ciphertext is decrypted with the key envelope received over the Nym **text** channel, reusing the exact same crypto path as the HTTPS claim — so the file opens locally either way.
+
+### HTTPS fallback
+
+The encrypted file is also uploaded to the server, so if the Nym file transfer stalls the buyer can fetch it over HTTPS via a short-lived signed URL (HMAC token, 10-min TTL) and decrypt locally. The fallback is a **no-progress stall timer** (~90s, `BROWSER_NYM_FILE_FALLBACK_MS`): it is re-armed on every receive-progress event, so a healthy-but-slow large transfer is never yanked off the Nym path mid-flight; it only aborts to HTTPS on a genuine stall. A provenance badge records the actual path: `received over Nym (mixnet)` vs `received over HTTPS (Nym fallback)`.
+
+## Reliability mechanisms
+
+- **Seller re-send-until-acked.** While the seller dashboard (or manage screen) is open for a released, undelivered order whose secret this browser holds, the seller browser re-emits the wrapped key and re-streams the file every ~6s, up to a cap (~2 min), stopping the instant the buyer's ack flips the Nym session to `delivered`. Driven by both the manage screen and the dashboard files poll, so delivery completes with the seller just sitting on the dashboard.
+- **Buyer self-healing receiver.** A heartbeat re-bootstraps the Nym client and re-registers the live Nym address if the connection drops. A no-rotate guard prevents the client from rotating gateways (and orphaning in-flight chunks) mid-transfer.
+- **Claim-on-demand.** The buyer can claim/re-claim at any point after payment; the signed ciphertext URL is refreshed if a stashed one expired.
+- **Status-only delivery ack.** `POST /api/transfers/:orderId/delivered` carries only the buyer public key (same auth as claim) plus `via: "nym" | "https"` — never key material. It flips the Nym session to `delivered` and records the delivery path. The buyer retries it until the server confirms.
+- **IndexedDB ciphertext persistence** (`lib/seller-ciphertext-store.ts`). Best-effort: the seller's encrypted bytes are persisted by orderId so file-over-Nym survives a reload/new session; any IndexedDB failure transparently degrades to in-memory + HTTPS fallback. Deleted once the buyer acks.
+- **Progress-aware HTTPS fallback.** Re-armed on transfer progress (see above).
+- **`Cache-Control: no-store`** on the `/paid-private-file` document (`next.config.ts`) so the dynamic page never serves stale JS chunks after a deploy. Hashed `/_next/static` chunks stay immutable-cached.
+- **Watchlist TTL.** Pending orders older than 24h drop off the scan watchlist.
+- **Webhook seller-mismatch → 200 ignored** (above), so a stale binding never spams error logs.
+- **Per-order write lock** + atomic JSON writes in the transfer store.
+
+## API surface
 
 ```txt
-payment confirmed
-  -> encrypted file split into chunks
-  -> chunks sent over Nym service-provider session
-  -> buyer reassembles ciphertext
-  -> buyer unwraps key
-  -> local decrypt
+POST  /api/transfers                          create order (requires releaseSecretHash; rejects fileKey)
+GET   /api/transfers/:orderId                 public order
+POST  /api/transfers/:orderId/payment-intent  bind buyer key; derive/bind deposit address; return payment
+POST  /api/transfers/:orderId/nym-session     register buyer Nym address + key
+POST  /api/transfers/:orderId/key-release     status / release (seller releaseSecret, monotonic)
+POST  /api/transfers/:orderId/claim           claim (paid + Nym session required)
+GET   /api/transfers/:orderId/file?token=...  signed ciphertext download (HTTPS fallback)
+POST  /api/transfers/:orderId/delivered       status-only delivery ack (via: nym | https)
+POST  /api/transfers/:orderId/dev-pay         dev-only payment confirmation
+POST  /api/transfers/payments/zcash/addresses register legacy address pool (pool secret)
+POST  /api/transfers/payments/zcash/watchlist signed watchlist for the scanner (pool secret)
+POST  /api/webhooks/zcash                     signed payment webhook (webhook secret)
+POST  /api/sellers                            create shop (handle, displayName, ufvk)
+GET   /api/seller-session  POST /api/seller-session  DELETE
+GET   /api/sellers/me   PATCH /api/sellers/me
+POST  /api/sellers/me/ufvk   GET /api/sellers/me/files
+POST  /api/zcash/ufvk-preview                 live UFVK validation + derived address
 ```
 
-Transport label:
+## Storage layout
 
 ```txt
-nym-transfer-v1
+$PAID_PRIVATE_FILE_RUNTIME_DIR/paid-transfers/
+  orders/<orderId>/order.json        order state (no file key, no plaintext)
+  orders/<orderId>/encrypted.bin     AES-256-GCM ciphertext (HTTPS fallback source)
+  invoice-index/<hash>.json          invoice -> order mapping
+  deposit-pool/...                   legacy pre-registered address pool (zcash-onchain)
+  + per-order UFVK deposit bindings
 ```
 
-This gives stronger network metadata privacy but needs file-size limits, retries, chunk integrity checks, and reliability testing.
+The scanner stores the encrypted UFVK store under `PPF_SCANNER_DATA_DIR` (default `/data`). Both are file stores adequate for the current scale; production-scale durability would move to object storage + a transactional database.
 
-## Order State Machine
+## Trust boundaries — who holds what
 
-```txt
-created
-  -> payment_pending
-  -> paid
-  -> claimed
-```
+| Party          | Holds                                                                                                                                            | Cannot                                                                                                         |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Seller browser | raw `file_key`, `release_secret`, plaintext file, encrypted bytes for streaming                                                                  | —                                                                                                              |
+| Buyer browser  | buyer P-256 private key, decrypted file (local only)                                                                                             | spend; produce the key without the envelope                                                                    |
+| App server     | ciphertext, key envelope (server-relayed paths), order metadata, buyer public key, Nym addresses, view-only-derived deposit addresses, `scanRef` | decrypt the file (no file key); read the key envelope (no buyer private key); spend (no spending key, no UFVK) |
+| Scanner        | seller UFVKs (encrypted at rest)                                                                                                                 | spend; see plaintext files or buyer keys                                                                       |
+| Nym mixnet     | encrypted packets in transit                                                                                                                     | read content; learn the network path                                                                           |
 
-State definitions:
+### Threat model and its limit
 
-- `created`: seller uploaded ciphertext and metadata.
-- `payment_pending`: buyer created a payment intent.
-- `paid`: payment provider confirmed payment.
-- `claimed`: buyer successfully received a wrapped file key.
+Seller-held custody protects the key against an **honest-but-curious server**: in normal operation the server only stores `release_secret_hash` and an opaque client-produced ECDH envelope it cannot decrypt (it has no buyer private key) — it never holds the raw `file_key`.
 
-The API must reject key claims before `paid`, and also before the seller has released the key (claim returns `payment_required` while `release.status` is `seller_pending`).
+It is **not** unconditionally trustless. The server is the source of the buyer public key the seller wraps to. A **malicious or compromised server (or a MITM on the seller's session)** could substitute its own P-256 key in the release challenge; the seller would then wrap `file_key` to it, letting the attacker recover the plaintext key.
 
-## Seller-Side Flow
+Mitigation — out-of-band buyer-key verification. `fingerprintPaidLinkPublicKey` derives a short, human-comparable code from a P-256 public key. The buyer panel shows the buyer's own code; the seller release panel shows the code of the buyer key in the release challenge.
 
-```txt
-File
-  -> AES-256-GCM encryption in browser
-  -> ciphertext SHA-256
-  -> local timestamp commitment
-  -> POST /api/transfers
-  -> order id + private access link
-```
+- **Verified path (strong):** manual release is gated behind a checkbox the seller checks only after comparing the displayed buyer code with the code the buyer shared out-of-band. A substituted key yields a different code and is caught.
+- **Unverified path (convenience default):** auto-release on payment trusts the server-provided buyer key without the out-of-band check. It is the default for the seller-online flow.
 
-The seller submits:
+UI copy is scoped accordingly: the server is _not given the key directly_, rather than an absolute "never receives it."
 
-- encrypted file bytes
-- original filename
-- MIME type
-- original size
-- ciphertext hash
-- encryption IV
-- file key for server-side wrapping in older prototype deployments
-- release_secret_hash in seller-held deployments
-- ZEC amount in zatoshis
-- seller payout Unified Address
-- optional seller id and public handle from the no-email seller session
-- optional seller note
-- optional timestamp receipt
+## Production hardening
 
-## Buyer-Side Flow
-
-```txt
-Private link
-  -> GET /api/transfers/:orderId
-  -> generate buyer P-256 key pair
-  -> auto-detect or register buyer Nym address/session
-  -> POST /api/transfers/:orderId/payment-intent
-  -> pay invoice
-  -> POST /api/transfers/:orderId/claim
-  -> receive wrapped file key over Nym
-  -> retrieve ciphertext
-  -> decrypt locally
-```
-
-The browser stores the buyer private key locally for that order so the API can wrap the file key to the buyer public key.
-
-## Key Handling
-
-File encryption:
-
-```txt
-random file key -> AES-256-GCM -> encrypted file
-```
-
-Key release:
-
-```txt
-buyer public key
-  -> seller or server derives wrapping key through ECDH
-  -> seller or server wraps file key
-  -> buyer unwraps locally
-```
-
-Current scheme labels:
-
-```txt
-aes-256-gcm-v1
-p256-ecdh-aes-gcm-v1
-```
-
-## Payment Model
-
-The seller payout address is part of the transfer order. A payment intent uses that address as the intended ZEC recipient.
-
-The app should present this as a ZEC payment flow. CipherPay is an internal payment rail for invoice creation and webhook confirmation, not user-facing product language.
-
-### Real on-chain ZEC mode (`zcash-onchain`)
-
-`PAID_PRIVATE_FILE_ZCASH_ONCHAIN=1` swaps the payment rail for real on-chain deposits. The flag-off path is byte-for-byte the existing dev/CipherPay behavior.
-
-Trust model and topology (same shape as the CipherPay webhook — an HMAC-authenticated local reporter):
-
-```txt
-local side (next to Zallet wallet, keys never leave)
-  - pool filler: generates unique Unified Addresses, registers them in prod
-  - payment watcher: detects an incoming deposit, signs a "paid" report
-
-prod (no wallet, no keys)
-  - holds an available pool of deposit addresses
-  - assigns one per order on payment-intent (payment.receivingAddress)
-  - on a signed, verified report -> marks the order paid
-```
-
-Two signed crossings, both HMAC-SHA256 over the raw request body in `x-zcash-signature` (optional `sha256=` prefix), timing-safe:
-
-- `POST /api/transfers/payments/zcash/addresses` — body `{ addresses: string[] }`, signed with `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`. Addresses are validated as Unified Addresses (`u1.../utest.../uregtest...`), deduped, and stored as available. Secret unset -> rejected.
-- `POST /api/webhooks/zcash` — body `{ receivingAddress, amountZats, txid, confirmations }`, signed with `PAID_PRIVATE_FILE_ZCASH_WEBHOOK_SECRET`. Secret unset -> rejected.
-
-Each payment intent pops one free address, binds it to the order as `payment.receivingAddress`, and returns it to the buyer with provider label `zcash-onchain`. Empty pool -> a clear error ("No deposit address available; try again shortly").
-
-Webhook settlement rules:
-
-- map `receivingAddress` -> order, confirm it matches `payment.receivingAddress` (else reject).
-- `amountZats >= order amountZats` AND `confirmations >= PAID_PRIVATE_FILE_ZCASH_MIN_CONFIRMATIONS` (default 10) -> mark paid, record `payment.onchain = { txid, amountZats, confirmations, paidAt }`, run the same nym-session readiness transition as the other paid paths.
-- under-payment or under-confirmation -> `200 { ok: true, ignored: true, reason }` without settling, so the watcher retries as confirmations grow (never an error).
-- replaying the same `txid` after paid is idempotent; a paid/claimed order never regresses.
-
-Watcher detail (Zallet `0.1.0-alpha.3`): `z_listunspent` does **not** return a per-note receiving address, so the watcher cannot read the address off a note. Instead it pulls the live deposit addresses from a third signed endpoint — `POST /api/transfers/payments/zcash/watchlist` (signed with `PAID_PRIVATE_FILE_ZCASH_POOL_SECRET`; returns the addresses assigned to pending orders) — and queries `z_listunspent(0, 9999999, true, [address])` once per watched address; any unspent notes are aggregated (sum value, min confirmations) and reported to the webhook above. Deposit addresses are diversified Unified Addresses of a single Zallet account (`z_getaddressforaccount`), so no per-order account is required. The local bridge scripts are `scripts/zallet-pool-filler.mjs` and `scripts/zallet-payment-watcher.mjs` (see `scripts/README-zallet.md`).
-
-## Seller Workspaces
-
-Seller accounts are intentionally no-email in the prototype:
-
-```txt
-handle + one-time access key -> signed seller session cookie
-```
-
-The public seller route is:
-
-```txt
-/s/:handle
-/s/:handle/files/:orderId
-```
-
-The access key is shown once and only its SHA-256 hash is stored. This keeps onboarding simple and close to a wallet-style flow, but production should add passkeys, wallet-signed login, key rotation, and recovery.
-
-Production source of truth:
-
-```txt
-CipherPay invoice/webhook -> paid order -> key claim allowed
-```
-
-Development source of truth:
-
-```txt
-POST /api/transfers/:orderId/dev-pay -> paid order
-```
-
-The dev payment endpoint is blocked in production unless explicitly enabled.
-
-## API Surface
-
-```txt
-POST /api/transfers
-GET  /api/transfers/:orderId
-POST /api/transfers/:orderId/payment-intent
-POST /api/transfers/:orderId/nym-session
-POST /api/transfers/:orderId/key-release
-POST /api/transfers/:orderId/claim
-GET  /api/transfers/:orderId/file?token=...
-POST /api/transfers/:orderId/dev-pay
-POST /api/transfers/payments/zcash/addresses
-POST /api/webhooks/cipherpay
-POST /api/webhooks/zcash
-POST /api/sellers
-GET  /api/seller-session
-POST /api/seller-session
-GET  /api/sellers/me
-PATCH /api/sellers/me
-```
-
-`POST /api/transfers` requires `releaseSecretHash` (64-char hex) and rejects any `fileKey` field.
-
-Nym session request:
-
-```json
-{
-  "buyerNymAddress": "nym...",
-  "transport": "nym-claim-v1",
-  "buyerPublicKeyJwk": {}
-}
-```
-
-### Seller key release: `POST /api/transfers/:orderId/key-release`
-
-Two actions on one endpoint, both authenticated with the seller `releaseSecret` (the base64 32-byte secret whose SHA-256 is the stored `release_secret_hash`; compared timing-safely).
-
-Status (no `action`, or `action: "status"`):
-
-```json
-{ "releaseSecret": "<base64-32>" }
-```
-
-returns the release challenge:
-
-```json
-{
-  "order": { "...": "public order" },
-  "release": {
-    "status": "waiting_for_buyer | waiting_for_payment | ready_to_release | released",
-    "buyerPublicKeyHash": "<hex|null>",
-    "buyerPublicKeyJwk": { "...": "P-256 JWK, only when paid" },
-    "buyerNymAddress": "<nym address|null, only when paid + Nym session registered>",
-    "releasedAt": "<iso|null>"
-  }
-}
-```
-
-`buyerPublicKeyJwk` is disclosed only once the order is `paid`. `buyerNymAddress` is disclosed only when the order is `paid` **and** the buyer has registered a Nym session; it tells the seller browser where to send the wrapped key envelope in browser-direct Nym mode (see below). Release (`action: "release"`):
-
-```json
-{
-  "action": "release",
-  "releaseSecret": "<base64-32>",
-  "keyEnvelope": { "scheme": "p256-ecdh-aes-gcm-v1", "...": "..." }
-}
-```
-
-stores the buyer-wrapped envelope and returns the challenge with `status: "released"`. Release requires `payment.status === "paid"`; otherwise it returns `payment_required`.
-
-## Storage Layout
-
-Default local runtime root:
-
-```txt
-$PAID_PRIVATE_FILE_RUNTIME_DIR
-```
-
-Order storage:
-
-```txt
-paid-transfers/
-  orders/
-    <orderId>/
-      order.json
-      encrypted-file.bin
-  invoice-index/
-    <invoiceId>.json
-  deposit-pool/
-    pool.json
-```
-
-`deposit-pool/pool.json` (zcash-onchain mode only) holds the available/assigned Unified Address pool, written atomically under an in-process lock like the order store. It maps each deposit address to the order it was assigned to, which is how the webhook resolves an incoming deposit back to an order.
-
-This local file store is enough for prototype and testnet flows. Production should move this to durable object storage plus transactional metadata storage.
-
-## Privacy Boundaries
-
-Server may see:
-
-- ciphertext
-- encrypted file digest
-- original filename
-- original file size
-- seller payout address
-- order id
-- payment status
-- timestamp commitment
-
-Server never sees:
-
-- plaintext file bytes
-- the AES file key (`file_key`)
-- the seller release secret (`release_secret`)
-- buyer decrypted output
-- buyer private key
-
-Key custody is **pure seller-held**. There is no `wrapFileKey` path on the server and no `encryption.fileKey` field in `order.json`. Order creation requires `release_secret_hash` and explicitly rejects any uploaded `fileKey`. The flow is:
-
-1. Seller browser encrypts the file, derives a random `release_secret`, and uploads only `release_secret_hash` plus the ciphertext and IV. The raw `file_key` and `release_secret` are saved in a local seller vault (localStorage key `zectime_paid_link_seller_release_<orderId>`).
-2. Buyer pays. The payment intent records the buyer P-256 public key (`buyerPublicKeyJwk`) on the order.
-3. Seller browser calls the key-release endpoint, which discloses the buyer public key only once payment is confirmed, wraps `file_key` for that buyer with ECDH-ES, and posts the envelope back.
-4. On claim, the API returns the seller-released envelope (server-relayed / dev modes) or, in browser-direct Nym mode, only the signed ciphertext URL while the key envelope arrives over the mixnet (see below). If the seller has not released yet, claim fails with `payment_required` ("Seller key release is pending for this paid private file").
-
-Key release is **monotonic**: once an envelope is released it cannot be replaced (`releaseTransferKey` rejects a second release or release after claim), so a leaked `release_secret` cannot swap the file for a buyer after the sale.
-
-Nym is used to deliver the seller-wrapped key envelope privately after payment.
-
-### Browser-direct Nym key delivery (`PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1`)
-
-The fully private transport runs **browser-to-browser over the mixnet with no server `nym-client`**. Gated behind `PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1` (server) and `NEXT_PUBLIC_PPF_BROWSER_NYM=1` (client); when off, behavior is unchanged.
-
-- The buyer browser already runs an in-page Nym receiver (`@nymproject/sdk-full-fat`) and registers its `buyerNymAddress` via `POST /api/transfers/:orderId/nym-session`.
-- The seller browser releases the key as usual, reads `release.buyerNymAddress` from the release challenge, and sends `{ schema: "paidprivatefile.nym.claim.v1", orderId, keyEnvelope }` to that address with the SDK `client.send({ payload: { message, mimeType: "application/json" }, recipient })`. The server-side `key-release` POST is still made (record + monotonic guard), but the key transits the mixnet directly — the server never relays it.
-- `POST /api/transfers/:orderId/claim` returns `deliveryMode: "browser-nym"` with the signed `download` URL **and no `keyEnvelope`**. The server does **not** call `queueNymDelivery`. The claim still requires `paid` + a buyer-key binding + a registered Nym session.
-- The buyer stashes the `download` URL, shows an "awaiting key over Nym" state, and on the inbound Nym message reconstructs the manifest from its loaded order, fetches the ciphertext, unwraps the key with its private key, and decrypts locally.
-
-This is the only path where the key envelope actually transits the mixnet without a server-side Nym client. The legacy `nym` mode (server WebSocket `nym-client`) and `http-dev-fallback` mode remain for environments where the flags are off.
-
-### Threat model and its limit (important)
-
-Seller-held custody removes the server's access to the key **against an honest-but-curious server**: in normal operation the server only ever stores `release_secret_hash` and an opaque, client-produced ECDH envelope it cannot decrypt (it has no buyer private key). It does NOT hold the raw `file_key` at rest, in memory, or in logs.
-
-It is **not** unconditionally trustless. The server is the source of the buyer public key that the seller wraps to. A **malicious or compromised server (or a MITM on the seller's session)** can substitute its own P-256 public key in the release challenge; the seller browser would then wrap `file_key` to it, letting the server decrypt and recover the plaintext key (then re-wrap to the real buyer).
-
-**Buyer-key authentication is now available** via an out-of-band verification code. `fingerprintPaidLinkPublicKey` derives a short, human-comparable fingerprint (e.g. `A1B2-C3D4-E5F6-7890-1234`) deterministically from a P-256 public key. The buyer panel shows the buyer's OWN public-key fingerprint as a "Verification code"; the seller release panel shows the fingerprint of the buyer key returned in the release challenge ("Buyer code"). Compared out-of-band, a mismatch detects a substituted key because a different key yields a different code.
-
-- **Verified path (strong):** the seller uses **manual release** — the release button is gated behind a confirmation checkbox ("I verified this code with the buyer") that the seller can only honestly check after comparing the displayed buyer code with the code the buyer shared out-of-band. This defeats server key substitution.
-- **Unverified path (convenience default):** **auto-release** on payment confirmation still trusts the server-provided buyer key without out-of-band verification. It is the default for the seller-online flow and is not blocked; the panel notes that strong verification requires the manual path.
-
-UI copy is scoped accordingly: the server is _not given the key directly_, rather than an absolute "never receives it" claim.
-
-## Production Hardening
-
-Required before real production:
-
-- durable encrypted object storage
-- authenticated seller sessions
-- seller payout address validation
-- strict webhook verification
-- payment confirmation/finality policy
-- object retention and deletion policy
-- max file size enforcement at edge/proxy
-- malware/abuse response policy for ciphertext storage
-- audit logs without leaking file metadata
-- key escrow redesign or short-lived key handling
-- buyer recovery UX for lost local browser key
-- Nym client/service-provider deployment
-- Nym message retry and delivery receipts
-- Nym transfer size limits and chunk integrity
-
-## Extraction Boundary
-
-This repository owns only:
-
-- paid file UI
-- file encryption/decryption client code
-- transfer APIs
-- transfer storage
-- CipherPay adapter
-- webhook handling
-- architecture and product docs
-
-It does not own the broader ZK Global Credit ecosystem, voting, identity, credit passport, or timestamp product surfaces.
+- Strong `PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET` and `PAID_PRIVATE_FILE_AUTH_SECRET` (they fall back to public dev defaults).
+- Durable storage for orders/ciphertext (mounted volume → object storage + transactional metadata).
+- Seller key-vault recovery (a lost `release_secret` means the key can never be released).
+- Buyer browser-key recovery UX.
+- Payment finality policy; abuse/retention policy for stored ciphertext.
+- Operational monitoring of the scanner, the mixnet path, and delivery success rates.
+- Stronger seller account security (passkeys / wallet-signed login) beyond the one-time access key.

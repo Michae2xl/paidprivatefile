@@ -1,108 +1,87 @@
 # Nym Integration
 
-Nym is the core private transport layer for Paid Private File.
+Nym is the private delivery transport for Paid Private File. **Both the wrapped decryption key and the encrypted file are delivered browser-to-browser over the Nym mixnet** (seller browser → buyer browser), after the ZEC payment is confirmed.
 
-It should not handle payment and it should not be treated as permanent storage. Zcash/CipherPay handles payment confirmation. Paid Private File handles encryption, order state, and key-release policy. Nym hides network metadata when the claim payload or encrypted file is delivered.
+Nym is not a payment rail and not storage. Zcash + the view-only scanner handle payment confirmation; the app handles encryption, order state, and key-release policy; Nym hides the network metadata of the key and file delivery.
 
-## Core Target
+This is a change from earlier versions: Nym used to carry only the wrapped key, and the encrypted file was always fetched over HTTPS. Now the file rides the mixnet too, with HTTPS retained only as an automatic fallback.
 
-The first required transport mode is `nym-claim-v1`.
+## Transport modes
+
+- `nym-claim-v1` — the wrapped P-256 ECDH key envelope rides the mixnet (Nym **text** channel).
+- `nym-transfer-v1` — the AES-256-GCM encrypted file itself rides the mixnet (the chunked binary transfer below).
+
+In the production path both run together: the seller browser sends the key envelope over the text channel and streams the encrypted file over the binary channel to the same buyer Nym address.
+
+## Browser-to-browser delivery (no server nym-client)
+
+The fully private path runs entirely between the two browsers, each running `@nymproject/sdk-full-fat`. No server-side `nym-client` is involved; the server never relays the key.
+
+Gated by:
 
 ```txt
-Buyer
-  runs local receiver helper
-  page detects Nym address automatically
-  creates buyer public key
-  sends both to /api/transfers/:orderId/nym-session
-
-API
-  stores Nym claim session
-  waits for payment confirmation
-  wraps file key to buyer public key
-  sends wrapped key envelope through Nym
-
-Buyer
-  receives key envelope locally
-  downloads ciphertext
-  decrypts file locally
+PAID_PRIVATE_FILE_BROWSER_NYM_DELIVERY=1   # server: claim returns deliveryMode "browser-nym", no key over HTTP
+NEXT_PUBLIC_PPF_BROWSER_NYM=1              # client: browser-direct key delivery
+NEXT_PUBLIC_PPF_BROWSER_NYM_FILE          # client: file-over-Nym (on by default when browser-nym is on; =0 forces HTTPS-only)
 ```
 
-This keeps bandwidth low and makes the product usable before full file transport over Nym is mature. HTTP delivery is only a development fallback; the product privacy model is Nym delivery.
+The browser Nym WASM client needs cross-origin isolation (SharedArrayBuffer / threaded workers), so the app sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` (see `next.config.ts`). Without these the receiver cannot start.
+
+### Flow
+
+```txt
+Buyer browser
+  starts an in-page Nym receiver, polls selfAddress() until the gateway handshake completes
+  registers buyerNymAddress via POST /api/transfers/:orderId/nym-session
+  pays in ZEC
+
+Payment confirmed (scanner -> signed webhook -> order paid)
+
+Seller browser (tab must stay open)
+  releases the key (server POST kept for record + monotonic guard)
+  reads release.buyerNymAddress from the release challenge
+  KEY:  client.send({ payload: { message: { schema, orderId, keyEnvelope }, mimeType: "application/json" }, recipient })
+  FILE: streams the encrypted ciphertext over rawSend (chunked transfer below)
+
+Buyer browser
+  receives the key envelope on the text channel
+  reassembles + SHA-256-verifies the file on the binary channel
+  decrypts locally with the buyer's private key + the key envelope
+  POST /api/transfers/:orderId/delivered  (status only, via: nym)
+```
+
+`POST /api/transfers/:orderId/claim` in this mode returns `deliveryMode: "browser-nym"` with the signed ciphertext `download` URL **and no `keyEnvelope`** — the key transits the mixnet, and the URL is only the HTTPS fallback source.
+
+## The chunked file transfer (`lib/nym-file-transfer.ts`)
+
+A clean-room reliable-bytes layer over the SDK's binary `rawSend` / `subscribeToRawMessageReceivedEvent`. It does no key agreement (the bytes are already encrypted and the buyer is already authenticated by the key envelope) — purely reliable transport.
+
+- **Framing:** 48-byte header (`magic "NF"`, version, type, 32-byte orderId, `seq`, `total`, `payloadLength`) + payload. Types: `Offer`, `Chunk`, `Ack`, `Retransmit`, `Done`.
+- **Chunks:** 32 KiB application chunks.
+- **Pacing:** ~48 KiB/s, because the Nym gateway drains ~46 KiB/s (unpaced sends were observed to hang).
+- **Reorder buffer:** chunks reassembled order-independently from a `Map<seq, bytes>`.
+- **ARQ:** after a 30s silence gap (or immediately on `Done`), the receiver requests its first missing chunk; the sender re-streams it plus a small forward window (4), single-flight.
+- **Integrity:** SHA-256 over the whole ciphertext, pinned in the `Offer`, re-verified after reassembly and checked against the order's `encryptedFileSha256`.
+- **Completion:** verified reassembly → `Ack` → sender's `done()` resolves. Sender has an ack timeout; receiver has an overall ceiling (~600s).
+
+## HTTPS fallback
+
+The encrypted file is also uploaded to the server, so the buyer can fetch it over HTTPS (a short-lived HMAC-signed URL) and decrypt locally if the Nym transfer stalls. The fallback is a **no-progress stall timer** (~90s) that is re-armed on every receive-progress event — a healthy slow large transfer keeps re-arming and is never yanked off the Nym path; only a genuine stall aborts to HTTPS. Decryption stays local in both paths.
+
+A provenance badge records the actual path: **"received over Nym (mixnet)"** vs **"received over HTTPS (Nym fallback)"**, and the buyer's delivery ack carries `via: "nym" | "https"` so the seller dashboard shows it too.
+
+> Note on the badge: when only the key envelope rode the mixnet but the file bytes were fetched over the signed HTTPS URL, that is classified as an HTTPS delivery. Only the path where the file is reassembled over the mixnet (the binary transfer) is classified "nym".
 
 ## Buyer UX
 
-The buyer should not need to understand Nym during the normal path:
+The buyer should not need to understand Nym in the normal path:
 
 ```txt
-Open private link
-  -> local receiver detected
-  -> Pay in ZEC
-  -> Download and open locally
+Open the link -> a private receiver is set up automatically -> pay in ZEC -> the file arrives and opens locally
 ```
 
-Manual Nym address entry is a fallback only. In the integrated site
-implementation, the page calls the local bridge `/address` endpoint to fill the
-receiver before creating the ZEC payment.
+Manual Nym address entry exists only as a fallback.
 
-## Implemented `nym-claim-v1` Path
+## Legacy adapters
 
-The backend supports two delivery adapters:
-
-- `NYM_CLIENT_ENDPOINT` set: send through a standalone `nym-client` WebSocket.
-- `NYM_CLIENT_ENDPOINT` unset: write to the local `nym-outbox` for tests and local development.
-
-For a real claim test, run `nym-client` next to the web server:
-
-```bash
-nym-client init --id paidprivatefile-backend
-nym-client run --id paidprivatefile-backend
-```
-
-The standalone client exposes a WebSocket on `ws://127.0.0.1:1977`. Configure:
-
-```txt
-NYM_CLIENT_ENDPOINT=ws://127.0.0.1:1977
-PAID_PRIVATE_FILE_REQUIRE_NYM_DELIVERY=1
-```
-
-When Nym delivery is required, `/api/transfers/:orderId/claim` returns only order state and a Nym delivery receipt. The wrapped key envelope and signed ciphertext URL are sent inside the Nym payload:
-
-```json
-{
-  "schema": "paidprivatefile.nym.claim.v1",
-  "orderId": "pl_...",
-  "manifest": {},
-  "keyEnvelope": {},
-  "encryptedFileDownload": {
-    "url": "/api/transfers/pl_.../file?token=...",
-    "expiresAt": "..."
-  }
-}
-```
-
-The buyer browser starts its own Nym receiver through the TypeScript SDK, registers the returned Nym address on the order, waits for this payload, fetches the ciphertext URL, unwraps the file key, and decrypts locally.
-
-## Maximum-Privacy Target
-
-`nym-transfer-v1` sends encrypted file chunks through Nym:
-
-```txt
-encrypted file -> chunks -> Nym service provider -> buyer -> reassemble -> decrypt
-```
-
-This mode gives better metadata privacy but needs:
-
-- chunk hashes
-- retry policy
-- max file size
-- transfer progress
-- Nym delivery receipts
-- local buyer daemon or browser-compatible bridge
-
-## Product Copy Boundary
-
-The user-facing product should be stronger than a paid download:
-
-> ZEC payment unlocks a private Nym delivery session. The file opens only on the buyer's machine.
-
-Nym is part of the core promise. Advanced details can explain claim mode, transfer mode, chunking, and reliability.
+The server-relayed `nym` mode (a standalone `nym-client` WebSocket, `NYM_CLIENT_ENDPOINT`) and the local outbox / `http-dev-fallback` mode remain for environments where the browser-direct flags are off. The production path is browser-to-browser.
