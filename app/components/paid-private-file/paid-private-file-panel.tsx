@@ -1366,6 +1366,10 @@ export function PaidPrivateFilePanel({
       );
     } catch (error) {
       buyerReceivedRef.current = false;
+      // The stashed signed download URL/token may be stale/expired (10-min TTL),
+      // which would make EVERY re-sent envelope fail on the same dead URL. Drop it
+      // so the next envelope re-claims a fresh URL+token before decrypting.
+      pendingDownloadRef.current = null;
       setErrorMessage(formatError(error, copy.errors.serverError));
     }
   }
