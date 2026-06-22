@@ -24,6 +24,8 @@ const copy = {
     statusClaimed: "DELIVERED",
     statusAwaitingDelivery: "AWAITING_DELIVERY",
     statusDelivering: "DELIVERING",
+    deliveredViaNymSuffix: "_VIA_NYM",
+    deliveredViaHttpsSuffix: "_VIA_HTTPS",
   },
 } as unknown as PaidPrivateFileCopy;
 
@@ -64,5 +66,37 @@ describe("formatFileStatus", () => {
     expect(
       formatFileStatus("weird" as Parameters<typeof formatFileStatus>[0], copy),
     ).toBe("CREATED");
+  });
+
+  it("appends the delivery-path suffix to a delivered order (Nym)", () => {
+    expect(formatFileStatus("claimed", copy, "delivered", "nym")).toBe(
+      "DELIVERED_VIA_NYM",
+    );
+    expect(formatFileStatus("paid", copy, "delivered", "nym")).toBe(
+      "DELIVERED_VIA_NYM",
+    );
+  });
+
+  it("appends the delivery-path suffix to a delivered order (HTTPS)", () => {
+    expect(formatFileStatus("claimed", copy, "delivered", "https")).toBe(
+      "DELIVERED_VIA_HTTPS",
+    );
+  });
+
+  it("leaves the bare delivered label when the path is unknown (back-compat)", () => {
+    expect(formatFileStatus("claimed", copy, "delivered", null)).toBe(
+      "DELIVERED",
+    );
+    expect(formatFileStatus("claimed", copy, "delivered")).toBe("DELIVERED");
+  });
+
+  it("never appends a path suffix to a non-delivered order", () => {
+    // A path value on a not-yet-acked order must not leak into the label.
+    expect(formatFileStatus("claimed", copy, "queued", "nym")).toBe(
+      "DELIVERING",
+    );
+    expect(formatFileStatus("paid", copy, "ready_for_delivery", "https")).toBe(
+      "AWAITING_DELIVERY",
+    );
   });
 });

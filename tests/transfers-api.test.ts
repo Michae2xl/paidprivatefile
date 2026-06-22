@@ -335,6 +335,164 @@ describe("/api/transfers", () => {
     }
   });
 
+  it("records the delivery path (via) on the delivery ack", async () => {
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await nymSessionRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
+      ),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
+      routeContext(order.orderId),
+    );
+    await releaseKeyForOrder(order.orderId);
+    await claimTransferRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
+        buyerPublicKeyJwk: keyPair.publicJwk,
+      }),
+      routeContext(order.orderId),
+    );
+
+    const deliveredResponse = await deliveredTransferRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/delivered`, {
+        buyerPublicKeyJwk: keyPair.publicJwk,
+        via: "https",
+      }),
+      routeContext(order.orderId),
+    );
+    expect(deliveredResponse.status).toBe(200);
+    const deliveredBody = (await deliveredResponse.json()) as {
+      order: TransferPublicOrder & {
+        delivery: {
+          nymSession: {
+            status: string;
+            deliveredVia?: string | null;
+          } | null;
+        };
+      };
+    };
+    expect(deliveredBody.order.delivery.nymSession?.status).toBe("delivered");
+    expect(deliveredBody.order.delivery.nymSession?.deliveredVia).toBe("https");
+  });
+
+  it("defaults the delivery path to null when via is omitted", async () => {
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await nymSessionRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
+      ),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
+      routeContext(order.orderId),
+    );
+    await releaseKeyForOrder(order.orderId);
+    await claimTransferRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
+        buyerPublicKeyJwk: keyPair.publicJwk,
+      }),
+      routeContext(order.orderId),
+    );
+
+    const deliveredResponse = await deliveredTransferRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/delivered`, {
+        buyerPublicKeyJwk: keyPair.publicJwk,
+      }),
+      routeContext(order.orderId),
+    );
+    expect(deliveredResponse.status).toBe(200);
+    const deliveredBody = (await deliveredResponse.json()) as {
+      order: {
+        delivery: { nymSession: { deliveredVia?: string | null } | null };
+      };
+    };
+    expect(deliveredBody.order.delivery.nymSession?.deliveredVia).toBeNull();
+  });
+
+  it("rejects an invalid delivery path (via)", async () => {
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await nymSessionRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
+      ),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
+      routeContext(order.orderId),
+    );
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const rejected = await deliveredTransferRoute(
+        jsonRequest(
+          `http://localhost/api/transfers/${order.orderId}/delivered`,
+          {
+            buyerPublicKeyJwk: keyPair.publicJwk,
+            via: "carrier-pigeon",
+          },
+        ),
+        routeContext(order.orderId),
+      );
+      expect(rejected.status).toBe(400);
+      const body = (await rejected.json()) as ErrorEnvelope;
+      expect(body.error.kind).toBe("validation");
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
   it("accepts a paid CipherPay webhook using the invoice id index", async () => {
     const order = await createOrder();
     const keyPair = await createBuyerKeyPair();

@@ -1250,6 +1250,32 @@ a {
   line-height: 1.45;
 }
 
+/* Provenance badge: proves which path delivered the file. Nym = the pure-mixnet
+   happy path (green); HTTPS = the Nym fallback fetch (amber, still successful). */
+.ppf-received-via {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 720;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+}
+
+.ppf-received-via[data-via="nym"] {
+  color: #0f7048;
+  background: rgba(20, 232, 140, 0.16);
+  border-color: rgba(20, 232, 140, 0.42);
+}
+
+.ppf-received-via[data-via="https"] {
+  color: #8a5a00;
+  background: rgba(245, 176, 65, 0.16);
+  border-color: rgba(245, 176, 65, 0.45);
+}
+
 /* Advanced (tucked-away) manual Nym toggle. A layperson never opens this. */
 .ppf-buyer-advanced {
   border: 1px solid var(--line-dark);

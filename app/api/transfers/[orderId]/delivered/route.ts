@@ -8,6 +8,7 @@ import { enforceRateLimit } from "../../../../../lib/server/rate-limit";
 import { readLimitedJsonObject } from "../../../../../lib/server/request-body";
 import {
   markTransferDelivered,
+  type TransferDeliveredVia,
   type TransferPublicOrder,
 } from "../../../../../lib/server/transfer-store";
 
@@ -40,7 +41,8 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const payload = await readLimitedJsonObject(request, MAX_BODY_BYTES);
     const buyerPublicKeyJwk = requireJsonWebKey(payload.buyerPublicKeyJwk);
-    const order = await markTransferDelivered(orderId, buyerPublicKeyJwk);
+    const via = optionalDeliveredVia(payload.via);
+    const order = await markTransferDelivered(orderId, buyerPublicKeyJwk, via);
     return NextResponse.json<DeliveredResponse>({ order });
   } catch (error) {
     return createServerErrorResponse("transfers/delivered", error);
@@ -52,4 +54,17 @@ function requireJsonWebKey(value: unknown): JsonWebKey {
     throw new ServerError("validation", "buyerPublicKeyJwk must be an object");
   }
   return value as JsonWebKey;
+}
+
+// Optional delivery-path provenance: accept only "nym" or "https", or absent
+// (undefined/null) which maps to null. Any other value is rejected so the field
+// cannot be used to smuggle junk into stored order state.
+function optionalDeliveredVia(value: unknown): TransferDeliveredVia | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (value === "nym" || value === "https") {
+    return value;
+  }
+  throw new ServerError("validation", "via must be 'nym' or 'https'");
 }

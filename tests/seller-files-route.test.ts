@@ -37,6 +37,8 @@ interface FilesEnvelope {
     fileName: string;
     displayZec: string;
     status: string;
+    nymSessionStatus: string | null;
+    deliveredVia: "nym" | "https" | null;
     createdAt: string;
     sharePath: string;
   }>;
@@ -140,6 +142,10 @@ describe("GET /api/sellers/me/files", () => {
     expect(top.status).toBe("created");
     expect(typeof top.createdAt).toBe("string");
     expect(top.sharePath).toBe(`/s/${seller.handle}/files/${second}`);
+    // Back-compat: a fresh order has no delivery session, so the provenance
+    // fields are exposed as null rather than absent/undefined.
+    expect(top.nymSessionStatus).toBeNull();
+    expect(top.deliveredVia).toBeNull();
   });
 
   it("returns an empty list when the seller has no files", async () => {

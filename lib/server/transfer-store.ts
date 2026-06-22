@@ -72,6 +72,12 @@ export interface TransferPaymentState {
   raw?: unknown;
 }
 
+// The path the file actually reached the buyer over, stamped by the buyer's
+// delivery ack: "nym" = the in-browser Nym file receiver reassembled + decrypted
+// the ciphertext over the mixnet; "https" = the HTTPS fallback fetch decrypted
+// it. Null/absent for older orders that acked before this field existed.
+export type TransferDeliveredVia = "nym" | "https";
+
 export interface TransferNymSession {
   transport: NymTransportMode;
   buyerNymAddress: string;
@@ -80,6 +86,9 @@ export interface TransferNymSession {
   createdAt: string;
   updatedAt: string;
   lastDelivery?: NymDeliveryReceipt;
+  // Provenance of the completed delivery (proves the transfer path to the
+  // seller). Optional + backward-compatible: missing means "unknown path".
+  deliveredVia?: TransferDeliveredVia | null;
 }
 
 export interface TransferDeliveryState {
@@ -1086,9 +1095,11 @@ export async function claimTransfer(
 export async function markTransferDelivered(
   orderId: string,
   buyerPublicKeyJwk: JsonWebKey,
+  via?: TransferDeliveredVia | null,
 ): Promise<TransferPublicOrder> {
   validateBuyerPublicKeyJwk(buyerPublicKeyJwk);
   const buyerPublicKeyHash = hashBuyerPublicKey(buyerPublicKeyJwk);
+  const deliveredVia = normalizeDeliveredVia(via);
 
   return withOrderLock(orderId, async () => {
     const order = await readOrder(orderId);
@@ -1116,6 +1127,11 @@ export async function markTransferDelivered(
     const now = new Date().toISOString();
     order.delivery.nymSession.status = "delivered";
     order.delivery.nymSession.updatedAt = now;
+    // Persist the delivery path the first time it is reported; never overwrite a
+    // known path with a later null (keeps a re-ack idempotent).
+    if (deliveredVia) {
+      order.delivery.nymSession.deliveredVia = deliveredVia;
+    }
     if (order.delivery.nymSession.lastDelivery) {
       order.delivery.nymSession.lastDelivery = {
         ...order.delivery.nymSession.lastDelivery,
@@ -1228,6 +1244,7 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
             createdAt: delivery.nymSession.createdAt,
             updatedAt: delivery.nymSession.updatedAt,
             lastDelivery: delivery.nymSession.lastDelivery,
+            deliveredVia: delivery.nymSession.deliveredVia ?? null,
           }
         : null,
     },
@@ -1557,9 +1574,19 @@ function normalizeDeliveryState(
           createdAt: value.nymSession.createdAt,
           updatedAt: value.nymSession.updatedAt,
           lastDelivery: value.nymSession.lastDelivery,
+          deliveredVia: normalizeDeliveredVia(value.nymSession.deliveredVia),
         }
       : null,
   };
+}
+
+// Validate the optional delivery-path provenance flag. Only "nym" or "https" are
+// accepted; anything else (including undefined/null) normalizes to null so a
+// missing field never breaks an order.
+function normalizeDeliveredVia(
+  value: TransferDeliveredVia | null | undefined,
+): TransferDeliveredVia | null {
+  return value === "nym" || value === "https" ? value : null;
 }
 
 function normalizeNymTransport(

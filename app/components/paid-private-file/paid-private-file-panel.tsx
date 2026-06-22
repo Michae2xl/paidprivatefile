@@ -168,6 +168,10 @@ interface SellerFile {
   // still "Delivering"/"Awaiting delivery". Optional so older API responses (and
   // orders with no session yet) degrade to the bare status label.
   nymSessionStatus?: string | null;
+  // Provenance of a completed delivery: how this order's file reached the buyer.
+  // "nym" = streamed over the mixnet; "https" = the Nym fallback fetch; null for
+  // orders delivered before the field existed (degrades to a bare "Delivered").
+  deliveredVia?: "nym" | "https" | null;
   createdAt: string;
   sharePath: string;
 }
@@ -358,6 +362,12 @@ export function PaidPrivateFilePanel({
   const [showManualNymAddress, setShowManualNymAddress] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState("");
   const [downloadFileName, setDownloadFileName] = useState("");
+  // Provenance of the buyer's completed download: which path actually delivered
+  // the file. Set the moment the file is decrypted + opened — "nym" when the
+  // in-browser Nym file receiver reassembled it over the mixnet, "https" when
+  // the HTTPS fallback fetched it. Drives the badge on the "YOUR FILE ARRIVED"
+  // card and is propagated to the seller via the delivery ack.
+  const [receivedVia, setReceivedVia] = useState<"nym" | "https" | null>(null);
   // Browser-direct Nym: the buyer's claim returns the signed ciphertext URL but
   // NOT the key envelope (the seller delivers that over the mixnet). We stash
   // the URL here so the Nym receive handler can fetch the file once the key
@@ -380,6 +390,9 @@ export function PaidPrivateFilePanel({
   // Guards against double-firing the auto re-send tick (a slow send must not
   // overlap the next interval) and tracks the orderId the loop is bound to.
   const resendInFlightRef = useRef(false);
+  // Guards the live dashboard files poll: skips a tick while the previous quiet
+  // fetch is still running so slow responses never stack overlapping requests.
+  const sellerFilesPollInFlightRef = useRef(false);
   const [addressCopied, setAddressCopied] = useState(false);
   // Count of Nym envelopes this receiver has decoded this session — a visible
   // signal in the "Receiving your file…" card that envelopes are actually
@@ -645,6 +658,55 @@ export function PaidPrivateFilePanel({
       return;
     }
     void loadSellerFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seller?.sellerId, sellerScreen]);
+
+  // Live seller dashboard updates (no F5): while the Dashboard/Files screen is
+  // mounted for an authenticated seller, silently re-fetch the files list every
+  // ~5s so paid→delivered status badges update on their own. This complements
+  // (does NOT replace) the mount/screen-switch refresh above and the per-action
+  // refreshes; it never touches sellerFilesStatus, so the list never flickers
+  // back to "loading" on a poll. Resilience:
+  //  - one interval per active screen (cleared on unmount/screen change) so
+  //    intervals never stack;
+  //  - sellerFilesPollInFlightRef skips a tick while a fetch is still running;
+  //  - it only reads /api/sellers/me/files, so it is fully independent of the
+  //    manage-screen poll + the auto re-send-until-acked loops.
+  useEffect(() => {
+    if (!seller) {
+      return;
+    }
+    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+      return;
+    }
+    let active = true;
+    const interval = window.setInterval(() => {
+      if (sellerFilesPollInFlightRef.current) {
+        return;
+      }
+      sellerFilesPollInFlightRef.current = true;
+      void (async () => {
+        try {
+          const body = await postJson<SellerFilesResponse>(
+            "/api/sellers/me/files",
+            { method: "GET" },
+          );
+          if (active) {
+            setSellerFiles(body.files);
+            setSellerFilesStatus("ready");
+          }
+        } catch {
+          // Transient polling failures are non-fatal; retry on the next tick and
+          // leave the last good list (and its status) untouched.
+        } finally {
+          sellerFilesPollInFlightRef.current = false;
+        }
+      })();
+    }, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seller?.sellerId, sellerScreen]);
 
@@ -1068,6 +1130,7 @@ export function PaidPrivateFilePanel({
     setBusyAction("loading");
     setDownloadUrl("");
     setDownloadFileName("");
+    setReceivedVia(null);
     pendingDownloadRef.current = null;
     buyerReceivedRef.current = false;
     buyerAutoDownloadedRef.current = "";
@@ -1723,6 +1786,9 @@ export function PaidPrivateFilePanel({
       const objectUrl = window.URL.createObjectURL(opened);
       setDownloadUrl(objectUrl);
       setDownloadFileName(order.file.fileName);
+      // Provenance: the in-browser Nym receiver reassembled + decrypted these
+      // bytes over the mixnet — this is the pure-Nym happy path.
+      setReceivedVia("nym");
       setNymStatus("ready");
       setNymMessage(copy.receive.nymReadyLabel);
       if (buyerAutoDownloadedRef.current !== objectUrl) {
@@ -1730,7 +1796,7 @@ export function PaidPrivateFilePanel({
         triggerBrowserDownload(objectUrl, order.file.fileName);
       }
       clearBuyerHttpsFallback(order.orderId);
-      void acknowledgeDelivery(order.orderId, keyPair);
+      void acknowledgeDelivery(order.orderId, keyPair, "nym");
     } catch {
       buyerReceivedRef.current = false;
       // Decrypt failed (rare) — let HTTPS take over.
@@ -1898,7 +1964,9 @@ export function PaidPrivateFilePanel({
       // set. If opening fails, release the guard so a later re-send can retry.
       buyerReceivedRef.current = true;
       try {
-        await openClaimPayload(parsed, keyPair);
+        // Key + manifest + file URL arrived over the Nym text channel: this is a
+        // Nym delivery (the legacy server-relayed full payload).
+        await openClaimPayload(parsed, keyPair, "nym");
       } catch (error) {
         buyerReceivedRef.current = false;
         setErrorMessage(formatError(error, copy.errors.serverError));
@@ -1992,6 +2060,10 @@ export function PaidPrivateFilePanel({
           encryptedFileDownload: download,
         },
         keyPair,
+        // The key envelope arrived over the Nym text channel (browser-direct
+        // delivery). Even though the ciphertext URL is fetched over HTTPS here,
+        // the delivery was driven by the Nym key drop — count it as Nym.
+        "nym",
       );
     } catch (error) {
       buyerReceivedRef.current = false;
@@ -2006,6 +2078,11 @@ export function PaidPrivateFilePanel({
   async function openClaimPayload(
     payload: NymClaimPayload,
     keyPair: PaidLinkBuyerKeyPair,
+    // Which path got us here. The legacy Nym text-channel callers pass "nym"
+    // (key + manifest arrived over the mixnet); the HTTPS fallback + manual
+    // unlock pass "https" (the file is fetched over HTTPS here). Drives the
+    // provenance badge + the seller-facing delivery-path flag.
+    via: "nym" | "https" = "https",
   ): Promise<void> {
     const encryptedFileDownload =
       payload.encryptedFileDownload ?? payload.devHttpFallback;
@@ -2034,6 +2111,9 @@ export function PaidPrivateFilePanel({
     const objectUrl = window.URL.createObjectURL(opened);
     setDownloadUrl(objectUrl);
     setDownloadFileName(payload.manifest.fileName);
+    // Provenance: stamp the path that delivered this file (the caller knows
+    // whether the bytes came over the mixnet or the HTTPS fallback fetch).
+    setReceivedVia(via);
     setNymStatus("ready");
     setNymMessage(copy.receive.nymReadyLabel);
 
@@ -2049,16 +2129,19 @@ export function PaidPrivateFilePanel({
 
     // Pure-Nym delivery ack (status only, no key material): tell the server the
     // buyer actually received + opened the file so the seller's re-send loop can
-    // stop. Best-effort — a failed ack must not break the buyer's download.
-    void acknowledgeDelivery(payload.orderId, keyPair);
+    // stop. Best-effort — a failed ack must not break the buyer's download. The
+    // path flag rides along so the seller dashboard can show how it was delivered.
+    void acknowledgeDelivery(payload.orderId, keyPair, via);
   }
 
   // POST the status-only delivery acknowledgement. The body carries ONLY the
-  // buyer public key (same auth as claim); no key material is sent. Silently
-  // ignores failures so the buyer flow never depends on the ack.
+  // buyer public key (same auth as claim) plus the optional delivery-path
+  // provenance flag; no key material is sent. Silently ignores failures so the
+  // buyer flow never depends on the ack.
   async function acknowledgeDelivery(
     orderId: string,
     keyPair: PaidLinkBuyerKeyPair,
+    via?: "nym" | "https",
   ): Promise<void> {
     // RETRY until the server confirms "delivered" — a single best-effort POST
     // left the seller stuck on "not delivered" forever if that one request
@@ -2071,7 +2154,10 @@ export function PaidPrivateFilePanel({
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
+            body: JSON.stringify({
+              buyerPublicKeyJwk: keyPair.publicJwk,
+              ...(via ? { via } : {}),
+            }),
           },
         );
         if (loadedOrder && body.order.orderId === loadedOrder.orderId) {
@@ -3229,6 +3315,7 @@ export function PaidPrivateFilePanel({
             payment={payment}
             downloadUrl={downloadUrl}
             downloadFileName={downloadFileName}
+            receivedVia={receivedVia}
             busyAction={busyAction}
             isBusy={isBusy}
             nymMessage={nymMessage}
@@ -3276,6 +3363,7 @@ function BuyerCheckout({
   payment,
   downloadUrl,
   downloadFileName,
+  receivedVia,
   busyAction,
   isBusy,
   nymMessage,
@@ -3300,6 +3388,7 @@ function BuyerCheckout({
   payment: TransferPayment | null;
   downloadUrl: string;
   downloadFileName: string;
+  receivedVia: "nym" | "https" | null;
   busyAction: BusyAction;
   isBusy: boolean;
   nymMessage: string;
@@ -3363,6 +3452,15 @@ function BuyerCheckout({
               <div className="ppf-buyer-done" role="status">
                 <p className="eyebrow">{copy.receive.arrivedTitle}</p>
                 <p>{copy.receive.arrivedBody}</p>
+                {receivedVia ? (
+                  // Provenance badge: proves which path actually delivered the
+                  // file (pure-Nym happy path vs. the HTTPS fallback).
+                  <span className="ppf-received-via" data-via={receivedVia}>
+                    {receivedVia === "nym"
+                      ? copy.receive.receivedViaNym
+                      : copy.receive.receivedViaHttps}
+                  </span>
+                ) : null}
                 {downloadUrl &&
                 loadedOrder.file.mimeType.startsWith("image/") ? (
                   <img
@@ -3873,7 +3971,12 @@ function SellerFilesList({
                       file.nymSessionStatus === "delivered" ? "true" : "false"
                     }
                   >
-                    {formatFileStatus(file.status, copy, file.nymSessionStatus)}
+                    {formatFileStatus(
+                      file.status,
+                      copy,
+                      file.nymSessionStatus,
+                      file.deliveredVia,
+                    )}
                   </span>
                   <button
                     type="button"
@@ -4174,6 +4277,7 @@ export function formatFileStatus(
   status: TransferPublicOrder["status"],
   copy: PaidPrivateFileCopy,
   nymSessionStatus?: string | null,
+  deliveredVia?: "nym" | "https" | null,
 ): string {
   // Honest delivery label: "Delivered" must mean the BUYER actually ACKed the
   // file over Nym (nymSession.status === "delivered"). A "claimed" order only
@@ -4188,12 +4292,17 @@ export function formatFileStatus(
     nymSessionStatus === "ready_for_delivery" ||
     nymSessionStatus === "queued" ||
     nymSessionStatus === "sent_nym_client";
+  // Delivered label + an optional delivery-path suffix (pitch value): once the
+  // buyer has acked we know "Delivered"; if the buyer also reported the path,
+  // append "· Nym" / "· HTTPS". Backward-compatible: a missing path leaves the
+  // bare "Delivered" untouched.
+  const deliveredLabel = `${copy.dashboard.statusClaimed}${deliveredViaSuffix(copy, deliveredVia)}`;
   switch (status) {
     case "payment_pending":
       return copy.dashboard.statusPaymentPending;
     case "paid":
       if (acked) {
-        return copy.dashboard.statusClaimed;
+        return deliveredLabel;
       }
       // Key released and being sent over Nym, but the buyer has not claimed yet:
       // it is in flight, not "ready to deliver" anymore.
@@ -4205,13 +4314,27 @@ export function formatFileStatus(
     case "claimed":
       // Buyer ran their claim but has not yet acked: the key is in transit over
       // Nym, so show "Delivering" — not the misleading "Delivered".
-      return acked
-        ? copy.dashboard.statusClaimed
-        : copy.dashboard.statusDelivering;
+      return acked ? deliveredLabel : copy.dashboard.statusDelivering;
     case "created":
     default:
       return copy.dashboard.statusCreated;
   }
+}
+
+// The delivery-path suffix appended to a Delivered label, e.g. " · Nym" /
+// " · HTTPS". Empty string when the path is unknown (older orders) so the bare
+// "Delivered" label is preserved.
+function deliveredViaSuffix(
+  copy: PaidPrivateFileCopy,
+  deliveredVia?: "nym" | "https" | null,
+): string {
+  if (deliveredVia === "nym") {
+    return copy.dashboard.deliveredViaNymSuffix;
+  }
+  if (deliveredVia === "https") {
+    return copy.dashboard.deliveredViaHttpsSuffix;
+  }
+  return "";
 }
 
 function BrandRail({ copy }: { copy: PaidPrivateFileCopy }) {

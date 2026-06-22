@@ -113,6 +113,11 @@ export interface PaidPrivateFileCopy {
     // "Delivering" (claimed, key in transit over Nym, buyer not yet acked).
     statusAwaitingDelivery: string;
     statusDelivering: string;
+    // Delivery-path suffix appended to a DELIVERED file row, e.g.
+    // "Delivered · Nym" vs "Delivered · HTTPS". Backward-compatible: a delivered
+    // order with no recorded path shows the bare "Delivered" with no suffix.
+    deliveredViaNymSuffix: string;
+    deliveredViaHttpsSuffix: string;
     fileManageLabel: string;
     fileReleaseLabel: string;
     manageTitle: string;
@@ -198,6 +203,11 @@ export interface PaidPrivateFileCopy {
     // "Receiving your file…" card while the encrypted file streams over the
     // mixnet. "{percent}" is replaced with the integer percent received.
     receivingOverNym: string;
+    // Provenance badge on the "YOUR FILE ARRIVED" card: proves which path
+    // actually delivered the file. "nym" = streamed over the mixnet; "https" =
+    // the Nym fallback fetch.
+    receivedViaNym: string;
+    receivedViaHttps: string;
   };
   // Buyer status stepper + Nym receiver health (visibility into where a transfer
   // is). All layperson, en + pt.
@@ -393,6 +403,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       statusPaidReady: "Pago - pronto para entregar",
       statusAwaitingDelivery: "Aguardando entrega",
       statusDelivering: "Entregando",
+      deliveredViaNymSuffix: " · Nym",
+      deliveredViaHttpsSuffix: " · HTTPS",
       fileManageLabel: "Gerenciar",
       fileReleaseLabel: "Liberar chave",
       manageTitle: "Liberar chave do arquivo",
@@ -480,6 +492,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "O download deve comecar sozinho. Se nao comecar, toque em Salvar arquivo.",
       saveFileLabel: "Salvar arquivo",
       receivingOverNym: "Recebendo pela Nym... {percent}%",
+      receivedViaNym: "✓ Recebido pela Nym (mixnet)",
+      receivedViaHttps: "↩ Recebido por HTTPS (fallback Nym)",
     },
     buyerStatus: {
       title: "Status da sua compra",
@@ -673,6 +687,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       statusPaidReady: "Paid - ready to deliver",
       statusAwaitingDelivery: "Awaiting delivery",
       statusDelivering: "Delivering",
+      deliveredViaNymSuffix: " · Nym",
+      deliveredViaHttpsSuffix: " · HTTPS",
       fileManageLabel: "Manage",
       fileReleaseLabel: "Release key",
       manageTitle: "Release file key",
@@ -759,6 +775,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "The download should start on its own. If it doesn't, tap Save file.",
       saveFileLabel: "Save file",
       receivingOverNym: "Receiving over Nym... {percent}%",
+      receivedViaNym: "✓ Received over Nym (mixnet)",
+      receivedViaHttps: "↩ Received over HTTPS (Nym fallback)",
     },
     buyerStatus: {
       title: "Your purchase status",

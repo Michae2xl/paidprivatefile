@@ -27,6 +27,10 @@ export async function GET(request: Request) {
       // it to show "Delivered" only after the buyer's pure-Nym ack, not the
       // moment the buyer merely claimed the ciphertext URL.
       nymSessionStatus: order.delivery.nymSession?.status ?? null,
+      // Provenance of a completed delivery: "nym" | "https" | null. Lets the
+      // dashboard show how each order was delivered (pitch value). Null for
+      // orders delivered before this field existed.
+      deliveredVia: order.delivery.nymSession?.deliveredVia ?? null,
       createdAt: order.createdAt,
       sharePath: `/s/${encodeURIComponent(
         seller.handle,
