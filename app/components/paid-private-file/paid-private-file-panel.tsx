@@ -1215,13 +1215,14 @@ export function PaidPrivateFilePanel({
 
   async function handleNymTextMessage(payload: string): Promise<void> {
     // Idempotency: the seller re-sends the same envelope until the buyer ACKs.
-    // Once the file is already opened locally (downloadUrl set) or the order is
-    // delivered/claimed, IGNORE further envelopes so re-sends never trigger a
-    // repeat download. The ack itself is what stops the re-send loop.
+    // Ignore further envelopes ONLY once the file is actually in hand this
+    // session (downloadUrl / buyerReceivedRef) or the ack confirmed receipt
+    // (nymSession "delivered"). NOT on "claimed" — that is set at claim, before
+    // the key arrives, so blocking on it stops a reloaded buyer (downloadUrl
+    // lost) from ever re-receiving.
     if (
       buyerReceivedRef.current ||
       downloadUrl ||
-      loadedOrder?.status === "claimed" ||
       loadedOrder?.delivery.nymSession?.status === "delivered"
     ) {
       return;
@@ -1876,22 +1877,19 @@ export function PaidPrivateFilePanel({
     busyAction,
   ]);
 
-  // Keep the Nym-receive idempotency ref current. Once the file is opened locally
-  // (downloadUrl) or the order reports delivered/claimed, the receive handler must
-  // drop further re-sent envelopes.
+  // Keep the Nym-receive idempotency ref current. Mark "received" ONLY when the
+  // file is actually opened locally (downloadUrl) or the buyer's ack confirmed
+  // receipt (nymSession "delivered"). NOT on "claimed": that is set at claim,
+  // BEFORE the key arrives, so it would wrongly drop the re-sent envelope after a
+  // reload (downloadUrl lost) and leave the buyer unable to re-receive the file.
   useEffect(() => {
     if (
       downloadUrl ||
-      loadedOrder?.status === "claimed" ||
       loadedOrder?.delivery.nymSession?.status === "delivered"
     ) {
       buyerReceivedRef.current = true;
     }
-  }, [
-    downloadUrl,
-    loadedOrder?.status,
-    loadedOrder?.delivery.nymSession?.status,
-  ]);
+  }, [downloadUrl, loadedOrder?.delivery.nymSession?.status]);
 
   const isBusy = busyAction !== "idle";
   const mustAcknowledgeAccessKey =
