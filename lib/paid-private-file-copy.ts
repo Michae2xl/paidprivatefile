@@ -165,6 +165,10 @@ export interface PaidPrivateFileCopy {
     payHeadline: string;
     payHelper: string;
     preparingPaymentLabel: string;
+    // 0-conf "Payment detected": shown the instant the scanner reports a mempool
+    // sighting, before the payment is confirmed (file stays locked).
+    detectedTitle: string;
+    detectedBody: string;
     inTransitTitle: string;
     inTransitBody: string;
     copyAddressLabel: string;
@@ -423,6 +427,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       payHeadline: "Escaneie e pague para abrir",
       payHelper: "Escaneie o QR e pague em ZEC. So isso.",
       preparingPaymentLabel: "Preparando seu pagamento...",
+      detectedTitle: "Pagamento detectado",
+      detectedBody:
+        "Vimos seu pagamento na rede e estamos aguardando a confirmacao. Pode deixar esta pagina aberta.",
       inTransitTitle: "Pagamento em transito",
       inTransitBody:
         "Recebemos seu pagamento e estamos confirmando. Pode deixar esta pagina aberta.",
@@ -685,6 +692,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       payHeadline: "Scan and pay to open",
       payHelper: "Scan the QR and pay in ZEC. That's it.",
       preparingPaymentLabel: "Preparing your payment...",
+      detectedTitle: "Payment detected",
+      detectedBody:
+        "We saw your payment on the network and are waiting for it to confirm. You can keep this page open.",
       inTransitTitle: "Payment in transit",
       inTransitBody:
         "We received your payment and are confirming it. You can keep this page open.",

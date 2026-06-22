@@ -30,6 +30,32 @@ describe("getBuyerStatusStageIndex", () => {
     ).toBe(0);
   });
 
+  it("is stage 1 (payment detected) on a 0-conf sighting before it confirms", () => {
+    expect(
+      getBuyerStatusStageIndex({
+        phase: "detected",
+        order: {
+          status: "payment_pending",
+          payment: { status: "pending", detectedAt: "2026-01-01T00:00:00Z" },
+        },
+        downloadUrl: "",
+      }),
+    ).toBe(1);
+  });
+
+  it("is stage 1 (payment detected) from an onchain sighting even if phase lags", () => {
+    expect(
+      getBuyerStatusStageIndex({
+        phase: "awaiting-payment",
+        order: {
+          status: "payment_pending",
+          payment: { status: "pending", onchain: { txid: "a".repeat(64) } },
+        },
+        downloadUrl: "",
+      }),
+    ).toBe(1);
+  });
+
   it("is stage 2 (paid) when paid but the key is not released yet", () => {
     expect(
       getBuyerStatusStageIndex({

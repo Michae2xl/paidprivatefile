@@ -53,6 +53,19 @@ const nextConfig: NextConfig = {
         source: "/:path*",
         headers: securityHeaders,
       },
+      {
+        // The buyer/seller page is dynamic; never let the browser cache the HTML
+        // document, or it keeps referencing stale JS chunks after a deploy (this
+        // bit a live test repeatedly). The hashed /_next/static chunks stay
+        // immutable-cached — only the document response is marked no-store.
+        source: "/paid-private-file",
+        headers: [
+          {
+            key: "Cache-Control",
+            value: "no-store, no-cache, must-revalidate",
+          },
+        ],
+      },
     ];
   },
 };

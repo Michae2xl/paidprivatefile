@@ -124,6 +124,16 @@ interface TransferPayment {
   status: "pending" | "paid";
   createdAt?: string;
   confirmedAt?: string | null;
+  // 0-conf "Payment detected": set the first time the scanner reports an
+  // unconfirmed mempool sighting. onchain carries the txid/confirmations once a
+  // deposit is seen. Neither implies paid (status === "paid" is the gate).
+  detectedAt?: string | null;
+  onchain?: {
+    txid: string;
+    amountZats: number;
+    confirmations: number;
+    paidAt: string;
+  } | null;
 }
 
 interface SellerProfile {
@@ -2524,6 +2534,21 @@ function BuyerCheckout({
                   </a>
                 ) : null}
               </div>
+            ) : phase === "detected" ? (
+              // 0-conf: we saw the payment in the mempool but it is NOT
+              // confirmed yet. Show "Payment detected / confirming" — the file
+              // stays locked until the confirmed paid transition.
+              <div
+                className="ppf-buyer-status"
+                data-tone="transit"
+                role="status"
+              >
+                <span className="ppf-buyer-spinner" aria-hidden="true" />
+                <div>
+                  <p className="eyebrow">{copy.receive.detectedTitle}</p>
+                  <p>{copy.receive.detectedBody}</p>
+                </div>
+              </div>
             ) : phase === "in-transit" ? (
               loadedOrder.release?.status === "ready" ? (
                 <div
@@ -3533,11 +3558,29 @@ function getFlowMotionStage({
 }
 
 // Minimal structural view of an order the buyer-flow helpers read. Kept narrow
-// (only the two status fields) so the pure helpers can be unit-tested with tiny
-// fixtures while real TransferPublicOrder values still satisfy it.
+// (status + the payment fields the flow needs) so the pure helpers can be
+// unit-tested with tiny fixtures while real TransferPublicOrder values still
+// satisfy it. detectedAt/onchain drive the 0-conf "Payment detected" signal.
 export interface BuyerOrderStatusView {
   status: TransferPublicOrder["status"];
-  payment: { status: TransferPayment["status"] } | null;
+  payment: {
+    status: TransferPayment["status"];
+    detectedAt?: string | null;
+    onchain?: { txid: string } | null;
+  } | null;
+}
+
+// True once the scanner has reported an UNCONFIRMED mempool sighting for this
+// order (detectedAt set, or an onchain sighting recorded) — the instant-UX
+// "we saw your payment" signal. This does NOT imply paid: a 0-conf tx can be
+// double-spent, so the key release stays gated on isOrderPaid.
+export function isPaymentDetected(
+  order: BuyerOrderStatusView | null | undefined,
+): boolean {
+  if (!order?.payment) {
+    return false;
+  }
+  return Boolean(order.payment.detectedAt) || Boolean(order.payment.onchain);
 }
 
 // True once the order's payment is confirmed (paid), regardless of which field
@@ -3555,12 +3598,15 @@ export function isOrderPaid(
   );
 }
 
-// The dead-simple buyer flow has four visible phases. This is a pure mapping of
+// The dead-simple buyer flow has these visible phases. This is a pure mapping of
 // (order, payment, downloadUrl) -> phase so the receive UI stays declarative and
-// the transitions can be unit-tested without React.
+// the transitions can be unit-tested without React. "detected" is the 0-conf
+// "we saw your payment, confirming" state that sits BETWEEN awaiting-payment and
+// the confirmed paid (in-transit) state — it is NOT paid and never claimable.
 export type BuyerFlowPhase =
   | "loading"
   | "awaiting-payment"
+  | "detected"
   | "in-transit"
   | "done";
 
@@ -3574,6 +3620,11 @@ export function getBuyerFlowPhase(input: {
   }
   if (isOrderPaid(input.order)) {
     return "in-transit";
+  }
+  // 0-conf: the scanner saw the payment in the mempool but it is not confirmed
+  // yet. Show "Payment detected / confirming" instead of plain "awaiting".
+  if (isPaymentDetected(input.order)) {
+    return "detected";
   }
   // The QR can only render once a payment address exists; until then the buyer
   // sees a brief "preparing" state (the auto-create payment-intent is in flight).
@@ -3599,14 +3650,14 @@ export type BuyerStatusStageId =
 // React-free so the transitions can be unit-tested.
 export function getBuyerStatusStageIndex(input: {
   phase: BuyerFlowPhase;
-  order: {
-    status: TransferPublicOrder["status"];
-    payment: { status: TransferPayment["status"] } | null;
-    release?: { status: "seller_pending" | "ready" } | null;
-    delivery?: {
-      nymSession?: { status: string } | null;
-    } | null;
-  } | null;
+  order:
+    | (BuyerOrderStatusView & {
+        release?: { status: "seller_pending" | "ready" } | null;
+        delivery?: {
+          nymSession?: { status: string } | null;
+        } | null;
+      })
+    | null;
   downloadUrl: string;
 }): number {
   if (
@@ -3621,6 +3672,11 @@ export function getBuyerStatusStageIndex(input: {
     // the key it is now in flight over Nym (receiving-key); otherwise we are at
     // "paid" waiting for the seller to release.
     return input.order?.release?.status === "ready" ? 3 : 2;
+  }
+  // 0-conf: a real mempool sighting (detectedAt/onchain) lights "Payment
+  // detected" (stage 1) the instant the webhook lands, before "Paid" (stage 2).
+  if (input.phase === "detected" || isPaymentDetected(input.order)) {
+    return 1;
   }
   if (input.phase === "awaiting-payment") {
     return 0;

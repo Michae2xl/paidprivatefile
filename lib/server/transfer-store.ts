@@ -62,6 +62,11 @@ export interface TransferPaymentState {
   buyerPublicKeyJwk: JsonWebKey;
   createdAt: string;
   confirmedAt: string | null;
+  // 0-conf "we saw your payment" signal: set the FIRST time the scanner reports
+  // an unconfirmed (mempool) sighting via the webhook. Purely an instant-UX flag
+  // — it never gates the key release, which still waits for the confirmed paid
+  // transition (status === "paid").
+  detectedAt: string | null;
   receivingAddress: string | null;
   onchain: TransferOnchainPayment | null;
   raw?: unknown;
@@ -547,6 +552,7 @@ export async function createPaymentIntentForOrder(
       buyerPublicKeyJwk,
       createdAt: now,
       confirmedAt: null,
+      detectedAt: null,
       receivingAddress: invoice.receivingAddress ?? null,
       onchain: null,
       raw: invoice.raw,
@@ -816,6 +822,65 @@ export async function markTransferPaidOnchain(input: {
       paidAt: now,
     };
     markOrderPaid(order, order.payment.raw);
+    await writeOrder(order);
+    return publicOrder(order);
+  });
+}
+
+// 0-conf "Payment detected" sighting. The scanner POSTs the SAME zcash webhook
+// with the real confirmations value; when 0 <= confirmations < min the webhook
+// calls this to record an UNCONFIRMED mempool sighting. It records detectedAt +
+// stamps onchain so the buyer UI can light "Payment detected" instantly, but it
+// does NOT mark the payment paid and does NOT change order.status — a 0-conf tx
+// can still be double-spent, so the key release stays gated on the confirmed
+// paid transition. Idempotent: re-sending confs=0 for the same txid is a no-op
+// after the first sighting.
+export async function markTransferDetectedOnchain(input: {
+  orderId: string;
+  txid: string;
+  amountZats: number;
+  confirmations: number;
+}): Promise<TransferPublicOrder> {
+  return withOrderLock(input.orderId, async () => {
+    const order = await readOrder(input.orderId);
+    if (!order.payment) {
+      throw new ServerError(
+        "validation",
+        "Order does not have a payment session yet",
+      );
+    }
+    if (order.payment.provider !== "zcash-onchain") {
+      throw new ServerError(
+        "validation",
+        "On-chain payment detection is only available for zcash-onchain orders",
+      );
+    }
+    // Mirror the paid path's guards: only an OPEN payment-pending order accepts a
+    // sighting. If it already settled (paid/claimed) there is nothing to detect.
+    if (order.status !== "payment_pending" || order.payment.status === "paid") {
+      return publicOrder(order);
+    }
+
+    const existing = order.payment.onchain;
+    if (existing && existing.txid !== input.txid) {
+      throw new ServerError(
+        "flow_conflict",
+        "This order already has a deposit sighting for a different transaction",
+      );
+    }
+
+    const now = new Date().toISOString();
+    // Idempotent: stamp detectedAt only the first time we see the payment.
+    order.payment.detectedAt = order.payment.detectedAt ?? now;
+    // Refresh the onchain sighting (confirmations may climb across 0-conf
+    // reports) WITHOUT flipping payment.status or order.status to paid.
+    order.payment.onchain = {
+      txid: input.txid,
+      amountZats: input.amountZats,
+      confirmations: input.confirmations,
+      paidAt: existing?.paidAt ?? now,
+    };
+    order.updatedAt = now;
     await writeOrder(order);
     return publicOrder(order);
   });
@@ -1140,6 +1205,7 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
           status: order.payment.status,
           createdAt: order.payment.createdAt,
           confirmedAt: order.payment.confirmedAt,
+          detectedAt: order.payment.detectedAt,
           receivingAddress: order.payment.receivingAddress,
           onchain: order.payment.onchain,
         }
@@ -1363,6 +1429,7 @@ function normalizePaymentState(
   }
   return {
     ...value,
+    detectedAt: typeof value.detectedAt === "string" ? value.detectedAt : null,
     receivingAddress:
       typeof value.receivingAddress === "string"
         ? value.receivingAddress

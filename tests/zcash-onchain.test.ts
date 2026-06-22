@@ -374,27 +374,40 @@ describe("zcash payment webhook", () => {
     expect(stored.status).toBe("payment_pending");
   });
 
-  it("does not mark paid when confirmations are below the minimum (retryable)", async () => {
+  it("records a 0-conf detected sighting without marking paid (retryable)", async () => {
     await seedPool();
     const { orderId, receivingAddress } = await orderWithDeposit();
     const body = JSON.stringify({
       receivingAddress,
       amountZats: 5_000_000,
       txid: "a".repeat(64),
-      confirmations: 2,
+      confirmations: 0,
     });
     const response = await zcashWebhookRoute(signedWebhookRequest(body));
     expect(response.status).toBe(200);
     const parsed = (await response.json()) as {
       ok: boolean;
+      detected?: boolean;
       ignored?: boolean;
     };
-    expect(parsed.ignored).toBe(true);
+    // 0-conf: detected, NOT ignored — and certainly not paid.
+    expect(parsed.detected).toBe(true);
+    expect(parsed.ignored).toBeUndefined();
 
     const stored = JSON.parse(await readOrderJson(orderId)) as {
       status: string;
+      payment: {
+        status: string;
+        detectedAt: string | null;
+        onchain: { txid: string; confirmations: number } | null;
+      };
     };
+    // The sighting is recorded but the order stays open (NOT claimable).
     expect(stored.status).toBe("payment_pending");
+    expect(stored.payment.status).toBe("pending");
+    expect(typeof stored.payment.detectedAt).toBe("string");
+    expect(stored.payment.onchain?.txid).toBe("a".repeat(64));
+    expect(stored.payment.onchain?.confirmations).toBe(0);
 
     // Once confirmations climb above the minimum, the same report marks it paid.
     const confirmed = JSON.stringify({
@@ -407,10 +420,48 @@ describe("zcash payment webhook", () => {
       signedWebhookRequest(confirmed),
     );
     expect(confirmedResponse.status).toBe(200);
+    const confirmedBody = (await confirmedResponse.json()) as {
+      ok: boolean;
+      order?: TransferPublicOrder;
+    };
+    expect(confirmedBody.order?.status).toBe("paid");
     const confirmedStored = JSON.parse(await readOrderJson(orderId)) as {
       status: string;
     };
     expect(confirmedStored.status).toBe("paid");
+  });
+
+  it("is idempotent for repeated 0-conf sightings of the same txid", async () => {
+    await seedPool();
+    const { orderId, receivingAddress } = await orderWithDeposit();
+    const body = JSON.stringify({
+      receivingAddress,
+      amountZats: 5_000_000,
+      txid: "b".repeat(64),
+      confirmations: 0,
+    });
+    const first = await zcashWebhookRoute(signedWebhookRequest(body));
+    expect(first.status).toBe(200);
+    const firstDetectedAt = (
+      JSON.parse(await readOrderJson(orderId)) as {
+        payment: { detectedAt: string | null };
+      }
+    ).payment.detectedAt;
+    expect(typeof firstDetectedAt).toBe("string");
+
+    const replay = await zcashWebhookRoute(signedWebhookRequest(body));
+    expect(replay.status).toBe(200);
+    const replayBody = (await replay.json()) as { detected?: boolean };
+    expect(replayBody.detected).toBe(true);
+
+    const stored = JSON.parse(await readOrderJson(orderId)) as {
+      status: string;
+      payment: { status: string; detectedAt: string | null };
+    };
+    // detectedAt is stamped only once; status never flips to paid.
+    expect(stored.payment.detectedAt).toBe(firstDetectedAt);
+    expect(stored.status).toBe("payment_pending");
+    expect(stored.payment.status).toBe("pending");
   });
 
   it("is idempotent when the same txid is replayed after paid", async () => {

@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   getBuyerFlowPhase,
   isOrderPaid,
+  isPaymentDetected,
 } from "../app/components/paid-private-file/paid-private-file-panel";
 
 describe("isOrderPaid", () => {
@@ -43,6 +44,43 @@ describe("isOrderPaid", () => {
   });
 });
 
+describe("isPaymentDetected", () => {
+  it("is false for null / undefined / no-payment orders", () => {
+    expect(isPaymentDetected(null)).toBe(false);
+    expect(isPaymentDetected(undefined)).toBe(false);
+    expect(
+      isPaymentDetected({ status: "payment_pending", payment: null }),
+    ).toBe(false);
+  });
+
+  it("is false before any sighting", () => {
+    expect(
+      isPaymentDetected({
+        status: "payment_pending",
+        payment: { status: "pending" },
+      }),
+    ).toBe(false);
+  });
+
+  it("is true once detectedAt is set", () => {
+    expect(
+      isPaymentDetected({
+        status: "payment_pending",
+        payment: { status: "pending", detectedAt: "2026-01-01T00:00:00Z" },
+      }),
+    ).toBe(true);
+  });
+
+  it("is true once an onchain sighting is recorded", () => {
+    expect(
+      isPaymentDetected({
+        status: "payment_pending",
+        payment: { status: "pending", onchain: { txid: "a".repeat(64) } },
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("getBuyerFlowPhase", () => {
   it("is 'loading' before a payment address exists (auto-create in flight)", () => {
     expect(
@@ -62,6 +100,49 @@ describe("getBuyerFlowPhase", () => {
         downloadUrl: "",
       }),
     ).toBe("awaiting-payment");
+  });
+
+  it("is 'detected' on a 0-conf sighting (detectedAt) before it confirms", () => {
+    expect(
+      getBuyerFlowPhase({
+        order: {
+          status: "payment_pending",
+          payment: { status: "pending", detectedAt: "2026-01-01T00:00:00Z" },
+        },
+        payment: { paymentAddress: "u1abc" },
+        downloadUrl: "",
+      }),
+    ).toBe("detected");
+  });
+
+  it("is 'detected' when an onchain sighting is present but not paid", () => {
+    expect(
+      getBuyerFlowPhase({
+        order: {
+          status: "payment_pending",
+          payment: { status: "pending", onchain: { txid: "a".repeat(64) } },
+        },
+        payment: { paymentAddress: "u1abc" },
+        downloadUrl: "",
+      }),
+    ).toBe("detected");
+  });
+
+  it("prefers 'in-transit' (paid) over 'detected' once confirmed", () => {
+    expect(
+      getBuyerFlowPhase({
+        order: {
+          status: "paid",
+          payment: {
+            status: "paid",
+            detectedAt: "2026-01-01T00:00:00Z",
+            onchain: { txid: "a".repeat(64) },
+          },
+        },
+        payment: { paymentAddress: "u1abc" },
+        downloadUrl: "",
+      }),
+    ).toBe("in-transit");
   });
 
   it("is 'in-transit' once payment is confirmed but the file is not opened", () => {

@@ -11,6 +11,7 @@ import { readLimitedText } from "../../../../lib/server/request-body";
 import {
   findOrderIdForDeposit,
   getTransferPublicOrder,
+  markTransferDetectedOnchain,
   markTransferPaidOnchain,
 } from "../../../../lib/server/transfer-store";
 
@@ -77,11 +78,17 @@ export async function POST(request: Request) {
     }
 
     if (report.confirmations < minConfirmations()) {
-      return NextResponse.json({
-        ok: true,
-        ignored: true,
-        reason: "insufficient_confirmations",
+      // 0-conf "Payment detected": the scanner saw the (fully-paid) deposit in
+      // the mempool / below the confirmation threshold. Record an UNCONFIRMED
+      // sighting so the buyer UI can show "Payment detected" instantly, but do
+      // NOT release the key — that still waits for confirmations >= min below.
+      await markTransferDetectedOnchain({
+        orderId,
+        txid: report.txid,
+        amountZats: report.amountZats,
+        confirmations: report.confirmations,
       });
+      return NextResponse.json({ ok: true, detected: true });
     }
 
     const settled = await markTransferPaidOnchain({
