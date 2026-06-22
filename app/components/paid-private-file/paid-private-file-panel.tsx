@@ -22,6 +22,7 @@ import {
   loadBuyerKeyPair,
   loadSellerReleaseDraft,
   saveBuyerKeyPair,
+  saveProductReleaseDraft,
   saveSellerReleaseDraft,
   wrapPaidLinkFileKeyForBuyer,
   type PaidLinkBuyerKeyPair,
@@ -38,6 +39,7 @@ import { createClientTimestampDraft } from "../../../lib/timestamp-client-crypto
 import {
   deleteSellerCiphertext,
   getSellerCiphertext,
+  putProductCiphertext,
   putSellerCiphertext,
 } from "../../../lib/seller-ciphertext-store";
 import type { ProductLocale } from "../../../lib/types";
@@ -179,6 +181,40 @@ interface SellerFile {
 interface SellerFilesResponse {
   files: SellerFile[];
 }
+
+// Multi-buyer "product" model (Phase 3a): a seller's catalog product as the
+// dashboard list summary. Mirrors SellerFile but carries supply/sales instead of
+// the single-use delivery status (a product has many purchases, surfaced in 3b).
+interface SellerProductSummary {
+  productId: string;
+  fileName: string;
+  displayZec: string;
+  status: "open" | "sold_out" | "closed";
+  supply: { mode: "open" } | { mode: "limited"; max: number };
+  salesCount: number;
+  // null for an open (unlimited) product; remaining units for a limited one.
+  remainingSupply: number | null;
+  soldOut: boolean;
+  createdAt: string;
+  sharePath: string;
+}
+
+interface SellerProductsResponse {
+  products: SellerProductSummary[];
+}
+
+interface CreateProductResponse {
+  product: {
+    productId: string;
+    file: { fileName: string };
+    price: { displayZec: string };
+  };
+  sharePath: string;
+}
+
+// Supply control on the create-product form. "open" = unlimited; "limited" needs
+// a positive-integer max.
+type ProductSupplyMode = "open" | "limited";
 
 interface SellerCreateResponse {
   seller: SellerProfile;
@@ -329,6 +365,21 @@ export function PaidPrivateFilePanel({
   const [sellerFilesStatus, setSellerFilesStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
+  // Multi-buyer "product" model (Phase 3a, flag-gated). The seller's catalog
+  // products + the create-form supply control + the product success state. All of
+  // this is only reachable when productsEnabled() is true; with the flag off none
+  // of it renders and the single-use create/dashboard are byte-for-byte unchanged.
+  const [sellerProducts, setSellerProducts] = useState<SellerProductSummary[]>(
+    [],
+  );
+  const [sellerProductsStatus, setSellerProductsStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [supplyMode, setSupplyMode] = useState<ProductSupplyMode>("open");
+  const [supplyMax, setSupplyMax] = useState("");
+  const [createdProduct, setCreatedProduct] =
+    useState<CreateProductResponse | null>(null);
+  const [productShareUrl, setProductShareUrl] = useState("");
   // Manage/release screen: a single file opened from the dashboard list. We hold
   // the full order (GET /api/transfers/:id) so SellerReleasePanel can read
   // release.status, and a load status so the screen can show loading/error.
@@ -663,6 +714,24 @@ export function PaidPrivateFilePanel({
     }
   }
 
+  // Multi-buyer "product" model (Phase 3a): load the seller's catalog products
+  // for the dashboard list. Only called when productsEnabled() is true, so the
+  // single-use dashboard never hits this endpoint when the flag is off.
+  async function loadSellerProducts() {
+    setSellerProductsStatus("loading");
+    try {
+      const body = await postJson<SellerProductsResponse>(
+        "/api/sellers/me/products",
+        { method: "GET" },
+      );
+      setSellerProducts(body.products);
+      setSellerProductsStatus("ready");
+    } catch {
+      // Non-fatal: the dashboard still renders without the products list.
+      setSellerProductsStatus("error");
+    }
+  }
+
   // Seller shop: refresh the files list when the Files screen becomes active for
   // a logged-in seller (mount + screen switch + after a new file is created,
   // which routes back to the Files tab).
@@ -674,6 +743,12 @@ export function PaidPrivateFilePanel({
       return;
     }
     void loadSellerFiles();
+    // Multi-buyer "product" model (Phase 3a): also refresh the products list when
+    // the flag is on. With the flag off this branch is skipped, so the dashboard
+    // never fetches products and behaves exactly like the single-use dashboard.
+    if (productsEnabled()) {
+      void loadSellerProducts();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seller?.sellerId, sellerScreen]);
 
@@ -1067,6 +1142,15 @@ export function PaidPrivateFilePanel({
   }
 
   async function onCreateLink(event: FormEvent<HTMLFormElement>) {
+    // Multi-buyer "product" model (Phase 3a): when the flag is on, the seller's
+    // "Create" publishes a PRODUCT instead of a single-use file. Delegate before
+    // touching ANY single-use state so the flag-off path below is byte-for-byte
+    // unchanged. With the flag off this branch is never taken.
+    if (productsEnabled()) {
+      await onCreateProduct(event);
+      return;
+    }
+
     event.preventDefault();
     setErrorMessage("");
     setCreatedOrder(null);
@@ -1156,6 +1240,126 @@ export function PaidPrivateFilePanel({
       if (seller) {
         setSellerScreen("files");
         void loadSellerFiles();
+      }
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    } finally {
+      setBusyAction("idle");
+    }
+  }
+
+  // Multi-buyer "product" model (Phase 3a): create a PRODUCT (a catalog entry
+  // many buyers can purchase) instead of a single-use file. This mirrors
+  // onCreateLink's create path — encrypt in-browser, derive a seller-held release
+  // draft (the AES fileKey never leaves this browser), POST the ciphertext +
+  // multipart fields to /api/products — but adds the supply config and persists
+  // the release draft + ciphertext keyed by PRODUCT id (not orderId), so the
+  // seller can later deliver EVERY purchase of this product (Phase 3b). Only
+  // invoked when productsEnabled() is true.
+  async function onCreateProduct(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setErrorMessage("");
+    setCreatedProduct(null);
+    setProductShareUrl("");
+
+    if (!file) {
+      setErrorMessage(copy.errors.missingFile);
+      return;
+    }
+    if (newSellerAccessKey && !accessKeyAcknowledged) {
+      setErrorMessage(copy.seller.accessKeyBlocker);
+      return;
+    }
+
+    let amountZats: number;
+    try {
+      amountZats = parseZecToZats(priceZec);
+    } catch {
+      setErrorMessage(copy.errors.invalidPrice);
+      return;
+    }
+
+    if (!isLikelyZcashUnifiedAddress(sellerPayoutAddress)) {
+      setErrorMessage(copy.errors.invalidPayoutAddress);
+      return;
+    }
+
+    // Supply: "open" is unlimited; "limited" requires a positive-integer max.
+    let supplyMaxValue = 0;
+    if (supplyMode === "limited") {
+      supplyMaxValue = Number(supplyMax.trim());
+      if (!Number.isSafeInteger(supplyMaxValue) || supplyMaxValue < 1) {
+        setErrorMessage(copy.products.supplyMaxInvalid);
+        return;
+      }
+    }
+
+    setBusyAction("encrypting");
+    try {
+      const encrypted = await encryptPaidLinkFile(file);
+      // Pure seller-held custody: the AES file key never leaves this browser. We
+      // only upload the SHA-256 of a random release secret; the file key stays in
+      // the local seller vault until the seller releases it per purchase.
+      const releaseDraft = await createPaidLinkSellerReleaseDraft(
+        encrypted.fileKey,
+      );
+      const form = new FormData();
+      form.set("encryptedFile", encrypted.encryptedFile, `${file.name}.enc`);
+      form.set("fileName", file.name);
+      form.set("mimeType", file.type || "application/octet-stream");
+      form.set("originalSizeBytes", String(file.size));
+      form.set("encryptedFileSha256", encrypted.encryptedFileSha256);
+      form.set("encryptionIv", encrypted.encryptionIv);
+      form.set("releaseSecretHash", releaseDraft.releaseSecretHash);
+      form.set("amountZats", String(amountZats));
+      form.set("sellerPayoutAddress", sellerPayoutAddress.trim());
+      form.set("sellerNote", sellerNote);
+      form.set("supplyMode", supplyMode);
+      if (supplyMode === "limited") {
+        form.set("supplyMax", String(supplyMaxValue));
+      }
+
+      const body = await postJson<CreateProductResponse>("/api/products", {
+        method: "POST",
+        body: form,
+      });
+
+      // Persist the product's release draft (the AES fileKey) keyed by PRODUCT id
+      // — analogous to the per-order draft, but one product key serves every
+      // purchase of this product (each spawned order carries the same
+      // releaseSecretHash). Phase 3b loads it by productId to wrap the key for
+      // each buyer.
+      saveProductReleaseDraft(body.product.productId, releaseDraft);
+
+      // Persist the product ciphertext to IndexedDB keyed by PRODUCT id
+      // (best-effort, never blocks create), so this browser can deliver the file
+      // over Nym for every purchase even after a reload. Any IndexedDB failure
+      // leaves the HTTPS fallback (the server keeps its own copy) unchanged.
+      try {
+        const encryptedBytes = new Uint8Array(
+          await encrypted.encryptedFile.arrayBuffer(),
+        );
+        void putProductCiphertext(body.product.productId, encryptedBytes).catch(
+          () => undefined,
+        );
+      } catch {
+        // Non-fatal: without the persisted bytes the buyer uses HTTPS.
+      }
+
+      const href = new URL(
+        withProductLocale(body.sharePath, locale),
+        window.location.origin,
+      ).toString();
+      setCreatedProduct(body);
+      setProductShareUrl(href);
+      // Reset the supply control to the default for the next product.
+      setSupplyMode("open");
+      setSupplyMax("");
+      // Return to the Files tab so the new product appears in "Your products"
+      // (the share link stays available via createdProduct/productShareUrl).
+      if (seller) {
+        setSellerScreen("files");
+        void loadSellerProducts();
       }
     } catch (error) {
       setErrorMessage(formatError(error, copy.errors.serverError));
@@ -2954,6 +3158,9 @@ export function PaidPrivateFilePanel({
             onScreenChange={setSellerScreen}
             files={sellerFiles}
             filesStatus={sellerFilesStatus}
+            productsEnabled={productsEnabled()}
+            products={sellerProducts}
+            productsStatus={sellerProductsStatus}
             onOpenManage={onOpenManage}
             manageOrder={manageOrder}
             manageStatus={manageStatus}
@@ -3038,14 +3245,70 @@ export function PaidPrivateFilePanel({
                       />
                     </label>
 
+                    {/* Multi-buyer "product" model (Phase 3a): the supply
+                        control only renders when the flag is on. With the flag
+                        off this block is skipped and the form is identical to
+                        the single-use create form. */}
+                    {productsEnabled() ? (
+                      <fieldset className="zk-hub-form-field">
+                        <span className="zk-hub-form-label">
+                          {copy.products.supplyLabel}
+                        </span>
+                        <div className="ppf-supply-options">
+                          <label className="ppf-supply-option">
+                            <input
+                              type="radio"
+                              name="supplyMode"
+                              value="open"
+                              checked={supplyMode === "open"}
+                              onChange={() => setSupplyMode("open")}
+                              disabled={isBusy}
+                            />
+                            <span>{copy.products.supplyOpenLabel}</span>
+                          </label>
+                          <label className="ppf-supply-option">
+                            <input
+                              type="radio"
+                              name="supplyMode"
+                              value="limited"
+                              checked={supplyMode === "limited"}
+                              onChange={() => setSupplyMode("limited")}
+                              disabled={isBusy}
+                            />
+                            <span>{copy.products.supplyLimitedLabel}</span>
+                          </label>
+                        </div>
+                        {supplyMode === "limited" ? (
+                          <input
+                            className="ppf-supply-max"
+                            value={supplyMax}
+                            onChange={(event) =>
+                              setSupplyMax(event.target.value)
+                            }
+                            inputMode="numeric"
+                            placeholder={copy.products.supplyMaxPlaceholder}
+                            aria-label={copy.products.supplyMaxLabel}
+                            disabled={isBusy}
+                          />
+                        ) : null}
+                        <span className="zk-hub-form-hint">
+                          {copy.products.supplyHint}
+                        </span>
+                      </fieldset>
+                    ) : null}
+
                     <button
                       className="button-primary"
                       type="submit"
                       disabled={isBusy}
                     >
                       {busyAction === "encrypting"
-                        ? copy.send.busyLabel
-                        : copy.send.submitLabel}
+                        ? productsEnabled()
+                          ? copy.products.busyLabel
+                          : copy.send.busyLabel
+                        : productsEnabled()
+                          ? copy.products.submitLabel
+                          : copy.send.submitLabel}
                     </button>
                   </form>
                 ) : null}
@@ -3086,6 +3349,37 @@ export function PaidPrivateFilePanel({
                       onRelease={() => void onReleaseSellerKey(createdOrder)}
                       disabled={isBusy}
                     />
+                  </div>
+                ) : null}
+
+                {/* Multi-buyer "product" model (Phase 3a): the product success
+                    state. Only reachable when the flag is on (onCreateProduct
+                    sets createdProduct, never createdOrder), so the single-use
+                    success block above is untouched when the flag is off. The
+                    access-key callout rules still apply via the dashboard's
+                    shared callout (rendered by SellerDashboard). */}
+                {createdProduct && productShareUrl ? (
+                  <div className="zectime-paid-result">
+                    <div>
+                      <p className="eyebrow">{copy.products.successTitle}</p>
+                      <p>{copy.products.successBody}</p>
+                    </div>
+                    <div className="zectime-paid-warning">
+                      <p className="eyebrow">{copy.send.shareWarningTitle}</p>
+                      <p>{copy.send.shareWarningBody}</p>
+                    </div>
+                    <code>{productShareUrl}</code>
+                    <div className="zectime-paid-actions">
+                      <button
+                        type="button"
+                        className="button-primary"
+                        onClick={() =>
+                          void navigator.clipboard.writeText(productShareUrl)
+                        }
+                      >
+                        {copy.products.copyLinkLabel}
+                      </button>
+                    </div>
                   </div>
                 ) : null}
               </>
@@ -3664,6 +3958,9 @@ function SellerDashboard({
   onScreenChange,
   files,
   filesStatus,
+  productsEnabled: productsFlag,
+  products,
+  productsStatus,
   onOpenManage,
   manageOrder,
   manageStatus,
@@ -3702,6 +3999,9 @@ function SellerDashboard({
   onScreenChange: (screen: SellerScreen) => void;
   files: SellerFile[];
   filesStatus: "idle" | "loading" | "ready" | "error";
+  productsEnabled: boolean;
+  products: SellerProductSummary[];
+  productsStatus: "idle" | "loading" | "ready" | "error";
   onOpenManage: (orderId: string) => void;
   manageOrder: TransferPublicOrder | null;
   manageStatus: "idle" | "loading" | "ready" | "error";
@@ -3800,6 +4100,10 @@ function SellerDashboard({
         </div>
       ) : null}
 
+      <p className="ppf-keep-open-banner" role="note">
+        {copy.dashboard.keepTabOpenBanner}
+      </p>
+
       <nav className="ppf-shop-tabs" role="tablist">
         {tabs.map((tab) => (
           <button
@@ -3872,6 +4176,18 @@ function SellerDashboard({
         />
       ) : (
         <div className="ppf-shop-screen">
+          {/* Multi-buyer "product" model (Phase 3a): when the flag is on, the
+              seller's products render above the single-use files (clearly
+              labeled). With the flag off this block is skipped and only the
+              files list shows — the dashboard is byte-for-byte unchanged. */}
+          {productsFlag ? (
+            <SellerProductsList
+              copy={copy}
+              locale={locale}
+              products={products}
+              productsStatus={productsStatus}
+            />
+          ) : null}
           <SellerFilesList
             copy={copy}
             locale={locale}
@@ -4063,6 +4379,110 @@ function FileShareCopyButton({
       {copied
         ? copy.dashboard.fileLinkCopiedLabel
         : copy.dashboard.fileCopyLinkLabel}
+    </button>
+  );
+}
+
+// Multi-buyer "product" model (Phase 3a): the seller's catalog products in the
+// dashboard, clearly labeled and shown above the single-use files. Each row shows
+// the file name + price, a supply summary ("Open" or "3 / 10 sold"), a sold-out
+// badge, and a Copy product-link button. Phase 3b adds per-product PURCHASES
+// (the orders spawned from this product) + per-purchase delivery here.
+function SellerProductsList({
+  copy,
+  locale,
+  products,
+  productsStatus,
+}: {
+  copy: PaidPrivateFileCopy;
+  locale: ProductLocale;
+  products: SellerProductSummary[];
+  productsStatus: "idle" | "loading" | "ready" | "error";
+}) {
+  return (
+    <div className="ppf-files ppf-products">
+      <p className="eyebrow">{copy.products.listTitle}</p>
+      {productsStatus === "loading" && products.length === 0 ? (
+        <p className="ppf-muted">{copy.products.listLoading}</p>
+      ) : products.length === 0 ? (
+        <div className="ppf-files-empty">
+          <p className="ppf-files-empty-title">
+            {copy.products.listEmptyTitle}
+          </p>
+          <p className="ppf-muted">{copy.products.listEmptyBody}</p>
+        </div>
+      ) : (
+        <ul className="ppf-files-list">
+          {products.map((product) => {
+            const supplySummary =
+              product.supply.mode === "limited"
+                ? copy.products.supplyLimitedSummary
+                    .replace("{sold}", String(product.salesCount))
+                    .replace("{max}", String(product.supply.max))
+                : copy.products.supplyOpenSummary;
+            return (
+              <li key={product.productId} className="ppf-file-row">
+                <div className="ppf-file-main">
+                  <span className="ppf-product-badge">
+                    {copy.products.productBadge}
+                  </span>
+                  <span className="ppf-file-name">{product.fileName}</span>
+                  <span className="ppf-file-price">
+                    {product.displayZec} ZEC
+                  </span>
+                </div>
+                <div className="ppf-file-side">
+                  <span
+                    className="ppf-status-badge"
+                    data-status={product.status}
+                  >
+                    {product.soldOut
+                      ? copy.products.soldOutLabel
+                      : supplySummary}
+                  </span>
+                  <ProductShareCopyButton
+                    sharePath={product.sharePath}
+                    locale={locale}
+                    copy={copy}
+                  />
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// Copy the PRODUCT share link to the clipboard. Unlike the single-use file link,
+// a product link is safe to open by many buyers (each purchase spawns its own
+// order), but the seller still copies-and-sends it rather than opening it.
+function ProductShareCopyButton({
+  sharePath,
+  locale,
+  copy,
+}: {
+  sharePath: string;
+  locale: ProductLocale;
+  copy: PaidPrivateFileCopy;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="ppf-file-open"
+      onClick={() => {
+        const url = new URL(
+          withProductLocale(sharePath, locale),
+          window.location.origin,
+        ).toString();
+        void navigator.clipboard.writeText(url);
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied ? copy.products.linkCopiedLabel : copy.products.copyLinkLabel}
     </button>
   );
 }
@@ -5206,6 +5626,15 @@ async function stopBrowserNymClientQuietly(
 // Nym mixnet directly to the buyer (the server no longer relays it over Nym).
 function browserNymDeliveryEnabled(): boolean {
   return process.env.NEXT_PUBLIC_PPF_BROWSER_NYM === "1";
+}
+
+// Multi-buyer "product" model (Phase 3a): when on, the seller's create form
+// publishes a PRODUCT (one catalog entry many buyers can purchase) instead of a
+// single-use file, and the dashboard lists those products. Default OFF (prod
+// default) — with the flag off the create + dashboard behave byte-for-byte like
+// today's single-use flow. Mirrors browserNymFileTransferEnabled's read style.
+function productsEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_PPF_PRODUCTS === "1";
 }
 
 // Browser-to-browser FILE transfer over Nym: when on, the seller streams the

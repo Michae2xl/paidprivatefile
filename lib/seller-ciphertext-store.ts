@@ -13,8 +13,16 @@
 // in-memory + HTTPS-fallback behavior.
 
 const DB_NAME = "paidprivatefile";
-const DB_VERSION = 1;
+// Bumped to 2 to add the product-ciphertext object store alongside the order
+// store. onupgradeneeded creates ANY missing store, so a browser on v1 upgrades
+// in place (the existing per-order store is preserved) and a fresh browser gets
+// both. Multi-buyer "product" model: a product holds one self-contained
+// ciphertext that every future purchase reuses, so the seller browser persists
+// it keyed by productId (parallel to the per-order keying) to deliver every
+// purchase of that product over Nym after a reload.
+const DB_VERSION = 2;
 const STORE_NAME = "seller_ciphertext";
+const PRODUCT_STORE_NAME = "seller_product_ciphertext";
 
 // The minimal IndexedDB surface this module depends on. Injectable so the
 // put/get/delete round-trip can be unit-tested with a small in-memory fake
@@ -55,6 +63,9 @@ function openDb(factory?: IndexedDBFactoryLike): Promise<IDBDatabase | null> {
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
+      if (!db.objectStoreNames.contains(PRODUCT_STORE_NAME)) {
+        db.createObjectStore(PRODUCT_STORE_NAME);
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
@@ -64,20 +75,21 @@ function openDb(factory?: IndexedDBFactoryLike): Promise<IDBDatabase | null> {
 
 function runStore<T>(
   db: IDBDatabase,
+  storeName: string,
   storeMode: IDBTransactionMode,
   work: (store: IDBObjectStore) => IDBRequest<T> | null,
 ): Promise<T | null> {
   return new Promise((resolve) => {
     let tx: IDBTransaction;
     try {
-      tx = db.transaction(STORE_NAME, storeMode);
+      tx = db.transaction(storeName, storeMode);
     } catch {
       resolve(null);
       return;
     }
     let request: IDBRequest<T> | null;
     try {
-      request = work(tx.objectStore(STORE_NAME));
+      request = work(tx.objectStore(storeName));
     } catch {
       resolve(null);
       return;
@@ -108,7 +120,7 @@ export async function putSellerCiphertext(
     // Copy into a standalone ArrayBuffer-backed Uint8Array so the stored value
     // is independent of any shared/detached source buffer.
     const stored = bytes.slice();
-    await runStore<IDBValidKey>(db, "readwrite", (store) =>
+    await runStore<IDBValidKey>(db, STORE_NAME, "readwrite", (store) =>
       store.put(stored, orderId),
     );
   } finally {
@@ -127,7 +139,7 @@ export async function getSellerCiphertext(
     return null;
   }
   try {
-    const value = await runStore<unknown>(db, "readonly", (store) =>
+    const value = await runStore<unknown>(db, STORE_NAME, "readonly", (store) =>
       store.get(orderId),
     );
     if (value instanceof Uint8Array) {
@@ -152,8 +164,80 @@ export async function deleteSellerCiphertext(
     return;
   }
   try {
-    await runStore<undefined>(db, "readwrite", (store) =>
+    await runStore<undefined>(db, STORE_NAME, "readwrite", (store) =>
       store.delete(orderId),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+// --- Product ciphertext (multi-buyer "product" model) ---------------------
+// Same best-effort IndexedDB persistence as the per-order helpers above, but
+// keyed by productId and backed by a separate object store. A product holds one
+// self-contained ciphertext that every future purchase reuses, so the creating
+// browser persists it once at create time; Phase 3b loads it by productId to
+// stream each purchase's file over Nym. Every helper degrades to a no-op / null
+// exactly like the order helpers, so a browser without IndexedDB simply re-uploads
+// nothing and the HTTPS fallback keeps working.
+
+export async function putProductCiphertext(
+  productId: string,
+  bytes: Uint8Array,
+  factory?: IndexedDBFactoryLike,
+): Promise<void> {
+  const db = await openDb(factory);
+  if (!db) {
+    return;
+  }
+  try {
+    const stored = bytes.slice();
+    await runStore<IDBValidKey>(db, PRODUCT_STORE_NAME, "readwrite", (store) =>
+      store.put(stored, productId),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+export async function getProductCiphertext(
+  productId: string,
+  factory?: IndexedDBFactoryLike,
+): Promise<Uint8Array | null> {
+  const db = await openDb(factory);
+  if (!db) {
+    return null;
+  }
+  try {
+    const value = await runStore<unknown>(
+      db,
+      PRODUCT_STORE_NAME,
+      "readonly",
+      (store) => store.get(productId),
+    );
+    if (value instanceof Uint8Array) {
+      return value;
+    }
+    if (value instanceof ArrayBuffer) {
+      return new Uint8Array(value);
+    }
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
+export async function deleteProductCiphertext(
+  productId: string,
+  factory?: IndexedDBFactoryLike,
+): Promise<void> {
+  const db = await openDb(factory);
+  if (!db) {
+    return;
+  }
+  try {
+    await runStore<undefined>(db, PRODUCT_STORE_NAME, "readwrite", (store) =>
+      store.delete(productId),
     );
   } finally {
     db.close();

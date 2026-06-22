@@ -71,6 +71,7 @@ export interface PaidPrivateFileCopy {
   };
   dashboard: {
     createFileCta: string;
+    keepTabOpenBanner: string;
     signOutLabel: string;
     backToDashboard: string;
     tabDashboard: string;
@@ -156,6 +157,35 @@ export interface PaidPrivateFileCopy {
     openLinkLabel: string;
     shareWarningTitle: string;
     shareWarningBody: string;
+  };
+  // Multi-buyer "product" model (Phase 3a): supply control on the create form +
+  // the product success state. Only rendered when the products feature flag is on;
+  // with the flag off none of these strings are reachable.
+  products: {
+    supplyLabel: string;
+    supplyHint: string;
+    supplyOpenLabel: string;
+    supplyLimitedLabel: string;
+    supplyMaxLabel: string;
+    supplyMaxPlaceholder: string;
+    supplyMaxInvalid: string;
+    submitLabel: string;
+    busyLabel: string;
+    successTitle: string;
+    successBody: string;
+    // Dashboard products list (rendered alongside the single-use files).
+    listTitle: string;
+    listEmptyTitle: string;
+    listEmptyBody: string;
+    listLoading: string;
+    copyLinkLabel: string;
+    linkCopiedLabel: string;
+    // Supply summary on a product row: "Open" for unlimited, "{sold} / {max} sold"
+    // for a limited product.
+    supplyOpenSummary: string;
+    supplyLimitedSummary: string;
+    soldOutLabel: string;
+    productBadge: string;
   };
   receive: {
     title: string;
@@ -375,6 +405,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     dashboard: {
       createFileCta: "Criar arquivo pago",
+      keepTabOpenBanner:
+        "Mantenha esta aba aberta: e o seu navegador que entrega os arquivos aos compradores pela Nym. Fecha-la pausa as entregas pendentes.",
       signOutLabel: "Sair",
       backToDashboard: "Voltar ao painel",
       tabDashboard: "Painel",
@@ -460,6 +492,32 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       shareWarningTitle: "Importante",
       shareWarningBody:
         "Abra este link em outro navegador ou dispositivo, não neste. O primeiro navegador que abrir o link vira o comprador, e a entrega pela Nym precisa de dois navegadores separados. Venda um arquivo por vez e mantenha esta aba aberta até o comprador confirmar o recebimento.",
+    },
+    products: {
+      supplyLabel: "Estoque",
+      supplyHint:
+        "Quantos compradores podem adquirir este produto. Ilimitado vende sem limite; Limitado esgota apos atingir a quantidade.",
+      supplyOpenLabel: "Ilimitado (aberto)",
+      supplyLimitedLabel: "Limitado",
+      supplyMaxLabel: "Quantidade",
+      supplyMaxPlaceholder: "Ex: 10",
+      supplyMaxInvalid: "A quantidade deve ser um numero inteiro positivo.",
+      submitLabel: "Criar produto",
+      busyLabel: "Cifrando e criando produto...",
+      successTitle: "Produto publicado",
+      successBody:
+        "Compartilhe o link do produto. Cada comprador recebe o proprio pedido; o arquivo so abre depois do pagamento em ZEC.",
+      listTitle: "Seus produtos",
+      listEmptyTitle: "Nenhum produto ainda",
+      listEmptyBody:
+        "Crie um produto para vender o mesmo arquivo para varios compradores.",
+      listLoading: "Carregando produtos...",
+      copyLinkLabel: "Copiar link do produto",
+      linkCopiedLabel: "Link copiado",
+      supplyOpenSummary: "Aberto",
+      supplyLimitedSummary: "{sold} / {max} vendidos",
+      soldOutLabel: "Esgotado",
+      productBadge: "Produto",
     },
     receive: {
       title: "Pagar e abrir localmente",
@@ -676,6 +734,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     dashboard: {
       createFileCta: "Create paid file",
+      keepTabOpenBanner:
+        "Keep this tab open: your browser is what delivers files to buyers over Nym. Closing it pauses pending deliveries until you reopen.",
       signOutLabel: "Sign out",
       backToDashboard: "Back to files",
       tabDashboard: "Files",
@@ -761,6 +821,31 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       shareWarningTitle: "Important",
       shareWarningBody:
         "Open this link in a different browser or device, not this one. The first browser to open the link becomes the buyer, and delivery over Nym needs two separate browsers. Sell one file at a time, and keep this tab open until the buyer confirms receipt.",
+    },
+    products: {
+      supplyLabel: "Supply",
+      supplyHint:
+        "How many buyers can purchase this product. Unlimited sells with no cap; Limited sells out once the quantity is reached.",
+      supplyOpenLabel: "Unlimited (open)",
+      supplyLimitedLabel: "Limited",
+      supplyMaxLabel: "Quantity",
+      supplyMaxPlaceholder: "e.g. 10",
+      supplyMaxInvalid: "Quantity must be a positive whole number.",
+      submitLabel: "Create product",
+      busyLabel: "Encrypting and creating product...",
+      successTitle: "Product published",
+      successBody:
+        "Share the product link. Each buyer gets their own order; the file only opens after their ZEC payment is confirmed.",
+      listTitle: "Your products",
+      listEmptyTitle: "No products yet",
+      listEmptyBody: "Create a product to sell the same file to many buyers.",
+      listLoading: "Loading products...",
+      copyLinkLabel: "Copy product link",
+      linkCopiedLabel: "Link copied",
+      supplyOpenSummary: "Open",
+      supplyLimitedSummary: "{sold} / {max} sold",
+      soldOutLabel: "Sold out",
+      productBadge: "Product",
     },
     receive: {
       title: "Pay in ZEC, decrypt on your device",

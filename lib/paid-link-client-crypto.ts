@@ -234,6 +234,46 @@ export function loadSellerReleaseDraft(
   return null;
 }
 
+// Multi-buyer "product" model: the seller's release draft for a PRODUCT, keyed by
+// productId instead of orderId. It is the SAME shape as the order release-draft
+// (releaseSecret + releaseSecretHash + the AES fileKey) because a product holds
+// one self-contained ciphertext + key that every future purchase reuses. Phase 3b
+// will look this up by productId to wrap the product's fileKey for each buyer of
+// that product (every order spawned from the product carries the same
+// releaseSecretHash, so the product key opens every purchase). Stored under a
+// distinct key namespace so it never collides with the per-order drafts.
+export function saveProductReleaseDraft(
+  productId: string,
+  draft: PaidLinkSellerReleaseDraft,
+): void {
+  window.localStorage.setItem(
+    productStorageKey(productId),
+    JSON.stringify(draft),
+  );
+}
+
+export function loadProductReleaseDraft(
+  productId: string,
+): PaidLinkSellerReleaseDraft | null {
+  const raw = window.localStorage.getItem(productStorageKey(productId));
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as PaidLinkSellerReleaseDraft;
+    if (
+      typeof parsed.releaseSecret === "string" &&
+      typeof parsed.releaseSecretHash === "string" &&
+      typeof parsed.fileKey === "string"
+    ) {
+      return parsed;
+    }
+  } catch {
+    window.localStorage.removeItem(productStorageKey(productId));
+  }
+  return null;
+}
+
 /**
  * Human-comparable fingerprint of a P-256 public key. Buyer and seller compute
  * the same code from the same public key; if a malicious server substitutes the
@@ -262,6 +302,10 @@ function storageKey(orderId: string): string {
 
 function sellerStorageKey(orderId: string): string {
   return `zectime_paid_link_seller_release_${orderId}`;
+}
+
+function productStorageKey(productId: string): string {
+  return `zectime_paid_link_product_release_${productId}`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
