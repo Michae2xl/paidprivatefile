@@ -194,6 +194,10 @@ export interface PaidPrivateFileCopy {
     arrivedTitle: string;
     arrivedBody: string;
     saveFileLabel: string;
+    // Browser-to-browser file transfer over Nym: progress label shown in the
+    // "Receiving your file…" card while the encrypted file streams over the
+    // mixnet. "{percent}" is replaced with the integer percent received.
+    receivingOverNym: string;
   };
   // Buyer status stepper + Nym receiver health (visibility into where a transfer
   // is). All layperson, en + pt.
@@ -235,6 +239,10 @@ export interface PaidPrivateFileCopy {
     deliveredToBuyer: string;
     notDeliveredYet: string;
     keepTabOpenHint: string;
+    // Browser-to-browser file transfer over Nym: progress label shown while the
+    // seller browser streams the encrypted file to the buyer over the mixnet.
+    // "{percent}" is replaced with the integer percent sent.
+    sendingOverNym: string;
   };
   details: {
     price: string;
@@ -471,6 +479,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       arrivedBody:
         "O download deve comecar sozinho. Se nao comecar, toque em Salvar arquivo.",
       saveFileLabel: "Salvar arquivo",
+      receivingOverNym: "Recebendo pela Nym... {percent}%",
     },
     buyerStatus: {
       title: "Status da sua compra",
@@ -511,6 +520,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "Enviada pela Nym, aguardando confirmacao do comprador. Reenviando automaticamente enquanto esta tela estiver aberta.",
       keepTabOpenHint:
         "Mantenha esta tela aberta ate aparecer Entregue ao comprador.",
+      sendingOverNym: "Enviando pela Nym... {percent}%",
     },
     details: {
       price: "Preco",
@@ -748,6 +758,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       arrivedBody:
         "The download should start on its own. If it doesn't, tap Save file.",
       saveFileLabel: "Save file",
+      receivingOverNym: "Receiving over Nym... {percent}%",
     },
     buyerStatus: {
       title: "Your purchase status",
@@ -788,6 +799,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "Sent over Nym, waiting for the buyer to confirm receipt. Re-sending automatically while this screen is open.",
       keepTabOpenHint:
         "Keep this screen open until it shows Delivered to buyer.",
+      sendingOverNym: "Sending over Nym... {percent}%",
     },
     details: {
       price: "Price",

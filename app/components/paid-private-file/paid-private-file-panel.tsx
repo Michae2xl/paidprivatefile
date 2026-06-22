@@ -28,6 +28,12 @@ import {
   type PaidLinkKeyEnvelope,
 } from "../../../lib/paid-link-client-crypto";
 import { extractServerErrorMessage } from "../../../lib/server-error-message";
+import {
+  createNymFileReceiver,
+  decodePacket,
+  startNymFileSender,
+  type NymFileReceiver,
+} from "../../../lib/nym-file-transfer";
 import { createClientTimestampDraft } from "../../../lib/timestamp-client-crypto";
 import type { ProductLocale } from "../../../lib/types";
 import { withProductLocale } from "../../../lib/locale";
@@ -233,10 +239,23 @@ interface BrowserNymClient {
       recipient: string;
       replySurbs?: number;
     }) => Promise<void>;
+    // Binary send used for the chunked file transfer. The SDK delivers these to
+    // the recipient's subscribeToRawMessageReceivedEvent untouched.
+    rawSend: (args: {
+      payload: Uint8Array;
+      recipient: string;
+      replySurbs?: number;
+    }) => Promise<void>;
   };
   events: {
     subscribeToTextMessageReceivedEvent: (
       handler: (event: { args: { payload: string } }) => void | Promise<void>,
+    ) => () => void;
+    // Inbound raw (binary) messages — the file-transfer chunks.
+    subscribeToRawMessageReceivedEvent: (
+      handler: (event: {
+        args: { payload: Uint8Array };
+      }) => void | Promise<void>,
     ) => () => void;
   };
 }
@@ -364,6 +383,57 @@ export function PaidPrivateFilePanel({
   const [nymEnvelopesReceived, setNymEnvelopesReceived] = useState(0);
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
+  // Unsubscribe handle for the inbound RAW (binary) file-chunk subscription,
+  // kept separate from the text-envelope subscription above so each can be
+  // (re)wired independently when the client (re)bootstraps.
+  const browserNymRawUnsubscribeRef = useRef<(() => void) | null>(null);
+  // No-rotate guard for an active browser-to-browser FILE transfer. The buyer
+  // heartbeat and seller re-send loops re-bootstrap the Nym client and can
+  // rotate to a fresh gateway/address; doing that mid-transfer would orphan the
+  // in-flight chunks. While this is true, the bootstrap reuses the live client
+  // instead of rotating, and the heartbeat skips re-registering the address.
+  const transferInProgressRef = useRef(false);
+  // In-memory ciphertext for the order being sold from THIS browser this session
+  // (kept from encryptPaidLinkFile at create time). Acceptable for MVP: the
+  // seller is already required to be online with the creating browser to release
+  // the key. Lost on reload — the buyer's HTTPS fallback still works because the
+  // ciphertext is also uploaded.
+  const sellerCiphertextRef = useRef<Map<string, Uint8Array>>(new Map());
+  // Orders whose file is currently being streamed over Nym from this browser, so
+  // the per-tick re-send loops do not start a second concurrent transfer for the
+  // same order. Cleared when a send settles (so a failed send can be retried).
+  const sellerFileSendInFlightRef = useRef<Set<string>>(new Set());
+  // The active in-browser file receiver (buyer side). Inbound raw chunks are
+  // routed here; on complete it resolves the verified ciphertext.
+  const nymFileReceiverRef = useRef<NymFileReceiver | null>(null);
+  // Buyer side: the P-256 ECDH key envelope received over the Nym TEXT channel,
+  // kept by order so the FILE receiver (raw channel) can decrypt the reassembled
+  // ciphertext with the same key. The key still arrives over Nym exactly as
+  // today; we just stash it instead of immediately fetching over HTTPS.
+  const nymKeyEnvelopeRef = useRef<Map<string, PaidLinkKeyEnvelope>>(new Map());
+  // Buyer side: ciphertext fully reassembled + SHA-verified over Nym but not yet
+  // decrypted because the key envelope had not arrived. Decrypted the moment the
+  // key lands (handleNymTextMessage) — removes the file-before-key race.
+  const nymReassembledRef = useRef<Map<string, Uint8Array>>(new Map());
+  // Buyer side: per-order timer that triggers the HTTPS fallback if the Nym file
+  // transfer has not delivered within a generous bound after the key arrived.
+  const buyerFallbackTimerRef = useRef<Map<string, number>>(new Map());
+  // Orders whose file we have already received (or are actively receiving) over
+  // Nym this session, so a duplicate Offer never starts a second receiver.
+  const nymFileHandledRef = useRef<Set<string>>(new Set());
+  // Screen Wake Lock held during an active seller send so the OS does not sleep
+  // the tab mid-transfer (mobile especially). Released when the send ends.
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  // Seller-side file-send progress (0..100) for the "Sending over Nym… N%" UI.
+  // null = not sending.
+  const [sellerSendProgress, setSellerSendProgress] = useState<number | null>(
+    null,
+  );
+  // Buyer-side file-receive progress (0..100) for the "Receiving over Nym… N%"
+  // UI. null = not receiving over Nym (still on the spinner / HTTPS path).
+  const [buyerReceiveProgress, setBuyerReceiveProgress] = useState<
+    number | null
+  >(null);
   // Guards the buyer heartbeat so a slow (re)bootstrap / re-register tick cannot
   // overlap the next interval and double-start the Nym client.
   const buyerHeartbeatInFlightRef = useRef(false);
@@ -464,10 +534,16 @@ export function PaidPrivateFilePanel({
     return () => {
       browserNymUnsubscribeRef.current?.();
       browserNymUnsubscribeRef.current = null;
+      browserNymRawUnsubscribeRef.current?.();
+      browserNymRawUnsubscribeRef.current = null;
+      nymFileReceiverRef.current?.abort("panel unmounted");
+      nymFileReceiverRef.current = null;
+      void releaseWakeLock();
       const client = browserNymClientRef.current;
       browserNymClientRef.current = null;
       void client?.client.stop();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -900,6 +976,19 @@ export function PaidPrivateFilePanel({
         body: form,
       });
       saveSellerReleaseDraft(body.order.orderId, releaseDraft);
+      // Keep the encrypted bytes in memory for THIS session so the seller can
+      // stream the file to the buyer over Nym (browser-to-browser). Acceptable
+      // for MVP: the seller is already required to be online with the creating
+      // browser to release the key. If lost (reload), the buyer's HTTPS fallback
+      // still works because the ciphertext is also uploaded.
+      try {
+        const encryptedBytes = new Uint8Array(
+          await encrypted.encryptedFile.arrayBuffer(),
+        );
+        sellerCiphertextRef.current.set(body.order.orderId, encryptedBytes);
+      } catch {
+        // Non-fatal: without the in-memory bytes the buyer uses HTTPS.
+      }
       const href = new URL(
         withProductLocale(body.sharePath, locale),
         window.location.origin,
@@ -941,6 +1030,19 @@ export function PaidPrivateFilePanel({
     buyerReceivedRef.current = false;
     buyerAutoDownloadedRef.current = "";
     setNymEnvelopesReceived(0);
+    // Reset any in-flight browser-to-browser FILE transfer state from a prior
+    // order so the receiver/key/fallback for THIS order start clean.
+    nymFileReceiverRef.current?.abort("loading a new order");
+    nymFileReceiverRef.current = null;
+    nymFileHandledRef.current.clear();
+    nymReassembledRef.current.clear();
+    nymKeyEnvelopeRef.current.clear();
+    buyerFallbackTimerRef.current.forEach((handle) =>
+      window.clearTimeout(handle),
+    );
+    buyerFallbackTimerRef.current.clear();
+    transferInProgressRef.current = false;
+    setBuyerReceiveProgress(null);
 
     try {
       const body = await postJson<{ order: TransferPublicOrder }>(
@@ -1155,6 +1257,24 @@ export function PaidPrivateFilePanel({
       }
     }
 
+    // No-rotate guard: never spin up a FRESH client (which draws a new gateway
+    // and a new address) while a file transfer is in flight — rotating mid-
+    // transfer changes our address and orphans the in-flight chunks/control
+    // frames. If we have a live client, reuse it even if selfAddress() returns
+    // empty momentarily. If we have NO client at all during a transfer, refuse
+    // to bootstrap (which would rotate) rather than silently changing address.
+    if (transferInProgressRef.current) {
+      if (existing) {
+        return {
+          client: existing,
+          address: (await existing.client.selfAddress()) ?? "",
+        };
+      }
+      throw new Error(
+        "Nym client unavailable mid-transfer (refusing to rotate gateway)",
+      );
+    }
+
     const nymModule = await import("@nymproject/sdk-full-fat");
     // The SDK pins a gateway per clientId (persisted in IndexedDB), so reusing a
     // single id across attempts would re-draw the SAME (possibly dead) gateway
@@ -1197,6 +1317,14 @@ export function PaidPrivateFilePanel({
         browserNymUnsubscribeRef.current =
           nym.events.subscribeToTextMessageReceivedEvent((event) => {
             void handleNymTextMessage(event.args.payload);
+          });
+        // Inbound binary (file chunk) handler for the browser-to-browser file
+        // transfer. Routed to handleNymRawMessage, which decodes the frame and
+        // drives the active receiver. Resubscribed per (re)bootstrap.
+        browserNymRawUnsubscribeRef.current?.();
+        browserNymRawUnsubscribeRef.current =
+          nym.events.subscribeToRawMessageReceivedEvent((event) => {
+            handleNymRawMessage(event.args.payload);
           });
       }
 
@@ -1250,6 +1378,372 @@ export function PaidPrivateFilePanel({
       payload: { message, mimeType: "application/json" },
       recipient: input.buyerNymAddress,
     });
+  }
+
+  // Best-effort Screen Wake Lock: keep the seller's tab awake during an active
+  // send so the OS does not suspend the page mid-transfer (common on mobile).
+  // Wrapped so a missing/denied API never throws.
+  async function acquireWakeLock(): Promise<void> {
+    try {
+      const nav = navigator as Navigator & {
+        wakeLock?: {
+          request: (
+            type: "screen",
+          ) => Promise<{ release: () => Promise<void> }>;
+        };
+      };
+      if (!nav.wakeLock || wakeLockRef.current) {
+        return;
+      }
+      wakeLockRef.current = await nav.wakeLock.request("screen");
+    } catch {
+      // Wake Lock unavailable/denied — not fatal; the send continues.
+    }
+  }
+
+  async function releaseWakeLock(): Promise<void> {
+    const lock = wakeLockRef.current;
+    wakeLockRef.current = null;
+    try {
+      await lock?.release();
+    } catch {
+      // Already released or the page is gone.
+    }
+  }
+
+  // Seller-side browser-to-browser FILE send over Nym. Streams the in-memory
+  // ciphertext for this order to the buyer's Nym address using the clean-room
+  // chunked sender (offer -> paced chunks -> done, ARQ on retransmit, resolve on
+  // ack). Holds a no-rotate guard + wake lock for the duration and reports
+  // progress. Returns true if the buyer acked, false if it could not run (no
+  // ciphertext in this browser) — the caller then relies on the HTTPS fallback.
+  async function sendFileOverNym(input: {
+    orderId: string;
+    buyerNymAddress: string;
+  }): Promise<boolean> {
+    const ciphertext = sellerCiphertextRef.current.get(input.orderId);
+    if (!ciphertext) {
+      // This browser does not hold the ciphertext bytes (created elsewhere, or
+      // reloaded). The buyer's HTTPS fallback still works.
+      return false;
+    }
+    const { client } = await bootstrapBrowserNymClient({ subscribe: false });
+    // The seller must hear the buyer's Retransmit/Ack control frames, which the
+    // SDK delivers as RAW (binary) messages. The seller bootstrap does not
+    // subscribe, so attach a dedicated raw subscription for THIS send's lifetime
+    // and tear it down when the send settles.
+    const senderAddress = (await client.client.selfAddress()) ?? "";
+    transferInProgressRef.current = true;
+    await acquireWakeLock();
+    setSellerSendProgress(0);
+    let aborted = false;
+    let unsubscribeRaw: (() => void) | null = null;
+    try {
+      const sender = await startNymFileSender(
+        input.orderId,
+        ciphertext,
+        (payload) =>
+          client.client.rawSend({
+            payload,
+            recipient: input.buyerNymAddress,
+          }),
+        {
+          senderAddress,
+          onProgress: (sent, total) => {
+            setSellerSendProgress(
+              total > 0 ? Math.round((sent / total) * 100) : 100,
+            );
+          },
+          shouldAbort: () => aborted,
+        },
+      );
+      // Route the buyer's inbound control frames into THIS sender for the ARQ +
+      // ack latch. A non-transfer or other-order packet is ignored by the sender.
+      unsubscribeRaw = client.events.subscribeToRawMessageReceivedEvent(
+        (event) => {
+          const packet = decodePacket(event.args.payload);
+          if (packet) {
+            sender.handlePacket(packet);
+          }
+        },
+      );
+      await sender.done();
+      return true;
+    } catch {
+      aborted = true;
+      return false;
+    } finally {
+      unsubscribeRaw?.();
+      transferInProgressRef.current = false;
+      setSellerSendProgress(null);
+      void releaseWakeLock();
+    }
+  }
+
+  // Single-flight wrapper around sendFileOverNym used by the release/re-send
+  // paths so a per-~6s re-send tick never starts a second concurrent transfer
+  // for the same order. Best-effort: a failed send clears the guard so a later
+  // tick retries; the buyer's HTTPS fallback covers a persistent failure.
+  function maybeSendFileOverNym(input: {
+    orderId: string;
+    buyerNymAddress: string;
+  }): void {
+    if (!browserNymFileTransferEnabled()) {
+      return;
+    }
+    if (sellerFileSendInFlightRef.current.has(input.orderId)) {
+      return;
+    }
+    if (!sellerCiphertextRef.current.has(input.orderId)) {
+      // This browser does not hold the ciphertext (created elsewhere/reloaded);
+      // the buyer falls back to HTTPS, so do not even start.
+      return;
+    }
+    sellerFileSendInFlightRef.current.add(input.orderId);
+    void sendFileOverNym(input)
+      .then((acked) => {
+        // Free the in-memory ciphertext once the buyer has confirmed receipt so
+        // it is not held for the rest of the session. A failed send keeps it so
+        // a later re-send tick can retry.
+        if (acked) {
+          sellerCiphertextRef.current.delete(input.orderId);
+        }
+      })
+      .finally(() => {
+        sellerFileSendInFlightRef.current.delete(input.orderId);
+      });
+  }
+
+  // Inbound RAW (binary) dispatch on the buyer's subscribed client: decode the
+  // frame and route it to (or start) the file receiver for the loaded order. The
+  // seller's send attaches its OWN raw subscription for control frames, so this
+  // handler is purely the buyer-receive path.
+  function handleNymRawMessage(payload: Uint8Array): void {
+    const packet = decodePacket(payload);
+    if (!packet) {
+      return;
+    }
+    routeBuyerFilePacket(packet.orderId, packet);
+  }
+
+  // Buyer side: route a decoded file packet to the active receiver, starting one
+  // on the first packet for the currently loaded, paid order. The receiver emits
+  // its own Retransmit/Ack control frames back to the seller via rawSend.
+  function routeBuyerFilePacket(
+    packetOrderId: string,
+    packet: ReturnType<typeof decodePacket>,
+  ): void {
+    if (!packet) {
+      return;
+    }
+    const order = loadedOrder;
+    // Only accept chunks for the order this buyer is actively receiving.
+    if (!order || packetOrderId !== order.orderId) {
+      return;
+    }
+    // Already have the file (HTTPS or a prior Nym receive) — ignore.
+    if (buyerReceivedRef.current || downloadUrl) {
+      return;
+    }
+    if (!nymFileReceiverRef.current) {
+      // Only start a receiver for a paid order whose file has not arrived.
+      if (!isOrderPaid(order) || nymFileHandledRef.current.has(order.orderId)) {
+        return;
+      }
+      startBuyerFileReceiver(order);
+    }
+    nymFileReceiverRef.current?.handlePacket(packet);
+  }
+
+  // Stand up a clean-room file receiver for `order`. On completion it verifies
+  // the SHA-256 against the order, then decrypts the reassembled ciphertext with
+  // the key the buyer ALREADY received over the Nym text channel (or claims it),
+  // reusing the exact same crypto path as the HTTPS openClaimPayload.
+  function startBuyerFileReceiver(order: TransferPublicOrder): void {
+    const client = browserNymClientRef.current;
+    if (!client) {
+      return;
+    }
+    nymFileHandledRef.current.add(order.orderId);
+    transferInProgressRef.current = true;
+    setBuyerReceiveProgress(0);
+    const receiver = createNymFileReceiver(
+      order.orderId,
+      (payload, recipient) =>
+        client.client.rawSend({ payload, recipient }).catch(() => undefined),
+      {
+        expectedSha256: order.file.encryptedFileSha256,
+        onProgress: (received, total) => {
+          setBuyerReceiveProgress(
+            total > 0 ? Math.round((received / total) * 100) : 0,
+          );
+        },
+      },
+    );
+    nymFileReceiverRef.current = receiver;
+    void receiver
+      .done()
+      .then(async (ciphertext) => {
+        await openReassembledCiphertext(order, ciphertext);
+      })
+      .catch(() => {
+        // Nym file transfer failed/timed out: fall back to the HTTPS fetch path,
+        // which still works because the ciphertext is also uploaded.
+        nymFileHandledRef.current.delete(order.orderId);
+        void buyerHttpsFallback(order);
+      })
+      .finally(() => {
+        if (nymFileReceiverRef.current === receiver) {
+          nymFileReceiverRef.current = null;
+        }
+        transferInProgressRef.current = false;
+        setBuyerReceiveProgress(null);
+      });
+  }
+
+  // Decrypt + open the ciphertext reassembled over Nym. Mirrors openClaimPayload
+  // but takes the bytes in hand (already SHA-verified by the receiver) instead of
+  // fetching them over HTTPS. The AES key still comes from the P-256 ECDH key
+  // envelope delivered over the Nym text channel.
+  async function openReassembledCiphertext(
+    order: TransferPublicOrder,
+    ciphertext: Uint8Array,
+  ): Promise<void> {
+    const keyPair = loadBuyerKeyPair(order.orderId);
+    const envelope = nymKeyEnvelopeRef.current.get(order.orderId);
+    if (!keyPair) {
+      // No buyer keypair on this device — only HTTPS (with its own claim) helps.
+      void buyerHttpsFallback(order);
+      return;
+    }
+    if (!envelope) {
+      // File bytes are verified and in hand, but the key envelope (Nym text
+      // channel) has not landed yet. Buffer the ciphertext; the key-arrival
+      // handler decrypts it the moment the envelope shows up. Arm the HTTPS
+      // fallback so a key that never arrives over Nym still resolves (the
+      // fallback claims the key + ciphertext together over HTTPS).
+      nymReassembledRef.current.set(order.orderId, ciphertext);
+      armBuyerHttpsFallback(order);
+      return;
+    }
+    buyerReceivedRef.current = true;
+    try {
+      const fileKey = await decryptPaidLinkFileKey(
+        envelope,
+        keyPair.privateJwk,
+      );
+      const ab = ciphertext.buffer.slice(
+        ciphertext.byteOffset,
+        ciphertext.byteOffset + ciphertext.byteLength,
+      ) as ArrayBuffer;
+      const opened = await decryptPaidLinkFile(
+        ab,
+        fileKey,
+        order.file.encryptionIv,
+        order.file.mimeType,
+      );
+      const objectUrl = window.URL.createObjectURL(opened);
+      setDownloadUrl(objectUrl);
+      setDownloadFileName(order.file.fileName);
+      setNymStatus("ready");
+      setNymMessage(copy.receive.nymReadyLabel);
+      if (buyerAutoDownloadedRef.current !== objectUrl) {
+        buyerAutoDownloadedRef.current = objectUrl;
+        triggerBrowserDownload(objectUrl, order.file.fileName);
+      }
+      clearBuyerHttpsFallback(order.orderId);
+      void acknowledgeDelivery(order.orderId, keyPair);
+    } catch {
+      buyerReceivedRef.current = false;
+      // Decrypt failed (rare) — let HTTPS take over.
+      void buyerHttpsFallback(order);
+    }
+  }
+
+  // Arm (once per order) the generous HTTPS fallback timer. If the Nym file
+  // transfer has not delivered the file within the bound after the key arrived,
+  // we abandon the Nym receiver and fetch over HTTPS. Re-arming is a no-op so a
+  // burst of re-sent key envelopes does not stack timers.
+  function armBuyerHttpsFallback(order: TransferPublicOrder): void {
+    if (buyerFallbackTimerRef.current.has(order.orderId)) {
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      buyerFallbackTimerRef.current.delete(order.orderId);
+      if (buyerReceivedRef.current || downloadUrl) {
+        return;
+      }
+      nymFileReceiverRef.current?.abort("https fallback");
+      nymFileReceiverRef.current = null;
+      void buyerHttpsFallback(order);
+    }, BROWSER_NYM_FILE_FALLBACK_MS);
+    buyerFallbackTimerRef.current.set(order.orderId, handle);
+  }
+
+  function clearBuyerHttpsFallback(orderId: string): void {
+    const handle = buyerFallbackTimerRef.current.get(orderId);
+    if (handle !== undefined) {
+      window.clearTimeout(handle);
+      buyerFallbackTimerRef.current.delete(orderId);
+    }
+  }
+
+  // HTTPS safety net: claim the key + signed ciphertext URL and open it via the
+  // existing openClaimPayload path. Used when the Nym file transfer fails/times
+  // out or the key is not yet in hand. No-op once the file has arrived.
+  async function buyerHttpsFallback(order: TransferPublicOrder): Promise<void> {
+    clearBuyerHttpsFallback(order.orderId);
+    if (buyerReceivedRef.current || downloadUrl) {
+      return;
+    }
+    const keyPair = loadBuyerKeyPair(order.orderId);
+    if (!keyPair) {
+      return;
+    }
+    try {
+      const claim = await postJson<ClaimResponse>(
+        `/api/transfers/${encodeURIComponent(order.orderId)}/claim`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
+        },
+      );
+      setLoadedOrder(claim.order);
+      setPayment(claim.order.payment);
+      const envelope =
+        claim.keyEnvelope ?? nymKeyEnvelopeRef.current.get(order.orderId);
+      const download =
+        claim.download ?? pendingDownloadRef.current ?? undefined;
+      if (!envelope || !download) {
+        return;
+      }
+      buyerReceivedRef.current = true;
+      try {
+        await openClaimPayload(
+          {
+            schema: "paidprivatefile.nym.claim.v1",
+            orderId: order.orderId,
+            manifest: {
+              orderId: order.orderId,
+              fileName: order.file.fileName,
+              mimeType: order.file.mimeType,
+              encryptedFileSha256: order.file.encryptedFileSha256,
+              encryptionIv: order.file.encryptionIv,
+            },
+            keyEnvelope: envelope,
+            encryptedFileDownload: download,
+          },
+          keyPair,
+        );
+      } catch (error) {
+        buyerReceivedRef.current = false;
+        pendingDownloadRef.current = null;
+        setErrorMessage(formatError(error, copy.errors.serverError));
+      }
+    } catch (error) {
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    }
   }
 
   async function handleNymTextMessage(payload: string): Promise<void> {
@@ -1311,6 +1805,25 @@ export function PaidPrivateFilePanel({
       setErrorMessage(copy.errors.paymentRequired);
       return;
     }
+
+    // Browser-to-browser FILE transfer: stash the key envelope so the in-browser
+    // FILE receiver (raw channel) can decrypt the reassembled ciphertext, and
+    // arm a generous HTTPS fallback. We do NOT immediately fetch over HTTPS — the
+    // happy path is 100% Nym; the timer is the safety net. If the FILE bytes
+    // already arrived (receiver waiting on the key), decrypt them now.
+    if (browserNymFileTransferEnabled()) {
+      nymKeyEnvelopeRef.current.set(keyOnly.orderId, keyOnly.keyEnvelope);
+      armBuyerHttpsFallback(loadedOrder);
+      // If the FILE bytes already arrived (receiver reassembled + verified them
+      // while waiting for this key), decrypt + open them now.
+      const buffered = nymReassembledRef.current.get(keyOnly.orderId);
+      if (buffered) {
+        nymReassembledRef.current.delete(keyOnly.orderId);
+        await openReassembledCiphertext(loadedOrder, buffered);
+      }
+      return;
+    }
+
     // Commit before the await-heavy claim/decrypt below so concurrent re-sends
     // (the seller fires every ~6s) cannot each kick off a download.
     buyerReceivedRef.current = true;
@@ -1600,6 +2113,12 @@ export function PaidPrivateFilePanel({
             keyEnvelope,
             buyerNymAddress: challenge.release.buyerNymAddress,
           });
+          // Browser-to-browser FILE delivery: also stream the encrypted file
+          // bytes to the buyer over Nym (single-flight; HTTPS is the fallback).
+          maybeSendFileOverNym({
+            orderId: order.orderId,
+            buyerNymAddress: challenge.release.buyerNymAddress,
+          });
           setReleaseMessage(
             locale === "pt"
               ? "Chave liberada e enviada ao comprador pela Nym."
@@ -1679,6 +2198,13 @@ export function PaidPrivateFilePanel({
       await sendKeyEnvelopeOverNym({
         orderId: order.orderId,
         keyEnvelope,
+        buyerNymAddress: challenge.release.buyerNymAddress,
+      });
+      // Browser-to-browser FILE delivery alongside the key re-send. Single-flight
+      // guarded, so the ~6s re-send loop never starts a second transfer for the
+      // same order; the buyer's HTTPS fallback covers a persistent failure.
+      maybeSendFileOverNym({
+        orderId: order.orderId,
         buyerNymAddress: challenge.release.buyerNymAddress,
       });
       if (!silent) {
@@ -2184,6 +2710,18 @@ export function PaidPrivateFilePanel({
           </p>
         ) : null}
 
+        {mode === "send" && sellerSendProgress !== null ? (
+          <p
+            className="zk-hub-form-feedback ppf-nym-send-progress"
+            role="status"
+          >
+            {copy.sellerStatus.sendingOverNym.replace(
+              "{percent}",
+              String(sellerSendProgress),
+            )}
+          </p>
+        ) : null}
+
         {mode === "send" && seller ? (
           <SellerDashboard
             copy={copy}
@@ -2580,6 +3118,7 @@ export function PaidPrivateFilePanel({
             nymMessage={nymMessage}
             nymStatus={nymStatus}
             nymEnvelopesReceived={nymEnvelopesReceived}
+            buyerReceiveProgress={buyerReceiveProgress}
             onReconnectNym={() => void startBrowserNym()}
             buyerNymAddress={buyerNymAddress}
             onBuyerNymAddressChange={setBuyerNymAddress}
@@ -2626,6 +3165,7 @@ function BuyerCheckout({
   nymMessage,
   nymStatus,
   nymEnvelopesReceived,
+  buyerReceiveProgress,
   onReconnectNym,
   buyerNymAddress,
   onBuyerNymAddressChange,
@@ -2649,6 +3189,7 @@ function BuyerCheckout({
   nymMessage: string;
   nymStatus: BrowserNymStatus;
   nymEnvelopesReceived: number;
+  buyerReceiveProgress: number | null;
   onReconnectNym: () => void;
   buyerNymAddress: string;
   onBuyerNymAddressChange: (value: string) => void;
@@ -2758,6 +3299,14 @@ function BuyerCheckout({
                   <div>
                     <p className="eyebrow">{copy.receive.receivingTitle}</p>
                     <p>{copy.receive.receivingBody}</p>
+                    {buyerReceiveProgress !== null ? (
+                      <p className="ppf-buyer-nym-progress">
+                        {copy.receive.receivingOverNym.replace(
+                          "{percent}",
+                          String(buyerReceiveProgress),
+                        )}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
                 <NymReceiverDiagnostic
@@ -4337,6 +4886,27 @@ async function stopBrowserNymClientQuietly(
 function browserNymDeliveryEnabled(): boolean {
   return process.env.NEXT_PUBLIC_PPF_BROWSER_NYM === "1";
 }
+
+// Browser-to-browser FILE transfer over Nym: when on, the seller streams the
+// encrypted FILE bytes over the mixnet too (not just the key), and the buyer
+// reassembles + decrypts them in-browser. HTTPS stays as the automatic fallback.
+// Defaults ON when browser-direct Nym key delivery is enabled (the file path is
+// the natural extension), unless explicitly disabled. Set to "0" to force the
+// key-over-Nym + file-over-HTTPS behavior.
+function browserNymFileTransferEnabled(): boolean {
+  if (process.env.NEXT_PUBLIC_PPF_BROWSER_NYM_FILE === "0") {
+    return false;
+  }
+  return (
+    process.env.NEXT_PUBLIC_PPF_BROWSER_NYM_FILE === "1" ||
+    browserNymDeliveryEnabled()
+  );
+}
+
+// Generous bound after the key envelope arrives before the buyer abandons the
+// Nym file transfer and falls back to the HTTPS fetch. Long enough for a paced
+// ~48 KiB/s transfer of a typical file plus mixnet latency.
+const BROWSER_NYM_FILE_FALLBACK_MS = 90_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
