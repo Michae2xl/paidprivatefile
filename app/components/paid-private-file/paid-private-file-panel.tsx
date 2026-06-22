@@ -5223,7 +5223,7 @@ function SellerSettingsScreen({
             ) : (
               <button
                 type="button"
-                className="button-secondary"
+                className="button-secondary ppf-regenerate-cta"
                 onClick={() => setConfirmingRegenerate(true)}
                 disabled={isBusy}
               >

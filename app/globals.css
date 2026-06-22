@@ -2559,6 +2559,21 @@ a {
   margin-top: 10px;
 }
 
+/* Regenerate button: a visible coral outline on the dark warn box (was an
+   invisible ghost button). */
+.ppf-regenerate-cta {
+  margin-top: 10px;
+  align-self: start;
+  background: transparent;
+  border: 1px solid #e76f51;
+  color: #e76f51;
+  font-weight: 600;
+}
+
+.ppf-regenerate-cta:hover:not(:disabled) {
+  background: rgba(231, 111, 81, 0.16);
+}
+
 /* Prominent, tab-independent access-key callout shown at the TOP of the
    logged-in shop right after creation (or a regenerate). Reuses the key-vault
    treatment but with an amber "warn" tone so it reads as a one-time, must-copy
