@@ -370,6 +370,12 @@ type BrowserNymStatus = "idle" | "starting" | "ready" | "waiting" | "error";
 const RESEND_INTERVAL_MS = 6000;
 const RESEND_MAX_ATTEMPTS = 20;
 
+// Multi-buyer "product" model (Phase 3c): how often the buyer-listing view
+// re-fetches a LIMITED product so it flips to sold-out without a manual reload.
+// Light interval (7s) — only runs while the buyer is on the listing and has not
+// started a purchase yet.
+const PRODUCT_LISTING_POLL_INTERVAL_MS = 7000;
+
 const SELLER_PAYOUT_STORAGE_KEY = "paidprivatefile_seller_payout_address";
 const SELLER_PRICE_STORAGE_KEY = "paidprivatefile_seller_price_zec";
 const BUYER_NYM_CLIENT_ID_STORAGE_KEY = "paidprivatefile_buyer_nym_client_id";
@@ -643,6 +649,11 @@ export function PaidPrivateFilePanel({
   // fallback for browsers that block the programmatic click (Safari can be strict).
   const buyerAutoDownloadedRef = useRef<string>("");
 
+  // Multi-buyer "product" model (Phase 3c): guards the buyer-page listing poll so
+  // a slow request never stacks with the next interval tick (skip while a fetch
+  // is in flight). Plain ref — no re-render needed.
+  const productListingFetchingRef = useRef(false);
+
   useEffect(() => {
     if (!initialOrderId) {
       return;
@@ -662,6 +673,34 @@ export function PaidPrivateFilePanel({
     void loadProductListing(productBuyerId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productBuyerId]);
+
+  // Multi-buyer "product" model (Phase 3c): while the buyer is still on the
+  // listing (no order started yet), poll the product on a light interval so a
+  // LIMITED product that just sold its last unit elsewhere flips to sold-out
+  // WITHOUT a manual reload — the Buy button disappears on its own. The poll is
+  // silent (no loading splash, survives a dropped tick) and the in-flight guard
+  // prevents stacked fetches. It stops the moment a purchase starts (loadedOrder
+  // set) or the component unmounts (interval cleared). Open products never sell
+  // out, so we only poll limited listings — there is nothing for an open product
+  // to flip to, so polling it would be pure churn.
+  useEffect(() => {
+    if (!productBuyerId || loadedOrder) {
+      return;
+    }
+    // Nothing to watch for once it is already sold out, errored, or open supply.
+    if (
+      productStatus === "soldout" ||
+      productStatus === "error" ||
+      productListing?.supply.mode !== "limited"
+    ) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      void loadProductListing(productBuyerId, true);
+    }, PRODUCT_LISTING_POLL_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productBuyerId, loadedOrder, productStatus, productListing?.supply.mode]);
 
   // Live preview: as the seller types a viewing key, validate it (debounced) and
   // show the derived receiving address before the shop is created.
@@ -877,6 +916,26 @@ export function PaidPrivateFilePanel({
           if (active) {
             setSellerFiles(body.files);
             setSellerFilesStatus("ready");
+          }
+          // Multi-buyer "product" model (Phase 3c): also re-fetch the products on
+          // the same live tick (flag-gated) so a product that just sold its last
+          // unit flips to its sold-out row + disables Copy WITHOUT a manual
+          // refresh. Silent — never touches sellerProductsStatus, so the list
+          // never flickers to "loading"; a transient failure leaves the last good
+          // products in place. With the flag off this branch is skipped, so the
+          // dashboard never fetches products and is byte-for-byte unchanged.
+          if (active && productsEnabled()) {
+            try {
+              const productsBody = await postJson<SellerProductsResponse>(
+                "/api/sellers/me/products",
+                { method: "GET" },
+              );
+              if (active) {
+                setSellerProducts(productsBody.products);
+              }
+            } catch {
+              // Non-fatal: leave the last good products list untouched.
+            }
           }
         } catch {
           // Transient polling failures are non-fatal; retry on the next tick and
@@ -1473,16 +1532,30 @@ export function PaidPrivateFilePanel({
   // Multi-buyer "product" model (Phase 3b): fetch the buyer-facing product
   // listing. Maps a 404 / closed product to the error state and an exhausted
   // limited supply to the sold-out state so the view can hide the Buy button.
-  async function loadProductListing(productId: string) {
-    setErrorMessage("");
-    setProductStatus("loading");
+  //
+  // Phase 3c: `silent` is set for the background poll — it skips the loading
+  // splash AND leaves the current view in place on a transient fetch failure
+  // (a dropped poll must not blank a working listing). The initial load and the
+  // post-409 refresh stay loud (silent = false) so a real failure surfaces.
+  async function loadProductListing(productId: string, silent = false) {
+    if (productListingFetchingRef.current) {
+      // A request is already in flight — never stack a second fetch.
+      return;
+    }
+    productListingFetchingRef.current = true;
+    if (!silent) {
+      setErrorMessage("");
+      setProductStatus("loading");
+    }
     try {
       const res = await fetch(
         `/api/products/${encodeURIComponent(productId)}`,
         { method: "GET" },
       );
       if (!res.ok) {
-        setProductStatus("error");
+        if (!silent) {
+          setProductStatus("error");
+        }
         return;
       }
       const body = (await res.json()) as { product: PublicProductListing };
@@ -1493,7 +1566,11 @@ export function PaidPrivateFilePanel({
           : "ready",
       );
     } catch {
-      setProductStatus("error");
+      if (!silent) {
+        setProductStatus("error");
+      }
+    } finally {
+      productListingFetchingRef.current = false;
     }
   }
 
@@ -4919,6 +4996,7 @@ function SellerProductsList({
                     sharePath={product.sharePath}
                     locale={locale}
                     copy={copy}
+                    soldOut={product.soldOut}
                   />
                 </div>
                 <ProductPurchasesList
@@ -4988,16 +5066,35 @@ function ProductPurchasesList({
 // Copy the PRODUCT share link to the clipboard. Unlike the single-use file link,
 // a product link is safe to open by many buyers (each purchase spawns its own
 // order), but the seller still copies-and-sends it rather than opening it.
+//
+// Phase 3c: once the product is SOLD OUT the link is dead — opening it can only
+// ever show the sold-out state, never a purchase — so the Copy button is disabled
+// and relabeled. Open and not-yet-sold-out limited products keep the working
+// button. Mirrors lib/server isProductLinkShareable on the client.
 function ProductShareCopyButton({
   sharePath,
   locale,
   copy,
+  soldOut,
 }: {
   sharePath: string;
   locale: ProductLocale;
   copy: PaidPrivateFileCopy;
+  soldOut: boolean;
 }) {
   const [copied, setCopied] = useState(false);
+  if (soldOut) {
+    return (
+      <button
+        type="button"
+        className="ppf-file-open"
+        disabled
+        title={copy.products.copyLinkSoldOutHint}
+      >
+        {copy.products.copyLinkSoldOutLabel}
+      </button>
+    );
+  }
   return (
     <button
       type="button"

@@ -11,6 +11,7 @@ import {
   createProduct,
   getProduct,
   getPublicProduct,
+  isProductLinkShareable,
   isSoldOut,
   listProductsForSeller,
   recordProductSale,
@@ -196,6 +197,50 @@ describe("product-store supply helpers", () => {
     );
     expect(remainingSupply(product)).toBe(2);
     expect(isSoldOut(product)).toBe(false);
+  });
+});
+
+describe("product-store isProductLinkShareable", () => {
+  it("keeps an open product link shareable", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "open" } }),
+    );
+    expect(isProductLinkShareable(product)).toBe(true);
+  });
+
+  it("keeps a not-yet-sold-out limited product link shareable", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "limited", max: 2 } }),
+    );
+    const afterOne = await recordProductSale(product.productId);
+    expect(isSoldOut(afterOne)).toBe(false);
+    expect(isProductLinkShareable(afterOne)).toBe(true);
+  });
+
+  it("marks a sold-out limited product link as not shareable", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "limited", max: 1 } }),
+    );
+    const soldOut = await recordProductSale(product.productId);
+    expect(soldOut.status).toBe("sold_out");
+    expect(isProductLinkShareable(soldOut)).toBe(false);
+  });
+
+  it("marks a closed product link as not shareable even with supply left", () => {
+    expect(
+      isProductLinkShareable({
+        status: "closed",
+        supply: { mode: "limited", max: 5 },
+        salesCount: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isProductLinkShareable({
+        status: "closed",
+        supply: { mode: "open" },
+        salesCount: 0,
+      }),
+    ).toBe(false);
   });
 });
 

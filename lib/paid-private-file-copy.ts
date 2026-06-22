@@ -180,6 +180,10 @@ export interface PaidPrivateFileCopy {
     listLoading: string;
     copyLinkLabel: string;
     linkCopiedLabel: string;
+    // Phase 3c: a SOLD-OUT product link is dead, so the dashboard disables the
+    // Copy button and shows this label + an explanatory tooltip instead.
+    copyLinkSoldOutLabel: string;
+    copyLinkSoldOutHint: string;
     // Supply summary on a product row: "Open" for unlimited, "{sold} / {max} sold"
     // for a limited product.
     supplyOpenSummary: string;
@@ -546,6 +550,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       listLoading: "Carregando produtos...",
       copyLinkLabel: "Copiar link do produto",
       linkCopiedLabel: "Link copiado",
+      copyLinkSoldOutLabel: "Esgotado",
+      copyLinkSoldOutHint:
+        "Este produto esgotou. O link nao aceita mais compras.",
       supplyOpenSummary: "Aberto",
       supplyLimitedSummary: "{sold} / {max} vendidos",
       soldOutLabel: "Esgotado",
@@ -898,6 +905,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       listLoading: "Loading products...",
       copyLinkLabel: "Copy product link",
       linkCopiedLabel: "Link copied",
+      copyLinkSoldOutLabel: "Sold out",
+      copyLinkSoldOutHint:
+        "This product has sold out. The link no longer accepts purchases.",
       supplyOpenSummary: "Open",
       supplyLimitedSummary: "{sold} / {max} sold",
       soldOutLabel: "Sold out",

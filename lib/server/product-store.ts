@@ -257,6 +257,21 @@ export function isSoldOut(product: Product): boolean {
   return product.salesCount >= product.supply.max;
 }
 
+// Whether a product link is still worth sharing. A sold-out or closed product
+// link is dead — opening it can only ever show the sold-out / unavailable state,
+// never a successful purchase — so the dashboard disables "Copy product link" for
+// these. Open and not-yet-sold-out limited products stay shareable. Pure helper:
+// accepts the minimal { status, supply, salesCount } shape so it works against a
+// stored Product or a PublicProduct alike.
+export function isProductLinkShareable(
+  product: Pick<Product, "status" | "supply" | "salesCount">,
+): boolean {
+  if (product.status === "closed") {
+    return false;
+  }
+  return !isSoldOut(product as Product);
+}
+
 // Phase 2 will call this when a buyer's purchase settles: atomically bump
 // salesCount and, for a limited product, flip status to "sold_out" once the last
 // unit sells. The order lock makes the last-unit increment race-safe (concurrent
