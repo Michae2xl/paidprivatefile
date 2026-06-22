@@ -300,6 +300,9 @@ export interface PaidPrivateFileCopy {
     receiverStatusLabel: string;
     receiverAddressEmpty: string;
     receiverEnvelopesLabel: string;
+    // Compact perf readout label shown in the diagnostic row after a Nym
+    // transfer completes (the numbers themselves are formatted in the component).
+    transferMetricsLabel: string;
   };
   // Seller status stepper + robust re-send controls.
   sellerStatus: {
@@ -319,6 +322,9 @@ export interface PaidPrivateFileCopy {
     // seller browser streams the encrypted file to the buyer over the mixnet.
     // "{percent}" is replaced with the integer percent sent.
     sendingOverNym: string;
+    // Compact perf readout label shown after the seller browser finishes
+    // streaming a file over Nym (the numbers are formatted in the component).
+    transferMetricsLabel: string;
   };
   details: {
     price: string;
@@ -648,6 +654,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       receiverStatusLabel: "Receptor Nym",
       receiverAddressEmpty: "—",
       receiverEnvelopesLabel: "envelopes",
+      transferMetricsLabel: "Transferencia",
     },
     sellerStatus: {
       title: "Status da entrega",
@@ -665,6 +672,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       keepTabOpenHint:
         "Mantenha esta tela aberta ate aparecer Entregue ao comprador.",
       sendingOverNym: "Enviando pela Nym... {percent}%",
+      transferMetricsLabel: "Transferencia",
     },
     details: {
       price: "Preco",
@@ -998,6 +1006,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       receiverStatusLabel: "Nym receiver",
       receiverAddressEmpty: "—",
       receiverEnvelopesLabel: "envelopes",
+      transferMetricsLabel: "Transfer",
     },
     sellerStatus: {
       title: "Delivery status",
@@ -1015,6 +1024,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       keepTabOpenHint:
         "Keep this screen open until it shows Delivered to buyer.",
       sendingOverNym: "Sending over Nym... {percent}%",
+      transferMetricsLabel: "Transfer",
     },
     details: {
       price: "Price",

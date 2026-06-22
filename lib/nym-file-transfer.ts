@@ -261,6 +261,95 @@ export function reassembleChunks(
 }
 
 // ---------------------------------------------------------------------------
+// Performance metrics (additive — does NOT affect transfer behavior)
+// ---------------------------------------------------------------------------
+//
+// Both ends capture lightweight timing + counters so the team can audit real
+// Nym SDK throughput by file size. Nothing here changes chunking, pacing, the
+// ARQ, or framing — the timestamps are taken in the existing completion path and
+// the counters increment alongside the existing logic. The compute is a pure
+// helper so it can be unit-tested without timers.
+
+export type TransferSide = "send" | "recv";
+
+// The raw, monotonic measurements one side records during a transfer. All
+// timestamps are in the same clock domain (performance.now() / Date.now() in the
+// runtime, or a fake clock in tests). Missing timestamps (e.g. a transfer that
+// never saw a chunk) are left null and the helper degrades gracefully.
+export interface RawTransferTiming {
+  side: TransferSide;
+  startedAt: number;
+  // First Chunk packet observed (received by the receiver / sent by the sender).
+  firstChunkAt: number | null;
+  // Terminal timestamp: reassembled+verified (receiver) or acked (sender).
+  completedAt: number | null;
+  bytes: number;
+  chunks: number;
+  // Receiver: number of Retransmit requests it sent (gaps it noticed).
+  // Sender: number of Retransmit requests it received from the receiver.
+  retransmits: number;
+  // Sender-only: number of chunks resent in response to retransmit requests.
+  // Receiver leaves this 0.
+  chunksResent?: number;
+}
+
+// The computed, surfaced metrics. Durations in ms, throughput in KiB/s.
+export interface TransferMetrics {
+  side: TransferSide;
+  bytes: number;
+  chunks: number;
+  retransmits: number;
+  chunksResent: number;
+  durationMs: number;
+  // Receiver: start -> first Chunk (mixnet latency). Sender: start -> first
+  // Chunk sent. null when no chunk was ever observed.
+  timeToFirstChunkMs: number | null;
+  // bytes / 1024 / (durationMs / 1000). 0 when duration is non-positive.
+  throughputKiBs: number;
+}
+
+// Pure: turn raw timing into surfaced metrics. No clock, no side effects — safe
+// to unit-test directly. Guards against missing/degenerate timestamps so a
+// partial transfer still yields sane (zeroed) numbers instead of NaN/Infinity.
+export function computeTransferMetrics(
+  raw: RawTransferTiming,
+): TransferMetrics {
+  const completedAt = raw.completedAt ?? raw.startedAt;
+  const durationMs = Math.max(0, completedAt - raw.startedAt);
+  const timeToFirstChunkMs =
+    raw.firstChunkAt === null
+      ? null
+      : Math.max(0, raw.firstChunkAt - raw.startedAt);
+  const seconds = durationMs / 1000;
+  const throughputKiBs = seconds > 0 ? raw.bytes / 1024 / seconds : 0;
+  return {
+    side: raw.side,
+    bytes: raw.bytes,
+    chunks: raw.chunks,
+    retransmits: raw.retransmits,
+    chunksResent: raw.chunksResent ?? 0,
+    durationMs,
+    timeToFirstChunkMs,
+    throughputKiBs,
+  };
+}
+
+// Injectable monotonic clock. Defaults to performance.now() when available
+// (monotonic, immune to wall-clock jumps) and falls back to Date.now(). Tests
+// pass a fake. NEVER read in pure helpers — only in the runtime capture path.
+export type NowFn = () => number;
+
+function defaultNow(): number {
+  if (
+    typeof performance !== "undefined" &&
+    typeof performance.now === "function"
+  ) {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+// ---------------------------------------------------------------------------
 // Sender
 // ---------------------------------------------------------------------------
 
@@ -283,6 +372,11 @@ export interface NymFileSenderOptions {
   // Injectable abort signal: when this returns true the sender stops early
   // (used to wire React unmount / fallback into the loop).
   shouldAbort?: () => boolean;
+  // Additive perf instrumentation (no behavior change). Called once, on ack,
+  // with the computed send-side metrics. Best-effort: throwing here is swallowed.
+  onMetrics?: (metrics: TransferMetrics) => void;
+  // Injectable monotonic clock for the metrics capture path (tests pass a fake).
+  now?: NowFn;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -311,6 +405,7 @@ export async function startNymFileSender(
   const window = options.retransmitWindow ?? DEFAULT_RETRANSMIT_WINDOW;
   const ackTimeoutMs = options.ackTimeoutMs ?? 120_000;
   const sleep = options.sleep ?? defaultSleep;
+  const now = options.now ?? defaultNow;
 
   const chunks = chunkBytes(ciphertext, chunkSize);
   const total = chunks.length;
@@ -318,6 +413,39 @@ export async function startNymFileSender(
 
   // Inter-chunk delay (ms) to hold the average rate at/below `rate`.
   const interChunkDelayMs = rate > 0 ? Math.ceil((chunkSize / rate) * 1000) : 0;
+
+  // --- Perf instrumentation (additive). Timestamps + counters captured in the
+  // existing send/ack path; surfaced once via options.onMetrics on ack. ---
+  const startedAt = now();
+  let firstChunkSentAt: number | null = null;
+  let retransmitRequests = 0;
+  let chunksResent = 0;
+  let metricsEmitted = false;
+  function emitMetrics(completedAt: number | null): void {
+    if (metricsEmitted) {
+      return;
+    }
+    metricsEmitted = true;
+    if (!options.onMetrics) {
+      return;
+    }
+    try {
+      options.onMetrics(
+        computeTransferMetrics({
+          side: "send",
+          startedAt,
+          firstChunkAt: firstChunkSentAt,
+          completedAt,
+          bytes: ciphertext.length,
+          chunks: total,
+          retransmits: retransmitRequests,
+          chunksResent,
+        }),
+      );
+    } catch {
+      // Metrics are best-effort; never let a reporting error affect transfer.
+    }
+  }
 
   let acked = false;
   // Single-flight state for the Retransmit handler (see handlePacket).
@@ -343,6 +471,10 @@ export async function startNymFileSender(
         payload: chunks[seq],
       }),
     );
+    // First Chunk leaving the wire — used for the sender-side time-to-first-chunk.
+    if (firstChunkSentAt === null) {
+      firstChunkSentAt = now();
+    }
   }
 
   async function sendDone(): Promise<void> {
@@ -366,10 +498,16 @@ export async function startNymFileSender(
     }
     if (packet.type === PacketType.Ack) {
       acked = true;
+      // Capture the ack timestamp + surface metrics. The transfer is only truly
+      // "done" (locally drained) once the receiver acks, so this is the right
+      // terminal point for the sender duration.
+      emitMetrics(now());
       resolveDone?.();
       return;
     }
     if (packet.type === PacketType.Retransmit) {
+      // Perf: count gap-repair requests the receiver sent us.
+      retransmitRequests += 1;
       // Single-flight: a Retransmit that arrives while one is being serviced is
       // coalesced (we just record the newest requested seq) rather than spawning
       // a second overlapping coroutine. Overlapping coroutines would stack the
@@ -393,6 +531,8 @@ export async function startNymFileSender(
               }
               try {
                 await sendChunk(seq);
+                // Perf: a chunk re-sent in response to a retransmit request.
+                chunksResent += 1;
               } catch {
                 return;
               }
@@ -489,6 +629,12 @@ export interface NymFileReceiverOptions {
   // Injectable timers for tests.
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
+  // Additive perf instrumentation (no behavior change). Called once, on a
+  // verified+reassembled completion, with the computed receive-side metrics.
+  // Best-effort: throwing here is swallowed.
+  onMetrics?: (metrics: TransferMetrics) => void;
+  // Injectable monotonic clock for the metrics capture path (tests pass a fake).
+  now?: NowFn;
 }
 
 export interface NymFileReceiver {
@@ -525,6 +671,7 @@ export function createNymFileReceiver(
     options.setTimer ?? ((fn, ms) => setTimeout(fn, ms) as unknown);
   const clearTimer =
     options.clearTimer ?? ((handle) => clearTimeout(handle as never));
+  const now = options.now ?? defaultNow;
 
   const chunks = new Map<number, Uint8Array>();
   let total = 0;
@@ -533,6 +680,14 @@ export function createNymFileReceiver(
   let settled = false;
   let gapTimer: unknown = null;
   let overallTimer: unknown = null;
+
+  // --- Perf instrumentation (additive). The receiver starts measuring the
+  // moment it is created (first packet considered); firstChunkAt is the first
+  // Chunk packet (mixnet latency); completedAt is reassembled+verified. Counters
+  // increment alongside the existing logic. Surfaced once via options.onMetrics. ---
+  const startedAt = now();
+  let firstChunkAt: number | null = null;
+  let retransmitsSent = 0;
 
   let resolveDone: ((bytes: Uint8Array) => void) | null = null;
   let rejectDone: ((error: Error) => void) | null = null;
@@ -584,6 +739,8 @@ export function createNymFileReceiver(
       // control frame; the gap timer re-asks once the Offer lands.
       return;
     }
+    // Perf: count each gap-repair request we actually emit.
+    retransmitsSent += 1;
     void sendControl(
       encodePacket({
         type: PacketType.Retransmit,
@@ -661,6 +818,25 @@ export function createNymFileReceiver(
         // receiver already has the verified file.
       });
     }
+    // Perf: surface receive-side metrics once, on verified completion. Wrapped
+    // so a reporting error can never affect the resolve below.
+    if (options.onMetrics) {
+      try {
+        options.onMetrics(
+          computeTransferMetrics({
+            side: "recv",
+            startedAt,
+            firstChunkAt,
+            completedAt: now(),
+            bytes: reassembled.length,
+            chunks: total,
+            retransmits: retransmitsSent,
+          }),
+        );
+      } catch {
+        // Metrics are best-effort; never let a reporting error affect transfer.
+      }
+    }
     settle(null, reassembled);
   }
 
@@ -678,6 +854,10 @@ export function createNymFileReceiver(
       return;
     }
     if (packet.type === PacketType.Chunk) {
+      // Perf: first Chunk packet observed = mixnet latency from receiver start.
+      if (firstChunkAt === null) {
+        firstChunkAt = now();
+      }
       if (total === 0 && packet.total > 0) {
         total = packet.total;
       }

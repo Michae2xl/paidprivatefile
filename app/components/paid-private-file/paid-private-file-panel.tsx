@@ -37,6 +37,7 @@ import {
   decodePacket,
   startNymFileSender,
   type NymFileReceiver,
+  type TransferMetrics,
 } from "../../../lib/nym-file-transfer";
 import { createClientTimestampDraft } from "../../../lib/timestamp-client-crypto";
 import {
@@ -590,6 +591,13 @@ export function PaidPrivateFilePanel({
   const [buyerReceiveProgress, setBuyerReceiveProgress] = useState<
     number | null
   >(null);
+  // Additive perf instrumentation: the last completed Nym transfer metrics for
+  // each side, surfaced in the (dev/diagnostic) readouts. null until the first
+  // transfer completes. The primary data channel is the PPF-PERF console line.
+  const [buyerTransferMetrics, setBuyerTransferMetrics] =
+    useState<TransferMetrics | null>(null);
+  const [sellerTransferMetrics, setSellerTransferMetrics] =
+    useState<TransferMetrics | null>(null);
   // Guards the buyer heartbeat so a slow (re)bootstrap / re-register tick cannot
   // overlap the next interval and double-start the Nym client.
   const buyerHeartbeatInFlightRef = useRef(false);
@@ -1997,6 +2005,12 @@ export function PaidPrivateFilePanel({
               total > 0 ? Math.round((sent / total) * 100) : 100,
             );
           },
+          // Additive perf instrumentation: surface + log send-side metrics on
+          // ack. Does not affect the transfer (best-effort callback).
+          onMetrics: (metrics) => {
+            logTransferMetrics(metrics);
+            setSellerTransferMetrics(metrics);
+          },
           shouldAbort: () => aborted,
         },
       );
@@ -2149,6 +2163,12 @@ export function PaidPrivateFilePanel({
           setBuyerReceiveProgress(
             total > 0 ? Math.round((received / total) * 100) : 0,
           );
+        },
+        // Additive perf instrumentation: surface + log receive-side metrics on
+        // verified completion. Does not affect the transfer (best-effort).
+        onMetrics: (metrics) => {
+          logTransferMetrics(metrics);
+          setBuyerTransferMetrics(metrics);
         },
       },
     );
@@ -3454,6 +3474,20 @@ export function PaidPrivateFilePanel({
           </p>
         ) : null}
 
+        {/* Additive perf instrumentation: compact send metrics after a file is
+            delivered over Nym (hidden while a new send is in progress). */}
+        {mode === "send" &&
+        sellerSendProgress === null &&
+        sellerTransferMetrics ? (
+          <p
+            className="zk-hub-form-feedback ppf-nym-send-metrics"
+            role="status"
+          >
+            {copy.sellerStatus.transferMetricsLabel}:{" "}
+            {formatTransferMetrics(sellerTransferMetrics)}
+          </p>
+        ) : null}
+
         {mode === "send" && seller ? (
           <SellerDashboard
             copy={copy}
@@ -3934,6 +3968,7 @@ export function PaidPrivateFilePanel({
             nymStatus={nymStatus}
             nymEnvelopesReceived={nymEnvelopesReceived}
             buyerReceiveProgress={buyerReceiveProgress}
+            buyerTransferMetrics={buyerTransferMetrics}
             onReconnectNym={() => void startBrowserNym()}
             buyerNymAddress={buyerNymAddress}
             onBuyerNymAddressChange={setBuyerNymAddress}
@@ -3982,6 +4017,7 @@ function BuyerCheckout({
   nymStatus,
   nymEnvelopesReceived,
   buyerReceiveProgress,
+  buyerTransferMetrics,
   onReconnectNym,
   buyerNymAddress,
   onBuyerNymAddressChange,
@@ -4007,6 +4043,7 @@ function BuyerCheckout({
   nymStatus: BrowserNymStatus;
   nymEnvelopesReceived: number;
   buyerReceiveProgress: number | null;
+  buyerTransferMetrics: TransferMetrics | null;
   onReconnectNym: () => void;
   buyerNymAddress: string;
   onBuyerNymAddressChange: (value: string) => void;
@@ -4140,6 +4177,7 @@ function BuyerCheckout({
                   nymStatus={nymStatus}
                   buyerNymAddress={buyerNymAddress}
                   nymEnvelopesReceived={nymEnvelopesReceived}
+                  transferMetrics={buyerTransferMetrics}
                   onReconnectNym={onReconnectNym}
                   isBusy={isBusy}
                 />
@@ -4293,6 +4331,7 @@ function NymReceiverDiagnostic({
   nymStatus,
   buyerNymAddress,
   nymEnvelopesReceived,
+  transferMetrics,
   onReconnectNym,
   isBusy,
 }: {
@@ -4300,6 +4339,9 @@ function NymReceiverDiagnostic({
   nymStatus: BrowserNymStatus;
   buyerNymAddress: string;
   nymEnvelopesReceived: number;
+  // Additive perf instrumentation: the last completed Nym receive metrics, shown
+  // as a compact numeric line in this (dev/diagnostic) row. null until done.
+  transferMetrics: TransferMetrics | null;
   onReconnectNym: () => void;
   isBusy: boolean;
 }) {
@@ -4351,6 +4393,12 @@ function NymReceiverDiagnostic({
           <dd>{nymEnvelopesReceived}</dd>
         </div>
       </dl>
+      {transferMetrics ? (
+        <p className="ppf-nym-diag-metrics">
+          {copy.buyerStatus.transferMetricsLabel}:{" "}
+          {formatTransferMetrics(transferMetrics)}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -6234,4 +6282,43 @@ function formatBytes(bytes: number): string {
     unitIndex += 1;
   }
   return `${value.toFixed(value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+}
+
+// Compact, mostly-numeric one-line readout for a completed Nym transfer, e.g.
+// "1.0 MB · 21s · 48 KiB/s · first chunk 2.1s · 0 retransmits". Pure: takes the
+// metrics computed by the transfer layer and formats them for the diagnostic
+// surfaces. Does not affect the transfer.
+function formatTransferMetrics(metrics: TransferMetrics): string {
+  const size = formatBytes(metrics.bytes);
+  const seconds = `${(metrics.durationMs / 1000).toFixed(1)}s`;
+  const throughput = `${metrics.throughputKiBs.toFixed(1)} KiB/s`;
+  const firstChunk =
+    metrics.timeToFirstChunkMs === null
+      ? "first chunk —"
+      : `first chunk ${(metrics.timeToFirstChunkMs / 1000).toFixed(1)}s`;
+  const retransmits = `${metrics.retransmits} retransmit${
+    metrics.retransmits === 1 ? "" : "s"
+  }`;
+  return `${size} · ${seconds} · ${throughput} · ${firstChunk} · ${retransmits}`;
+}
+
+// Single structured console line per completed transfer, prefixed PPF-PERF, so
+// the team can collect numbers across runs from the browser console. This is the
+// PRIMARY data-collection channel for the throughput audit. Intentionally uses
+// console.info (a dev/diagnostic surface) rather than a logger.
+function logTransferMetrics(metrics: TransferMetrics): void {
+  // eslint-disable-next-line no-console
+  console.info(
+    "PPF-PERF",
+    JSON.stringify({
+      side: metrics.side,
+      bytes: metrics.bytes,
+      durationMs: metrics.durationMs,
+      throughputKiBs: Number(metrics.throughputKiBs.toFixed(2)),
+      timeToFirstChunkMs: metrics.timeToFirstChunkMs,
+      chunks: metrics.chunks,
+      retransmits: metrics.retransmits,
+      chunksResent: metrics.chunksResent,
+    }),
+  );
 }

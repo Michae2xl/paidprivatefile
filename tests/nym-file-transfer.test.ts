@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   PacketType,
   chunkBytes,
+  computeTransferMetrics,
   createNymFileReceiver,
   decodePacket,
   encodePacket,
@@ -17,6 +18,7 @@ import {
   sha256Hex,
   startNymFileSender,
   type NymTransferPacket,
+  type TransferMetrics,
 } from "../lib/nym-file-transfer";
 
 function makeBytes(length: number, seed = 1): Uint8Array {
@@ -382,6 +384,232 @@ describe("sender <-> receiver round-trip", () => {
     for (const packet of offer) receiver.handlePacket(packet);
     const received = await receiver.done();
     expect(Array.from(received)).toEqual(Array.from(ciphertext));
+  });
+});
+
+describe("computeTransferMetrics (pure)", () => {
+  it("computes duration, time-to-first-chunk, and KiB/s throughput", () => {
+    // 1 MiB over 20s, first chunk at +2s -> 1024 KiB / 20s = 51.2 KiB/s.
+    const metrics = computeTransferMetrics({
+      side: "recv",
+      startedAt: 1_000,
+      firstChunkAt: 3_000,
+      completedAt: 21_000,
+      bytes: 1024 * 1024,
+      chunks: 32,
+      retransmits: 1,
+    });
+    expect(metrics.side).toBe("recv");
+    expect(metrics.bytes).toBe(1024 * 1024);
+    expect(metrics.chunks).toBe(32);
+    expect(metrics.retransmits).toBe(1);
+    expect(metrics.chunksResent).toBe(0);
+    expect(metrics.durationMs).toBe(20_000);
+    expect(metrics.timeToFirstChunkMs).toBe(2_000);
+    expect(metrics.throughputKiBs).toBeCloseTo(51.2, 5);
+  });
+
+  it("carries the sender's chunksResent count through", () => {
+    const metrics = computeTransferMetrics({
+      side: "send",
+      startedAt: 0,
+      firstChunkAt: 100,
+      completedAt: 5_000,
+      bytes: 5 * 1024,
+      chunks: 1,
+      retransmits: 2,
+      chunksResent: 6,
+    });
+    expect(metrics.side).toBe("send");
+    expect(metrics.chunksResent).toBe(6);
+  });
+
+  it("returns null time-to-first-chunk when no chunk was observed", () => {
+    const metrics = computeTransferMetrics({
+      side: "recv",
+      startedAt: 100,
+      firstChunkAt: null,
+      completedAt: 200,
+      bytes: 0,
+      chunks: 0,
+      retransmits: 0,
+    });
+    expect(metrics.timeToFirstChunkMs).toBeNull();
+  });
+
+  it("yields zero throughput (not NaN/Infinity) for a zero/degenerate duration", () => {
+    const instant = computeTransferMetrics({
+      side: "recv",
+      startedAt: 500,
+      firstChunkAt: 500,
+      completedAt: 500, // same instant
+      bytes: 4096,
+      chunks: 1,
+      retransmits: 0,
+    });
+    expect(instant.durationMs).toBe(0);
+    expect(instant.throughputKiBs).toBe(0);
+    expect(Number.isFinite(instant.throughputKiBs)).toBe(true);
+
+    // A missing/earlier completedAt must not produce a negative duration.
+    const missing = computeTransferMetrics({
+      side: "send",
+      startedAt: 1_000,
+      firstChunkAt: 1_100,
+      completedAt: null,
+      bytes: 4096,
+      chunks: 1,
+      retransmits: 0,
+    });
+    expect(missing.durationMs).toBe(0);
+    expect(missing.throughputKiBs).toBe(0);
+    expect(missing.timeToFirstChunkMs).toBe(100);
+  });
+
+  it("clamps a non-monotonic first-chunk timestamp to >= 0", () => {
+    const metrics = computeTransferMetrics({
+      side: "recv",
+      startedAt: 1_000,
+      firstChunkAt: 900, // before start (clock skew) — clamp, do not go negative
+      completedAt: 2_000,
+      bytes: 1024,
+      chunks: 1,
+      retransmits: 0,
+    });
+    expect(metrics.timeToFirstChunkMs).toBe(0);
+  });
+});
+
+describe("onMetrics integration (fake clock)", () => {
+  it("emits send + recv metrics on a clean transfer", async () => {
+    const ciphertext = makeBytes(32 * 1024 * 2 + 500, 71);
+    const expectedSha256 = await sha256Hex(ciphertext);
+    const transport = wireTransport({});
+
+    // A simple monotonic fake clock per side: each now() call advances 1000ms so
+    // duration/first-chunk are deterministic and non-zero without real timers.
+    const makeClock = (): (() => number) => {
+      let t = 0;
+      return () => {
+        t += 1000;
+        return t;
+      };
+    };
+
+    let recvMetrics: TransferMetrics | null = null;
+    let sendMetrics: TransferMetrics | null = null;
+
+    const receiver = createNymFileReceiver(
+      "orderM",
+      transport.receiverControlSend,
+      {
+        expectedSha256,
+        gapTimeoutMs: 50,
+        now: makeClock(),
+        onMetrics: (m) => {
+          recvMetrics = m;
+        },
+      },
+    );
+    transport.bindReceiver(receiver);
+
+    const sender = await startNymFileSender(
+      "orderM",
+      ciphertext,
+      transport.senderRawSend,
+      {
+        sleep: noSleep,
+        rateBytesPerSec: 0,
+        senderAddress: "seller-nym-address",
+        now: makeClock(),
+        onMetrics: (m) => {
+          sendMetrics = m;
+        },
+      },
+    );
+    transport.bindSender(sender);
+
+    await receiver.done();
+    await sender.done();
+
+    expect(recvMetrics).not.toBeNull();
+    expect(sendMetrics).not.toBeNull();
+    const recv = recvMetrics as unknown as TransferMetrics;
+    const send = sendMetrics as unknown as TransferMetrics;
+    expect(recv.side).toBe("recv");
+    expect(recv.bytes).toBe(ciphertext.length);
+    expect(recv.chunks).toBe(3);
+    expect(recv.retransmits).toBe(0);
+    expect(recv.durationMs).toBeGreaterThan(0);
+    expect(recv.timeToFirstChunkMs).not.toBeNull();
+    expect(recv.throughputKiBs).toBeGreaterThan(0);
+
+    expect(send.side).toBe("send");
+    expect(send.bytes).toBe(ciphertext.length);
+    expect(send.chunks).toBe(3);
+    expect(send.chunksResent).toBe(0);
+    expect(send.durationMs).toBeGreaterThan(0);
+  });
+
+  it("counts retransmits + chunksResent on a lossy transfer", async () => {
+    const ciphertext = makeBytes(32 * 1024 * 5 + 17, 91);
+    const expectedSha256 = await sha256Hex(ciphertext);
+    const dropped = new Set<number>();
+    const transport = wireTransport({
+      shouldDropSenderPacket: (packet) => {
+        if (
+          packet.type === PacketType.Chunk &&
+          packet.seq === 2 &&
+          !dropped.has(2)
+        ) {
+          dropped.add(2);
+          return true;
+        }
+        return false;
+      },
+    });
+
+    let recvMetrics: TransferMetrics | null = null;
+    let sendMetrics: TransferMetrics | null = null;
+
+    const receiver = createNymFileReceiver(
+      "orderML",
+      transport.receiverControlSend,
+      {
+        expectedSha256,
+        gapTimeoutMs: 20,
+        onMetrics: (m) => {
+          recvMetrics = m;
+        },
+      },
+    );
+    transport.bindReceiver(receiver);
+    const sender = await startNymFileSender(
+      "orderML",
+      ciphertext,
+      transport.senderRawSend,
+      {
+        sleep: noSleep,
+        rateBytesPerSec: 0,
+        senderAddress: "seller-nym-address",
+        retransmitWindow: 2,
+        onMetrics: (m) => {
+          sendMetrics = m;
+        },
+      },
+    );
+    transport.bindSender(sender);
+
+    await receiver.done();
+    await sender.done();
+
+    const recv = recvMetrics as unknown as TransferMetrics;
+    const send = sendMetrics as unknown as TransferMetrics;
+    // The receiver noticed the gap and asked at least once.
+    expect(recv.retransmits).toBeGreaterThanOrEqual(1);
+    // The sender received >=1 retransmit request and resent >=1 chunk.
+    expect(send.retransmits).toBeGreaterThanOrEqual(1);
+    expect(send.chunksResent).toBeGreaterThanOrEqual(1);
   });
 });
 
