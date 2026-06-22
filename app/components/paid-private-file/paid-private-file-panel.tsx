@@ -1009,7 +1009,14 @@ export function PaidPrivateFilePanel({
       setSettingsSaveStatus("saved");
     } catch (error) {
       setSettingsSaveStatus("idle");
-      setErrorMessage(formatError(error, copy.errors.serverError));
+      // A 409 here means another seller already uses this public name. Show the
+      // dedicated, prefix-free message instead of the generic "Paid link failed:"
+      // wrapper so the user knows exactly what to change.
+      if (error instanceof ApiError && error.status === 409) {
+        setErrorMessage(copy.errors.displayNameTaken);
+      } else {
+        setErrorMessage(formatError(error, copy.errors.serverError));
+      }
     }
   }
 
@@ -2918,24 +2925,6 @@ export function PaidPrivateFilePanel({
           </div>
           <p className="hero-copy">{copy.shell.body}</p>
           <TransferMotion copy={copy} stage={flowMotionStage} />
-          <div className="zectime-paid-tabs" role="tablist">
-            <button
-              type="button"
-              className="zectime-paid-tab"
-              data-active={mode === "send"}
-              onClick={() => setMode("send")}
-            >
-              {copy.tabs.send}
-            </button>
-            <button
-              type="button"
-              className="zectime-paid-tab"
-              data-active={mode === "receive"}
-              onClick={() => setMode("receive")}
-            >
-              {copy.tabs.receive}
-            </button>
-          </div>
         </section>
 
         {errorMessage ? (
@@ -4283,7 +4272,7 @@ function SellerSettingsScreen({
         </label>
         <button
           type="button"
-          className="button-secondary"
+          className="button-primary ppf-settings-save"
           onClick={onSaveSettings}
           disabled={isBusy || settingsSaveStatus === "saving"}
         >

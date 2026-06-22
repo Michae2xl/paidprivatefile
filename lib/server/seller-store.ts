@@ -104,6 +104,14 @@ export async function createSellerProfile(
   if (await findSellerIdByHandle(handle)) {
     throw new ServerError("flow_conflict", "Seller handle is already taken");
   }
+  // A new shop must not claim a public name another seller already uses. (Names
+  // that fall back to the unique handle never collide here.)
+  if (!(await isDisplayNameAvailable(displayName))) {
+    throw new ServerError(
+      "flow_conflict",
+      "That public name is already in use.",
+    );
+  }
 
   let defaultPayoutAddress: string;
   let sellerScanRef: SellerProfile["sellerScanRef"];
@@ -213,6 +221,49 @@ export async function getSellerProfileByAccessKey(
   return null;
 }
 
+// Public display names must be unique across shops so buyers can trust the name
+// they see on a checkout link. We scan stored profiles (mirroring
+// getSellerProfileByAccessKey's profile scan) and compare display names
+// case-insensitively + trimmed. `exceptSellerId` excludes the caller's own
+// profile so a seller can re-save their current name without a false conflict.
+export async function isDisplayNameAvailable(
+  displayName: string,
+  exceptSellerId?: string,
+): Promise<boolean> {
+  const target = normalizeDisplayNameForCompare(displayName);
+  if (!target) {
+    // An empty/blank name falls back to the handle in normalizeDisplayName, so
+    // there is nothing to collide on here; treat it as available.
+    return true;
+  }
+  let entries: string[];
+  try {
+    entries = await readdir(sellerProfileDir());
+  } catch {
+    return true;
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".json")) {
+      continue;
+    }
+    const sellerId = entry.slice(0, -".json".length);
+    if (!SELLER_ID_PATTERN.test(sellerId)) {
+      continue;
+    }
+    if (exceptSellerId && sellerId === exceptSellerId) {
+      continue;
+    }
+    const profile = await getSellerProfileById(sellerId);
+    if (
+      profile &&
+      normalizeDisplayNameForCompare(profile.displayName) === target
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export async function getSellerProfileByHandle(
   handle: string,
 ): Promise<SellerProfile | null> {
@@ -256,10 +307,23 @@ export async function updateSellerProfile(
     throw new ServerError("auth_required", "Seller session is invalid");
   }
   if (input.displayName !== undefined) {
-    profile.displayName = normalizeDisplayName(
+    const nextDisplayName = normalizeDisplayName(
       input.displayName,
       profile.handle,
     );
+    // Only run the uniqueness scan when the name actually changes; re-saving the
+    // current name must always succeed (self is excluded anyway).
+    if (
+      normalizeDisplayNameForCompare(nextDisplayName) !==
+        normalizeDisplayNameForCompare(profile.displayName) &&
+      !(await isDisplayNameAvailable(nextDisplayName, profile.sellerId))
+    ) {
+      throw new ServerError(
+        "flow_conflict",
+        "That public name is already in use.",
+      );
+    }
+    profile.displayName = nextDisplayName;
   }
   if (input.defaultPayoutAddress !== undefined) {
     profile.defaultPayoutAddress = normalizeZcashUnifiedAddress(
@@ -518,6 +582,15 @@ function normalizeDisplayName(
 ): string {
   const cleaned = value?.trim().replace(/\s+/gu, " ").slice(0, 80);
   return cleaned || fallback;
+}
+
+// Canonical key for display-name uniqueness comparison: collapse whitespace,
+// trim, lowercase. Mirrors normalizeDisplayName's cleaning so the comparison
+// matches what is actually stored, just case-folded.
+function normalizeDisplayNameForCompare(
+  value: string | null | undefined,
+): string {
+  return (value?.trim().replace(/\s+/gu, " ").slice(0, 80) ?? "").toLowerCase();
 }
 
 function normalizeZcashUnifiedAddress(value: string): string {

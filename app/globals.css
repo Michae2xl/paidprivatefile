@@ -2797,6 +2797,13 @@ a {
   color: rgba(255, 255, 255, 0.62);
 }
 
+/* Public-name Save is the primary action of the identity block, so it reads as
+   a clear accent CTA (solid button-primary) rather than blending in with the
+   transparent secondary buttons used elsewhere in settings. */
+.ppf-settings-save {
+  justify-self: start;
+}
+
 @media (max-width: 640px) {
   .ppf-shop-header {
     flex-direction: column;

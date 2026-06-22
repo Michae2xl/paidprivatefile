@@ -289,6 +289,7 @@ export interface PaidPrivateFileCopy {
     nymUnavailable: string;
     serverError: string;
     paymentRequired: string;
+    displayNameTaken: string;
   };
 }
 
@@ -589,6 +590,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       serverError: "Falha no paid link: ",
       paymentRequired:
         "Pagamento ainda nao confirmado. Aguarde o webhook ou tente novamente depois do checkout.",
+      displayNameTaken: "Esse nome publico ja esta em uso.",
     },
   },
   en: {
@@ -887,6 +889,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       serverError: "Paid link failed: ",
       paymentRequired:
         "Payment is not confirmed yet. Wait for the webhook or try again after checkout.",
+      displayNameTaken: "That public name is already in use.",
     },
   },
 };
