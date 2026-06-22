@@ -31,6 +31,10 @@ import {
   type PaidLinkSellerReleaseDraft,
 } from "../../../lib/paid-link-client-crypto";
 import { selectNextPurchaseToDeliver } from "../../../lib/product-delivery-queue";
+import {
+  computePurchaseCounts,
+  formatPurchaseSummary,
+} from "../../../lib/purchase-summary";
 import { extractServerErrorMessage } from "../../../lib/server-error-message";
 import {
   createNymFileReceiver,
@@ -3678,30 +3682,18 @@ export function PaidPrivateFilePanel({
                         <span className="zk-hub-form-label">
                           {copy.products.supplyLabel}
                         </span>
-                        <div className="ppf-supply-options">
-                          <label className="ppf-supply-option">
-                            <input
-                              type="radio"
-                              name="supplyMode"
-                              value="open"
-                              checked={supplyMode === "open"}
-                              onChange={() => setSupplyMode("open")}
-                              disabled={isBusy}
-                            />
-                            <span>{copy.products.supplyOpenLabel}</span>
-                          </label>
-                          <label className="ppf-supply-option">
-                            <input
-                              type="radio"
-                              name="supplyMode"
-                              value="limited"
-                              checked={supplyMode === "limited"}
-                              onChange={() => setSupplyMode("limited")}
-                              disabled={isBusy}
-                            />
-                            <span>{copy.products.supplyLimitedLabel}</span>
-                          </label>
-                        </div>
+                        {/* Premium supply selector: two large, fully-clickable
+                            option cards (not a tiny radio dot). Accessible as a
+                            radiogroup — each card is role=radio with roving
+                            tabindex + arrow/space/enter keyboard support, and the
+                            whole card is the click target. Same underlying state
+                            (open vs limited) as the old radios. */}
+                        <SupplySelector
+                          value={supplyMode}
+                          onChange={setSupplyMode}
+                          copy={copy}
+                          disabled={isBusy}
+                        />
                         {supplyMode === "limited" ? (
                           <input
                             className="ppf-supply-max"
@@ -4725,7 +4717,6 @@ function SellerDashboard({
               products={products}
               productsStatus={productsStatus}
               files={files}
-              deliveringOrderIds={deliveringOrderIds}
             />
           ) : null}
           <SellerFilesList
@@ -4735,6 +4726,7 @@ function SellerDashboard({
             filesStatus={filesStatus}
             onOpenManage={onOpenManage}
             deliveringOrderIds={deliveringOrderIds}
+            productsEnabled={productsFlag}
           />
         </div>
       )}
@@ -4799,6 +4791,7 @@ function SellerFilesList({
   filesStatus,
   onOpenManage,
   deliveringOrderIds,
+  productsEnabled: productsFlag,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
@@ -4806,13 +4799,36 @@ function SellerFilesList({
   filesStatus: "idle" | "loading" | "ready" | "error";
   onOpenManage: (orderId: string) => void;
   deliveringOrderIds: Set<string>;
+  productsEnabled: boolean;
 }) {
+  // Resolve the "Your files" naming clash: with the multi-buyer "file" feature on,
+  // the catalog list (SellerProductsList) is the primary "Your files", and THIS
+  // legacy single-use list only holds OLD one-time orders (no productId). So when
+  // the flag is on we (1) filter out product purchases — they already appear,
+  // aggregated, under their file row — and (2) relabel the heading to the
+  // secondary "Earlier one-time links". With the flag off nothing changes: the
+  // full list renders under "Your files", byte-for-byte as before.
+  const visibleFiles = productsFlag
+    ? files.filter((file) => !file.productId)
+    : files;
+  const heading = productsFlag
+    ? copy.dashboard.legacyFilesTitle
+    : copy.dashboard.filesTitle;
+
+  // With the flag on, an empty legacy list means the seller never used the old
+  // single-use flow — there is nothing secondary to show, so hide the section
+  // entirely rather than render a confusing second "no files yet" empty state.
+  // (Flag off keeps the empty state so a brand-new seller sees the prompt.)
+  if (productsFlag && filesStatus !== "loading" && visibleFiles.length === 0) {
+    return null;
+  }
+
   return (
     <div className="ppf-files">
-      <p className="eyebrow">{copy.dashboard.filesTitle}</p>
-      {filesStatus === "loading" && files.length === 0 ? (
+      <p className="eyebrow">{heading}</p>
+      {filesStatus === "loading" && visibleFiles.length === 0 ? (
         <p className="ppf-muted">{copy.dashboard.filesLoading}</p>
-      ) : files.length === 0 ? (
+      ) : visibleFiles.length === 0 ? (
         <div className="ppf-files-empty">
           <p className="ppf-files-empty-title">
             {copy.dashboard.filesEmptyTitle}
@@ -4821,7 +4837,7 @@ function SellerFilesList({
         </div>
       ) : (
         <ul className="ppf-files-list">
-          {files.map((file) => {
+          {visibleFiles.map((file) => {
             // A paid summary is the seller's cue to deliver: surface a release
             // CTA. For any other status, "Manage" opens the same detail screen.
             const isPaid = file.status === "paid";
@@ -4923,27 +4939,120 @@ function FileShareCopyButton({
   );
 }
 
-// Multi-buyer "product" model (Phase 3b): the seller's catalog products in the
-// dashboard, clearly labeled and shown above the single-use files. Each row shows
-// the file name + price, a supply summary ("Open" or "3 / 10 sold"), a sold-out
-// badge, a Copy product-link button, AND the product's PURCHASES — every order
-// whose productId matches, with its delivery status. Delivery itself is automatic
-// (the sequential product-delivery loop); this just surfaces the per-purchase
-// state ("Delivering…" / "Delivered").
+// Premium supply selector for the create-file form: two large option CARDS
+// (segmented control) instead of fiddly radio dots. The whole card is the click
+// target, with a clear selected state (accent border + check). Accessible as a
+// WAI-ARIA radiogroup: roving tabindex (only the selected card is tab-focusable),
+// Arrow/Home/End move + select, Space/Enter select the focused card. Same
+// underlying open/limited state as the old radios, so create logic is unchanged.
+const SUPPLY_ORDER: ProductSupplyMode[] = ["open", "limited"];
+
+function SupplySelector({
+  value,
+  onChange,
+  copy,
+  disabled,
+}: {
+  value: ProductSupplyMode;
+  onChange: (mode: ProductSupplyMode) => void;
+  copy: PaidPrivateFileCopy;
+  disabled: boolean;
+}) {
+  const options: Array<{
+    mode: ProductSupplyMode;
+    label: string;
+    desc: string;
+  }> = [
+    {
+      mode: "open",
+      label: copy.products.supplyOpenLabel,
+      desc: copy.products.supplyOpenDesc,
+    },
+    {
+      mode: "limited",
+      label: copy.products.supplyLimitedLabel,
+      desc: copy.products.supplyLimitedDesc,
+    },
+  ];
+
+  function moveSelection(delta: number) {
+    if (disabled) {
+      return;
+    }
+    const currentIndex = SUPPLY_ORDER.indexOf(value);
+    const nextIndex =
+      (currentIndex + delta + SUPPLY_ORDER.length) % SUPPLY_ORDER.length;
+    onChange(SUPPLY_ORDER[nextIndex]);
+  }
+
+  return (
+    <div
+      className="ppf-supply-options"
+      role="radiogroup"
+      aria-label={copy.products.supplyLabel}
+    >
+      {options.map((option) => {
+        const selected = value === option.mode;
+        return (
+          <button
+            key={option.mode}
+            type="button"
+            role="radio"
+            aria-checked={selected}
+            tabIndex={selected ? 0 : -1}
+            className="ppf-supply-option"
+            data-selected={selected ? "true" : "false"}
+            disabled={disabled}
+            onClick={() => onChange(option.mode)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+                event.preventDefault();
+                moveSelection(1);
+              } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+                event.preventDefault();
+                moveSelection(-1);
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                if (!disabled) onChange(SUPPLY_ORDER[0]);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                if (!disabled) onChange(SUPPLY_ORDER[SUPPLY_ORDER.length - 1]);
+              } else if (event.key === " " || event.key === "Enter") {
+                event.preventDefault();
+                onChange(option.mode);
+              }
+            }}
+          >
+            <span className="ppf-supply-option-indicator" aria-hidden="true" />
+            <span className="ppf-supply-option-text">
+              <span className="ppf-supply-option-label">{option.label}</span>
+              <span className="ppf-supply-option-desc">{option.desc}</span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Multi-buyer "file" model: the seller's catalog files in the dashboard — the
+// PRIMARY "Your files" list. Each row shows a supply badge (Unlimited / Limited),
+// the file name + price, a COMPACT purchases aggregate ("2/3 delivered · 1 in
+// progress"), a supply/sold-out status badge, and a Copy-link button. Delivery is
+// automatic (the sequential product-delivery loop); the aggregate just surfaces
+// the rolled-up delivered/in-progress counts, never one row per purchase.
 function SellerProductsList({
   copy,
   locale,
   products,
   productsStatus,
   files,
-  deliveringOrderIds,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
   products: SellerProductSummary[];
   productsStatus: "idle" | "loading" | "ready" | "error";
   files: SellerFile[];
-  deliveringOrderIds: Set<string>;
 }) {
   // Group the seller's purchases (orders carrying a productId) by product so each
   // product row can list its own purchases. Single-use files (no productId) are
@@ -4980,16 +5089,27 @@ function SellerProductsList({
                     .replace("{max}", String(product.supply.max))
                 : copy.products.supplyOpenSummary;
             const purchases = purchasesByProduct.get(product.productId) ?? [];
+            // The products list is now the primary "Your files": label each row
+            // with its SUPPLY (Unlimited / Limited) instead of a generic
+            // "Product" badge, so the seller sees the file's supply at a glance.
+            const supplyBadge =
+              product.supply.mode === "limited"
+                ? copy.products.supplyBadgeLimited
+                : copy.products.supplyBadgeOpen;
             return (
               <li key={product.productId} className="ppf-file-row">
                 <div className="ppf-file-main">
-                  <span className="ppf-product-badge">
-                    {copy.products.productBadge}
+                  <span
+                    className="ppf-supply-badge"
+                    data-supply={product.supply.mode}
+                  >
+                    {supplyBadge}
                   </span>
                   <span className="ppf-file-name">{product.fileName}</span>
                   <span className="ppf-file-price">
                     {product.displayZec} ZEC
                   </span>
+                  <ProductPurchasesSummary copy={copy} purchases={purchases} />
                 </div>
                 <div className="ppf-file-side">
                   <span
@@ -5007,11 +5127,6 @@ function SellerProductsList({
                     soldOut={product.soldOut}
                   />
                 </div>
-                <ProductPurchasesList
-                  copy={copy}
-                  purchases={purchases}
-                  deliveringOrderIds={deliveringOrderIds}
-                />
               </li>
             );
           })}
@@ -5021,53 +5136,36 @@ function SellerProductsList({
   );
 }
 
-// Multi-buyer "product" model (Phase 3b): the purchases of a single product. Each
-// purchase shows its delivery status using the same formatFileStatus mapping as
-// the single-use files list, plus a "Delivering over Nym…" hint while it is the
-// purchase currently being delivered by the sequential queue.
-function ProductPurchasesList({
+// Multi-buyer "file" model: a COMPACT aggregate of a file's purchases (no
+// row-per-purchase). Renders one quiet line — "{delivered}/{total} delivered"
+// plus an optional " · {inProgress} in progress" clause for paid/claimed
+// purchases the buyer has not yet acked. "Delivered" follows the same honest rule
+// as formatFileStatus: it means the buyer ACKed over Nym. Counts come from the
+// pure, unit-tested computePurchaseCounts/formatPurchaseSummary helpers. Renders
+// nothing when there are no purchases yet (keeps an unsold file row clean).
+function ProductPurchasesSummary({
   copy,
   purchases,
-  deliveringOrderIds,
 }: {
   copy: PaidPrivateFileCopy;
   purchases: SellerFile[];
-  deliveringOrderIds: Set<string>;
 }) {
   if (purchases.length === 0) {
-    return (
-      <p className="ppf-muted ppf-product-purchases-empty">
-        {copy.purchases.emptyLabel}
-      </p>
-    );
+    return null;
   }
+  const counts = computePurchaseCounts(purchases);
+  const summary = formatPurchaseSummary(counts, {
+    deliveredSummary: copy.purchases.deliveredSummary,
+    inProgressSuffix: copy.purchases.inProgressSuffix,
+  });
   return (
-    <div className="ppf-product-purchases">
-      <p className="ppf-product-purchases-title">
-        {copy.purchases.title.replace("{count}", String(purchases.length))}
-      </p>
-      <ul className="ppf-product-purchases-list">
-        {purchases.map((purchase) => {
-          const delivering = deliveringOrderIds.has(purchase.orderId);
-          return (
-            <li key={purchase.orderId} className="ppf-product-purchase-row">
-              <span className="ppf-status-badge" data-status={purchase.status}>
-                {formatFileStatus(
-                  purchase.status,
-                  copy,
-                  purchase.nymSessionStatus,
-                )}
-              </span>
-              {delivering ? (
-                <span className="ppf-muted ppf-product-purchase-delivering">
-                  {copy.purchases.deliveringLabel}
-                </span>
-              ) : null}
-            </li>
-          );
-        })}
-      </ul>
-    </div>
+    <span
+      className="ppf-product-purchases-summary"
+      data-in-progress={counts.inProgress > 0 ? "true" : "false"}
+      role="status"
+    >
+      {summary}
+    </span>
   );
 }
 

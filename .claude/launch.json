@@ -1,0 +1,24 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "zkcgz-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "/Users/maiconguimaraes/zk-credit-global-zcash/apps/web",
+        "run",
+        "dev"
+      ],
+      "port": 3000,
+      "autoPort": true
+    }
+  ]
+}

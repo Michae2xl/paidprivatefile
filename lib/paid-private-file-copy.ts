@@ -94,6 +94,11 @@ export interface PaidPrivateFileCopy {
     accessKeyRegenerateCancelLabel: string;
     accessKeyRegeneratingLabel: string;
     filesTitle: string;
+    // With the multi-buyer "file" feature on, the catalog list is the primary
+    // "Your files"; the legacy single-use list is relabeled to this secondary
+    // heading so the two headings never both read "Your files". Only used when
+    // the flag is on; with the flag off the legacy list keeps filesTitle.
+    legacyFilesTitle: string;
     filesEmptyTitle: string;
     filesEmptyBody: string;
     filesLoading: string;
@@ -166,6 +171,10 @@ export interface PaidPrivateFileCopy {
     supplyHint: string;
     supplyOpenLabel: string;
     supplyLimitedLabel: string;
+    // Short helper line shown under each option card in the premium supply
+    // selector, so the seller understands the choice without reading the hint.
+    supplyOpenDesc: string;
+    supplyLimitedDesc: string;
     supplyMaxLabel: string;
     supplyMaxPlaceholder: string;
     supplyMaxInvalid: string;
@@ -189,7 +198,11 @@ export interface PaidPrivateFileCopy {
     supplyOpenSummary: string;
     supplyLimitedSummary: string;
     soldOutLabel: string;
-    productBadge: string;
+    // Per-row supply badge (replaces the old "Product" badge): a small label that
+    // says whether this file is Unlimited or Limited, since the products list is
+    // now the primary "Your files" view.
+    supplyBadgeOpen: string;
+    supplyBadgeLimited: string;
   };
   // Multi-buyer "product" model (Phase 3b): the BUYER-facing product page (open a
   // product link, see the listing, Buy -> spawns an order -> existing pay/receive
@@ -210,12 +223,19 @@ export interface PaidPrivateFileCopy {
     buyLabel: string;
     buyingLabel: string;
   };
-  // Multi-buyer "product" model (Phase 3b): the per-product PURCHASES sub-list in
-  // the seller dashboard. "{count}" is the number of purchases of the product.
+  // Multi-buyer "file" model: the per-file PURCHASES summary in the seller
+  // dashboard. Rendered as ONE compact aggregate line (no row-per-purchase):
+  // "{count}/{total} delivered" plus an optional " · {inProgress} in progress"
+  // clause. "{count}" is still the purchase count for the heading.
   purchases: {
     title: string;
     emptyLabel: string;
     deliveringLabel: string;
+    // Aggregate summary line. deliveredSummary uses {count} (delivered) +
+    // {total}; inProgressSuffix is appended (with its leading separator) only
+    // when there is at least one in-progress purchase and uses {inProgress}.
+    deliveredSummary: string;
+    inProgressSuffix: string;
   };
   receive: {
     title: string;
@@ -468,6 +488,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeyRegenerateCancelLabel: "Cancelar",
       accessKeyRegeneratingLabel: "Gerando...",
       filesTitle: "Seus arquivos",
+      legacyFilesTitle: "Links antigos (uso único)",
       filesEmptyTitle: "Nenhum arquivo ainda",
       filesEmptyBody: "Crie seu primeiro arquivo pago para comecar a vender.",
       filesLoading: "Carregando arquivos...",
@@ -532,46 +553,49 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     products: {
       supplyLabel: "Estoque",
       supplyHint:
-        "Quantos compradores podem adquirir este produto. Ilimitado vende sem limite; Limitado esgota apos atingir a quantidade.",
+        "Quantos compradores podem adquirir este arquivo. Ilimitado vende sem limite; Limitado esgota apos atingir a quantidade.",
       supplyOpenLabel: "Ilimitado (aberto)",
       supplyLimitedLabel: "Limitado",
+      supplyOpenDesc: "Vende sem limite de compradores.",
+      supplyLimitedDesc: "Esgota apos atingir a quantidade.",
       supplyMaxLabel: "Quantidade",
       supplyMaxPlaceholder: "Ex: 10",
       supplyMaxInvalid: "A quantidade deve ser um numero inteiro positivo.",
-      submitLabel: "Criar produto",
-      busyLabel: "Cifrando e criando produto...",
-      successTitle: "Produto publicado",
+      submitLabel: "Criar arquivo",
+      busyLabel: "Cifrando e criando arquivo...",
+      successTitle: "Arquivo publicado",
       successBody:
-        "Compartilhe o link do produto. Cada comprador recebe o proprio pedido; o arquivo so abre depois do pagamento em ZEC.",
-      listTitle: "Seus produtos",
-      listEmptyTitle: "Nenhum produto ainda",
+        "Compartilhe o link. Cada comprador recebe o proprio pedido; o arquivo so abre depois do pagamento em ZEC.",
+      listTitle: "Seus arquivos",
+      listEmptyTitle: "Nenhum arquivo ainda",
       listEmptyBody:
-        "Crie um produto para vender o mesmo arquivo para varios compradores.",
-      listLoading: "Carregando produtos...",
-      copyLinkLabel: "Copiar link do produto",
+        "Crie um arquivo para vender o mesmo conteudo para varios compradores.",
+      listLoading: "Carregando arquivos...",
+      copyLinkLabel: "Copiar link",
       linkCopiedLabel: "Link copiado",
       copyLinkSoldOutLabel: "Esgotado",
       copyLinkSoldOutHint:
-        "Este produto esgotou. O link nao aceita mais compras.",
+        "Este arquivo esgotou. O link nao aceita mais compras.",
       supplyOpenSummary: "Aberto",
       supplyLimitedSummary: "{sold} / {max} vendidos",
       soldOutLabel: "Esgotado",
-      productBadge: "Produto",
+      supplyBadgeOpen: "Ilimitado",
+      supplyBadgeLimited: "Limitado",
     },
     productBuy: {
-      eyebrow: "Comprar produto",
+      eyebrow: "Comprar arquivo",
       title: "Compre este arquivo privado",
       body: "Pague em ZEC e receba o arquivo de forma privada por uma sessao Nym apos a confirmacao do pagamento.",
-      loading: "Carregando produto...",
-      errorTitle: "Produto indisponivel",
+      loading: "Carregando arquivo...",
+      errorTitle: "Arquivo indisponivel",
       errorBody:
-        "Este produto nao foi encontrado ou nao esta mais a venda. Confira o link com o vendedor.",
+        "Este arquivo nao foi encontrado ou nao esta mais a venda. Confira o link com o vendedor.",
       supplyLimited: "{left} restantes",
       supplyOpen: "Disponivel",
       soldOut: "Esgotado",
       soldOutTitle: "Esgotado",
       soldOutBody:
-        "Todas as unidades deste produto ja foram vendidas. Fale com o vendedor para uma nova remessa.",
+        "Todas as unidades deste arquivo ja foram vendidas. Fale com o vendedor para uma nova remessa.",
       buyLabel: "Comprar",
       buyingLabel: "Iniciando compra...",
     },
@@ -579,6 +603,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       title: "Compras ({count})",
       emptyLabel: "Nenhuma compra ainda",
       deliveringLabel: "Entregando pela Nym...",
+      deliveredSummary: "{count}/{total} entregues",
+      inProgressSuffix: " · {inProgress} em andamento",
     },
     receive: {
       title: "Pagar e abrir localmente",
@@ -824,6 +850,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       accessKeyRegenerateCancelLabel: "Cancel",
       accessKeyRegeneratingLabel: "Regenerating...",
       filesTitle: "Your files",
+      legacyFilesTitle: "Earlier one-time links",
       filesEmptyTitle: "No files yet",
       filesEmptyBody: "Create your first paid file to start selling.",
       filesLoading: "Loading files...",
@@ -888,45 +915,48 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     products: {
       supplyLabel: "Supply",
       supplyHint:
-        "How many buyers can purchase this product. Unlimited sells with no cap; Limited sells out once the quantity is reached.",
+        "How many buyers can buy this file. Unlimited sells with no cap; Limited sells out once the quantity is reached.",
       supplyOpenLabel: "Unlimited (open)",
       supplyLimitedLabel: "Limited",
+      supplyOpenDesc: "Sells with no buyer cap.",
+      supplyLimitedDesc: "Sells out once the quantity is reached.",
       supplyMaxLabel: "Quantity",
       supplyMaxPlaceholder: "e.g. 10",
       supplyMaxInvalid: "Quantity must be a positive whole number.",
-      submitLabel: "Create product",
-      busyLabel: "Encrypting and creating product...",
-      successTitle: "Product published",
+      submitLabel: "Create file",
+      busyLabel: "Encrypting and creating file...",
+      successTitle: "File published",
       successBody:
-        "Share the product link. Each buyer gets their own order; the file only opens after their ZEC payment is confirmed.",
-      listTitle: "Your products",
-      listEmptyTitle: "No products yet",
-      listEmptyBody: "Create a product to sell the same file to many buyers.",
-      listLoading: "Loading products...",
-      copyLinkLabel: "Copy product link",
+        "Share the link. Each buyer gets their own order; the file only opens after their ZEC payment is confirmed.",
+      listTitle: "Your files",
+      listEmptyTitle: "No files yet",
+      listEmptyBody: "Create a file to sell the same content to many buyers.",
+      listLoading: "Loading files...",
+      copyLinkLabel: "Copy link",
       linkCopiedLabel: "Link copied",
       copyLinkSoldOutLabel: "Sold out",
       copyLinkSoldOutHint:
-        "This product has sold out. The link no longer accepts purchases.",
+        "This file has sold out. The link no longer accepts purchases.",
       supplyOpenSummary: "Open",
       supplyLimitedSummary: "{sold} / {max} sold",
       soldOutLabel: "Sold out",
-      productBadge: "Product",
+      supplyBadgeOpen: "Unlimited",
+      supplyBadgeLimited: "Limited",
     },
     productBuy: {
-      eyebrow: "Buy product",
+      eyebrow: "Buy file",
       title: "Buy this private file",
       body: "Pay in ZEC and receive the file privately over a Nym session once your payment confirms.",
-      loading: "Loading product...",
-      errorTitle: "Product unavailable",
+      loading: "Loading file...",
+      errorTitle: "File unavailable",
       errorBody:
-        "This product was not found or is no longer for sale. Check the link with the seller.",
+        "This file was not found or is no longer for sale. Check the link with the seller.",
       supplyLimited: "{left} left",
       supplyOpen: "Available",
       soldOut: "Sold out",
       soldOutTitle: "Sold out",
       soldOutBody:
-        "Every unit of this product has sold. Contact the seller about a new batch.",
+        "Every unit of this file has sold. Contact the seller about a new batch.",
       buyLabel: "Buy",
       buyingLabel: "Starting purchase...",
     },
@@ -934,6 +964,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       title: "Purchases ({count})",
       emptyLabel: "No purchases yet",
       deliveringLabel: "Delivering over Nym...",
+      deliveredSummary: "{count}/{total} delivered",
+      inProgressSuffix: " · {inProgress} in progress",
     },
     receive: {
       title: "Pay in ZEC, decrypt on your device",
