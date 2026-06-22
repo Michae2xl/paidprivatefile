@@ -43,7 +43,6 @@ import {
 import type { ProductLocale } from "../../../lib/types";
 import { withProductLocale } from "../../../lib/locale";
 import type { PaidPrivateFileCopy } from "../../../lib/paid-private-file-copy";
-import { ProductLocaleToggle } from "../locale/product-locale-toggle";
 
 interface PaidPrivateFilePanelProps {
   locale: ProductLocale;
@@ -271,7 +270,7 @@ interface BrowserNymClient {
 
 type Mode = "send" | "receive";
 type SellerAuthMode = "create" | "login";
-type SellerScreen = "dashboard" | "files" | "settings" | "create" | "manage";
+type SellerScreen = "files" | "settings" | "create" | "manage";
 type FlowMotionStage = "transfer" | "payment" | "done";
 type BusyAction =
   | "idle"
@@ -310,9 +309,10 @@ export function PaidPrivateFilePanel({
   const [seller, setSeller] = useState<SellerProfile | null>(null);
   const [sellerAuthMode, setSellerAuthMode] =
     useState<SellerAuthMode>("create");
-  // Seller shop dashboard: one screen at a time (no stacking). Defaults to the
-  // dashboard whenever a seller is logged in.
-  const [sellerScreen, setSellerScreen] = useState<SellerScreen>("dashboard");
+  // Seller shop: one screen at a time (no stacking). Two tabs — Files and
+  // Settings. Defaults to the Files (YOUR FILES) working view whenever a seller
+  // is logged in.
+  const [sellerScreen, setSellerScreen] = useState<SellerScreen>("files");
   const [sellerFiles, setSellerFiles] = useState<SellerFile[]>([]);
   const [sellerFilesStatus, setSellerFilesStatus] = useState<
     "idle" | "loading" | "ready" | "error"
@@ -647,21 +647,21 @@ export function PaidPrivateFilePanel({
     }
   }
 
-  // Seller dashboard: refresh the files list when the dashboard or files screen
-  // becomes active for a logged-in seller (mount + screen switch + after a new
-  // file is created, which routes back to the dashboard).
+  // Seller shop: refresh the files list when the Files screen becomes active for
+  // a logged-in seller (mount + screen switch + after a new file is created,
+  // which routes back to the Files tab).
   useEffect(() => {
     if (!seller) {
       return;
     }
-    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+    if (sellerScreen !== "files") {
       return;
     }
     void loadSellerFiles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seller?.sellerId, sellerScreen]);
 
-  // Live seller dashboard updates (no F5): while the Dashboard/Files screen is
+  // Live seller dashboard updates (no F5): while the Files screen is
   // mounted for an authenticated seller, silently re-fetch the files list every
   // ~5s so paid→delivered status badges update on their own. This complements
   // (does NOT replace) the mount/screen-switch refresh above and the per-action
@@ -676,7 +676,7 @@ export function PaidPrivateFilePanel({
     if (!seller) {
       return;
     }
-    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+    if (sellerScreen !== "files") {
       return;
     }
     let active = true;
@@ -940,7 +940,7 @@ export function PaidPrivateFilePanel({
     setSellerHandle(nextSeller.handle);
     setSellerDisplayName(nextSeller.displayName);
     setSellerPayoutAddress(nextSeller.defaultPayoutAddress);
-    setSellerScreen("dashboard");
+    setSellerScreen("files");
   }
 
   // Sign out: clear the server session cookie (best-effort) and wipe every
@@ -955,7 +955,7 @@ export function PaidPrivateFilePanel({
       // Best-effort: drop the local session even if the request fails.
     }
     setSeller(null);
-    setSellerScreen("dashboard");
+    setSellerScreen("files");
     setSellerAuthMode("login");
     setSellerFiles([]);
     setSellerFilesStatus("idle");
@@ -1101,11 +1101,11 @@ export function PaidPrivateFilePanel({
       setShareUrl(href);
       setOrderInput(body.order.orderId);
       setLoadedOrder(body.order);
-      // Seller dashboard: after a successful create, return to the dashboard so
-      // the new file appears in "Your files" (the share link stays available on
-      // the dashboard via the createdOrder/shareUrl state).
+      // Seller shop: after a successful create, return to the Files tab so the
+      // new file appears in "Your files" (the share link stays available via the
+      // createdOrder/shareUrl state).
       if (seller) {
-        setSellerScreen("dashboard");
+        setSellerScreen("files");
         void loadSellerFiles();
       }
     } catch (error) {
@@ -1964,9 +1964,11 @@ export function PaidPrivateFilePanel({
       // set. If opening fails, release the guard so a later re-send can retry.
       buyerReceivedRef.current = true;
       try {
-        // Key + manifest + file URL arrived over the Nym text channel: this is a
-        // Nym delivery (the legacy server-relayed full payload).
-        await openClaimPayload(parsed, keyPair, "nym");
+        // The KEY + manifest arrived over the Nym text channel, but
+        // openClaimPayload fetches the FILE bytes over HTTPS (the signed
+        // ciphertext URL). The badge reflects how the FILE was received, so this
+        // is an HTTPS delivery even though the key drop rode the mixnet.
+        await openClaimPayload(parsed, keyPair, "https");
       } catch (error) {
         buyerReceivedRef.current = false;
         setErrorMessage(formatError(error, copy.errors.serverError));
@@ -2060,10 +2062,12 @@ export function PaidPrivateFilePanel({
           encryptedFileDownload: download,
         },
         keyPair,
-        // The key envelope arrived over the Nym text channel (browser-direct
-        // delivery). Even though the ciphertext URL is fetched over HTTPS here,
-        // the delivery was driven by the Nym key drop — count it as Nym.
-        "nym",
+        // The key envelope arrived over the Nym text channel, but the FILE bytes
+        // are fetched over HTTPS via the signed ciphertext URL here. The badge is
+        // about how the FILE was received, so this is an HTTPS delivery. Only the
+        // openReassembledCiphertext path (file reassembled over the mixnet) is
+        // classified "nym".
+        "https",
       );
     } catch (error) {
       buyerReceivedRef.current = false;
@@ -2502,7 +2506,7 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createdOrder, loadedOrder, busyAction]);
 
-  // Dashboard auto-release: while a logged-in seller has the shop dashboard open,
+  // Files-screen auto-release: while a logged-in seller has the Files screen open,
   // periodically (~8s) fetch the full order for every "paid" file in the list and
   // auto-release the key for any that are still seller_pending AND whose local
   // release secret lives in THIS browser. This is what unblocks an existing paid
@@ -2512,7 +2516,7 @@ export function PaidPrivateFilePanel({
     if (mode !== "send" || !seller) {
       return;
     }
-    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+    if (sellerScreen !== "files") {
       return;
     }
     // Candidate orders: paid summaries whose release secret is on this browser.
@@ -2571,21 +2575,21 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, seller?.sellerId, sellerScreen, sellerFiles]);
 
-  // Dashboard auto re-send-until-acked (~6s): the SAME robust pure-Nym loop the
-  // Manage screen runs, but driven by the dashboard/files poll. While a logged-in
-  // seller sits on the dashboard, for each "paid" file whose release secret lives
-  // in THIS browser, re-fetch the full order and (once it is released, not yet
+  // Files-screen auto re-send-until-acked (~6s): the SAME robust pure-Nym loop the
+  // Manage screen runs, but driven by the Files poll. While a logged-in seller
+  // sits on the Files screen, for each "paid" file whose release secret lives in
+  // THIS browser, re-fetch the full order and (once it is released, not yet
   // delivered, and the secret is held) re-emit the wrapped key over Nym via the
   // existing onResendKeyOverNym, until nymSession.status === "delivered". So
-  // delivery completes with the seller just sitting on the dashboard — no Manage
-  // screen needed. dashboardResendInFlightRef guards each order against a slow
-  // send overlapping the next tick; dashboardDelivering drives the subtle
+  // delivery completes with the seller just sitting on the Files screen — no
+  // Manage screen needed. dashboardResendInFlightRef guards each order against a
+  // slow send overlapping the next tick; dashboardDelivering drives the subtle
   // "Delivering over Nym…" indicator on the affected rows.
   useEffect(() => {
     if (mode !== "send" || !seller) {
       return;
     }
-    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+    if (sellerScreen !== "files") {
       return;
     }
     const candidates = sellerFiles
@@ -2874,7 +2878,6 @@ export function PaidPrivateFilePanel({
             <BrandMark kind="zcash" label={copy.brand.zcash} />
             <BrandMark kind="nym" label={copy.brand.nym} />
           </div>
-          <ProductLocaleToggle locale={locale} ariaLabel={copy.shell.eyebrow} />
         </div>
       </header>
 
@@ -3723,12 +3726,13 @@ function SellerDashboard({
   children: ReactNode;
 }) {
   const tabs: Array<{ screen: SellerScreen; label: string }> = [
-    { screen: "dashboard", label: copy.dashboard.tabDashboard },
     { screen: "files", label: copy.dashboard.tabFiles },
     { screen: "settings", label: copy.dashboard.tabSettings },
   ];
+  // The create + manage sub-screens are reached from the Files tab, so they keep
+  // the Files tab highlighted.
   const activeTab =
-    screen === "create" || screen === "manage" ? "dashboard" : screen;
+    screen === "create" || screen === "manage" ? "files" : screen;
 
   return (
     <section className="frame ppf-shop surface-reveal">
@@ -3777,7 +3781,7 @@ function SellerDashboard({
           <button
             type="button"
             className="ppf-shop-back"
-            onClick={() => onScreenChange("dashboard")}
+            onClick={() => onScreenChange("files")}
           >
             ← {copy.dashboard.backToDashboard}
           </button>
@@ -3788,7 +3792,7 @@ function SellerDashboard({
           <button
             type="button"
             className="ppf-shop-back"
-            onClick={() => onScreenChange("dashboard")}
+            onClick={() => onScreenChange("files")}
           >
             ← {copy.dashboard.backToDashboard}
           </button>
@@ -3822,28 +3826,11 @@ function SellerDashboard({
           onSaveSettings={onSaveSettings}
           publicLinkCopied={publicLinkCopied}
           onCopyPublicLink={onCopyPublicLink}
+          newSellerAccessKey={newSellerAccessKey}
           isBusy={isBusy}
         />
-      ) : screen === "files" ? (
-        <div className="ppf-shop-screen">
-          <SellerFilesList
-            copy={copy}
-            locale={locale}
-            files={files}
-            filesStatus={filesStatus}
-            onOpenManage={onOpenManage}
-            deliveringOrderIds={deliveringOrderIds}
-          />
-        </div>
       ) : (
         <div className="ppf-shop-screen">
-          <SellerReceivingCard copy={copy} seller={seller} />
-          {newSellerAccessKey ? null : (
-            <div className="ppf-shop-reminder" role="note">
-              <p className="eyebrow">{copy.dashboard.accessKeyReminderTitle}</p>
-              <p>{copy.dashboard.accessKeyReminderBody}</p>
-            </div>
-          )}
           <SellerFilesList
             copy={copy}
             locale={locale}
@@ -3865,9 +3852,9 @@ function SellerReceivingCard({
   copy: PaidPrivateFileCopy;
   seller: SellerProfile;
 }) {
-  const fingerprint = seller.ufvkFingerprint
-    ? `${seller.ufvkFingerprint.slice(0, 8)}…`
-    : null;
+  // Show the viewing-key fingerprint in FULL (no slice/ellipsis) so the seller
+  // can read + verify it; long strings wrap via the ppf-receiving-address class.
+  const fingerprint = seller.ufvkFingerprint ?? null;
   const network = seller.network ?? "main";
   return (
     <div className="ppf-receiving-card">
@@ -3888,7 +3875,7 @@ function SellerReceivingCard({
           <dd className="ppf-receiving-key">
             {fingerprint ? (
               <>
-                <code>{fingerprint}</code>
+                <code className="ppf-receiving-address">{fingerprint}</code>
                 <span className="ppf-tag ppf-tag-ok">
                   {copy.dashboard.viewingKeyHeldBy}
                 </span>
@@ -4196,6 +4183,7 @@ function SellerSettingsScreen({
   onSaveSettings,
   publicLinkCopied,
   onCopyPublicLink,
+  newSellerAccessKey,
   isBusy,
 }: {
   copy: PaidPrivateFileCopy;
@@ -4207,6 +4195,7 @@ function SellerSettingsScreen({
   onSaveSettings: () => void;
   publicLinkCopied: boolean;
   onCopyPublicLink: () => void;
+  newSellerAccessKey: string;
   isBusy: boolean;
 }) {
   const saveLabel =
@@ -4249,6 +4238,15 @@ function SellerSettingsScreen({
         <p className="eyebrow">{copy.dashboard.settingsReceivingTitle}</p>
         <SellerReceivingCard copy={copy} seller={seller} />
       </section>
+
+      {newSellerAccessKey ? null : (
+        <section className="ppf-settings-block">
+          <div className="ppf-shop-reminder" role="note">
+            <p className="eyebrow">{copy.dashboard.accessKeyReminderTitle}</p>
+            <p>{copy.dashboard.accessKeyReminderBody}</p>
+          </div>
+        </section>
+      )}
 
       <section className="ppf-settings-block">
         <p className="eyebrow">{copy.dashboard.settingsPublicLinkTitle}</p>

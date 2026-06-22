@@ -10,14 +10,14 @@ export type ProductSearchParams =
 
 const DEFAULT_LOCALE: ProductLocale = "en";
 
+// English-only: the PT/EN toggle has been removed from the UI, so the app always
+// renders the English copy. We intentionally ignore the `?lang=` query param (the
+// pt.* strings remain in the copy file but are unreachable). The async signature
+// is kept so existing server-component call sites do not need to change.
 export async function resolveProductLocale(
-  searchParams: ProductSearchParams,
+  _searchParams: ProductSearchParams,
 ): Promise<ProductLocale> {
-  const resolved = searchParams ? await searchParams : undefined;
-  const candidate = resolved?.lang;
-  const value = Array.isArray(candidate) ? candidate[0] : candidate;
-
-  return value === "pt" || value === "en" ? value : DEFAULT_LOCALE;
+  return DEFAULT_LOCALE;
 }
 
 export function withProductLocale(href: string, locale: ProductLocale): string {

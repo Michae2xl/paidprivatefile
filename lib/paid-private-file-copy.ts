@@ -571,8 +571,9 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
   en: {
     shell: {
       eyebrow: "Paid Private File",
-      title: "ZEC payment. Private Nym delivery. Local-only file opening.",
-      body: "The file is encrypted before upload. The ZEC payment unlocks a private Nym delivery session for the buyer key, without exposing the file content.",
+      title:
+        "Pay in ZEC. Key and file delivered over Nym. Decrypted on your device.",
+      body: "The file is encrypted in your browser before upload (AES-256-GCM). After a non-custodial ZEC payment, both the decryption key and the encrypted file are delivered browser-to-browser over the Nym mixnet, and the buyer decrypts on their device. The server only ever holds ciphertext, so it can read nothing.",
       backLabel: "Paid Private File",
     },
     tabs: {
@@ -583,23 +584,25 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       zcash: "Zcash",
       nym: "Nym",
       cipherpay: "CipherPay",
-      railLabel: "Zcash + Nym private rail",
+      railLabel: "Zcash pays. Nym delivers.",
       railBody:
-        "ZEC payment enters through checkout. The private key exits through Nym.",
+        "ZEC goes straight to the seller's own address (platform watches view-only). The decryption key and the encrypted file then travel over the Nym mixnet.",
     },
     motion: {
-      title: "Private flow",
-      body: "One file, one payment, one private delivery.",
-      transferLabel: "File in transit",
-      transferBody: "Ciphertext stored. The key stays out of the public link.",
-      paymentLabel: "Waiting for ZEC",
-      paymentBody: "The invoice confirms before key delivery.",
+      title: "How it works",
+      body: "Encrypt locally, pay in ZEC, deliver over Nym, decrypt on your device.",
+      transferLabel: "Encrypted and stored",
+      transferBody:
+        "Encrypted in the browser. The server only ever holds ciphertext — the decryption key never reaches it.",
+      paymentLabel: "Paid in ZEC",
+      paymentBody: "The on-chain ZEC payment confirms before delivery begins.",
       doneLabel: "Done",
-      doneBody: "Buyer receives the key through Nym and decrypts locally.",
+      doneBody:
+        "Buyer receives the key and file over Nym, then decrypts on their device.",
     },
     seller: {
-      title: "No-email private shop",
-      body: "Create a public route, configure your ZEC wallet, and use an access key to log in later.",
+      title: "Your shop. No email, no custody.",
+      body: "Create a public route, add a view-only key to receive ZEC, and log back in later with an access key.",
       createTab: "Create shop",
       loginTab: "Log in",
       handleLabel: "Public route",
@@ -635,7 +638,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       sectionIdentityTitle: "Shop identity",
       sectionPayoutTitle: "Get paid (non-custodial)",
       sectionPayoutNote:
-        "Buyers pay a unique address per order, derived from your viewing key — funds go straight to your account. You never paste an address.",
+        "Each order gets its own address, derived from your viewing key — funds go straight to your account. We can detect payments view-only but never touch them. You never paste an address.",
       ufvkAckLabel:
         "I understand: I'll use a dedicated account, not my main wallet.",
       ufvkPreviewChecking: "Checking the key...",
@@ -646,8 +649,8 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     dashboard: {
       createFileCta: "Create paid file",
       signOutLabel: "Sign out",
-      backToDashboard: "Back to dashboard",
-      tabDashboard: "Dashboard",
+      backToDashboard: "Back to files",
+      tabDashboard: "Files",
       tabFiles: "Files",
       tabSettings: "Settings",
       receivingTitle: "Receiving - non-custodial",
@@ -658,7 +661,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       viewingKeyNone: "none registered",
       networkLabel: "Network",
       receivingHelper:
-        "Each sale gets a unique address derived from this key. We detect payments view-only - we can never spend.",
+        "Each sale gets a unique address derived from this key, paid straight to your own account. We detect payments view-only and can never spend or move funds.",
       accessKeyReminderTitle: "Access key",
       accessKeyReminderBody:
         "Your access key is shown only once when the shop is created. Keep it outside the browser: it is the only way to log back in.",
@@ -701,7 +704,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
     },
     send: {
       title: "Create paid private file",
-      body: "Pick a file, set the ZEC price, and share private access. The server stores ciphertext; key delivery is treated as a Nym session.",
+      body: "Pick a file, set the ZEC price, and share a private link. The file is encrypted in your browser, so the server only ever holds ciphertext, and the key and file are delivered to the buyer over the Nym mixnet.",
       fileLabel: "Private file",
       chooseFileLabel: "Choose file",
       emptyFileLabel: "No file selected",
@@ -709,33 +712,34 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       priceHint: "Example: 0.05 ZEC. The value is converted to zatoshis.",
       payoutAddressLabel: "Wallet to receive ZEC",
       payoutAddressPlaceholder: "u1...",
-      payoutAddressHint: "The buyer payment should go to this Unified Address.",
+      payoutAddressHint:
+        "The buyer pays an address derived from this account. Funds go straight to you.",
       noteLabel: "Note for buyer",
       notePlaceholder: "Optional",
       submitLabel: "Create paid private file",
       busyLabel: "Encrypting and creating link...",
       successTitle: "Private file ready",
       successBody:
-        "Share the access link. The file opens only after the ZEC payment is confirmed.",
+        "Share the access link. The file unlocks only after the ZEC payment confirms on-chain, then is delivered over Nym and decrypted on the buyer's device.",
       copyLinkLabel: "Copy link",
       openLinkLabel: "Open link",
     },
     receive: {
-      title: "Pay and open locally",
-      body: "Load the link, register your Nym session, pay the ZEC invoice, and open the file locally.",
+      title: "Pay in ZEC, decrypt on your device",
+      body: "Open the link and pay in ZEC. The key and file arrive over the Nym mixnet, and the file is decrypted on your device. A private receiver is set up automatically.",
       orderLabel: "Paid Private File",
       orderPlaceholder: "Paste file link or order id",
       nymAddressLabel: "Buyer Nym address",
       nymAddressPlaceholder: "nym...",
       nymAddressHint:
-        "The file key should be delivered through a Nym session after payment.",
+        "After payment, the decryption key and file are delivered to this address over the Nym mixnet.",
       startNymLabel: "Start Nym receiver",
       nymReadyLabel: "Nym receiver ready",
       nymStartingLabel: "Connecting Nym...",
-      nymWaitingLabel: "Waiting for private Nym delivery...",
+      nymWaitingLabel: "Waiting for delivery over the Nym mixnet...",
       privateReceiverLabel: "Private receiver",
       privateReceiverBody:
-        "The browser prepares the Nym session automatically before payment. No address paste needed.",
+        "Your browser sets up a Nym receiver automatically before payment, so the key and file arrive over the mixnet. Nothing to paste.",
       manualNymLabel: "Use manual Nym address",
       manualNymHideLabel: "Hide manual address",
       loadLabel: "Load",
@@ -769,12 +773,12 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "Your file is ready and shown below. Tap Download to save it (or long-press the image).",
       receivingTitle: "Receiving your file...",
       receivingBody:
-        "Payment confirmed. We're bringing your file in securely. You can keep this page open.",
+        "Payment confirmed. Your encrypted file is arriving over the Nym mixnet and will be decrypted on this device. Keep this page open.",
       arrivedTitle: "Your file arrived - saving it now.",
       arrivedBody:
         "The download should start on its own. If it doesn't, tap Save file.",
       saveFileLabel: "Save file",
-      receivingOverNym: "Receiving over Nym... {percent}%",
+      receivingOverNym: "Receiving encrypted file over Nym... {percent}%",
       receivedViaNym: "✓ Received over Nym (mixnet)",
       receivedViaHttps: "↩ Received over HTTPS (Nym fallback)",
     },
@@ -785,12 +789,12 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       stepInTransit: "Payment detected",
       stepInTransitBody: "We received your payment and are confirming it.",
       stepPaid: "Paid",
-      stepPaidBody: "Payment confirmed. Preparing the key delivery.",
+      stepPaidBody: "Payment confirmed. Lining up your delivery over Nym.",
       stepReceivingKey: "Receiving key (Nym)",
       stepReceivingKeyBody:
-        "The key is arriving over the Nym network. Keep this tab open.",
+        "The key and encrypted file are arriving over the Nym mixnet. Keep this tab open.",
       stepDone: "Done",
-      stepDoneBody: "File downloaded and opened in this browser.",
+      stepDoneBody: "File received over Nym and decrypted on this device.",
       nymConnected: "Connected to Nym - listening for the key",
       nymConnecting: "Connecting to Nym...",
       nymNotConnected: "Not connected to Nym - try reconnecting",
@@ -814,7 +818,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       autoResendingLabel: "Re-sending over Nym...",
       deliveredToBuyer: "Delivered to buyer",
       notDeliveredYet:
-        "Sent over Nym, waiting for the buyer to confirm receipt. Re-sending automatically while this screen is open.",
+        "Sent over Nym, waiting for the buyer to confirm receipt. Auto-resending while this screen stays open.",
       keepTabOpenHint:
         "Keep this screen open until it shows Delivered to buyer.",
       sendingOverNym: "Sending over Nym... {percent}%",
@@ -830,7 +834,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       paymentAddress: "Payment address",
       paymentMemo: "Memo",
       invoice: "Invoice",
-      privateDelivery: "Private delivery",
+      privateDelivery: "Delivery over Nym",
       nymSession: "Nym session",
       qrCaption: "Scan to pay - {price} ZEC",
       qrAlt: "Zcash payment QR code",
