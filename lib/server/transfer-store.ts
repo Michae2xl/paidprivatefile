@@ -109,6 +109,12 @@ export interface TransferOrder {
   schema: "zectime.paid-link.order.v1";
   orderId: string;
   status: TransferStatus;
+  // Multi-buyer "product" model (Phase 2): when this order was spawned from a
+  // catalog product (one product -> many per-buyer purchase orders), this is the
+  // source product id. ADDITIVE + back-compat: single-use orders simply have no
+  // productId (absent/null), so all existing payment + Nym/HTTPS delivery code
+  // treats a spawned purchase exactly like a normal order.
+  productId?: string | null;
   createdAt: string;
   updatedAt: string;
   fileName: string;
@@ -153,6 +159,10 @@ export interface TransferTimestampReceipt {
 export interface TransferPublicOrder {
   orderId: string;
   status: TransferStatus;
+  // Source product id when this order was spawned from a catalog product (Phase
+  // 2). Null for ordinary single-use orders. Safe to expose: it is an opaque id,
+  // never key material.
+  productId: string | null;
   createdAt: string;
   updatedAt: string;
   file: {
@@ -201,6 +211,9 @@ export interface CreateTransferOrderInput {
   sellerNote?: string | null;
   seller?: TransferSeller | null;
   timestampReceipt?: TransferTimestampReceipt | null;
+  // Set only when spawning a per-buyer purchase order from a catalog product
+  // (Phase 2). Absent for ordinary single-use orders.
+  productId?: string | null;
 }
 
 export interface TransferSeller {
@@ -262,6 +275,7 @@ export interface TransferReleaseChallenge {
 }
 
 const ORDER_ID_PATTERN = /^pl_[a-f0-9]{24}$/u;
+const PRODUCT_ID_PATTERN = /^prd_[a-f0-9]{24}$/u;
 const HEX_SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const MAX_TRANSFER_BYTES = 50 * 1024 * 1024;
 const DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -306,6 +320,7 @@ export async function createTransferOrder(
     schema: "zectime.paid-link.order.v1",
     orderId,
     status: "created",
+    productId: normalizeProductId(input.productId),
     createdAt,
     updatedAt: createdAt,
     fileName,
@@ -1195,6 +1210,7 @@ function publicOrder(order: TransferOrder): TransferPublicOrder {
   return {
     orderId: order.orderId,
     status: order.status,
+    productId: order.productId ?? null,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
     file: {
@@ -1442,7 +1458,18 @@ function normalizeStoredOrder(order: TransferOrder): TransferOrder {
   order.delivery = normalizeDeliveryState(order.delivery);
   order.release = normalizeReleaseState(order.release);
   order.payment = normalizePaymentState(order.payment);
+  order.productId = normalizeProductId(order.productId);
   return order;
+}
+
+// Back-compat coercion for the optional Phase 2 product link. Older orders have
+// no productId — those normalize to null. A present value must match the product
+// id format ("prd_" + 24 hex); anything else normalizes to null rather than
+// throwing, so a malformed legacy field can never break reading an order.
+function normalizeProductId(value: string | null | undefined): string | null {
+  return typeof value === "string" && PRODUCT_ID_PATTERN.test(value)
+    ? value
+    : null;
 }
 
 function normalizePaymentState(

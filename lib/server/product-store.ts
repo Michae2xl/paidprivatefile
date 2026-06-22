@@ -3,6 +3,11 @@ import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { ServerError } from "./error-kinds";
+import {
+  createTransferOrder,
+  getTransferPublicOrder,
+  type TransferPublicOrder,
+} from "./transfer-store";
 import { resolveWebRuntimeRoot } from "./web-session";
 
 // Multi-buyer "product" model (Phase 1): a product is a SELLER-OWNED catalog
@@ -278,6 +283,79 @@ export async function recordProductSale(productId: string): Promise<Product> {
     await writeProduct(next);
     return next;
   });
+}
+
+// Per-buyer fields a purchase may carry in a later phase. Empty today: a buyer
+// initiates a purchase, then drives the EXISTING order flow (register Nym
+// session + pay + receive) against the returned orderId, so nothing extra is
+// needed at spawn time. Kept as a typed seam so Phase 3 can extend it without a
+// signature change.
+export interface SpawnOrderFromProductInput {
+  sellerNote?: string | null;
+}
+
+// Multi-buyer "product" model (Phase 2): spawn a fresh, self-contained PURCHASE
+// order from a catalog product so multiple buyers never collide. Each buyer who
+// opens a product gets their OWN order (own per-order derived deposit address +
+// fresh Nym session), instead of today's one-link-one-buyer model where a second
+// payer would lose their money.
+//
+// Reuse: this delegates to createTransferOrder for ALL order internals (id,
+// per-order deposit-address derivation, Nym session init, manifest,
+// releaseSecretHash, the order dir + encrypted.bin write), so the spawned
+// purchase works with every existing payment + Nym/HTTPS delivery path
+// unchanged. The only product-specific work here is (a) reserving a unit for a
+// limited product and (b) copying the product's file metadata + ciphertext into
+// the new order.
+//
+// Reserve-before-create (limited only): we call recordProductSale FIRST so a
+// paid buyer can never be created against a sold-out product, and the per-product
+// lock guarantees two buyers never both get the last unit. Open products are
+// unlimited, so they are NOT reserved. NOTE for a later phase: an abandoned
+// (unpaid) limited purchase holds its reserved unit — acceptable for Phase 2; a
+// future reservation-TTL phase can reclaim it.
+export async function spawnOrderFromProduct(
+  productId: string,
+  _input: SpawnOrderFromProductInput = {},
+): Promise<TransferPublicOrder> {
+  const product = await getProduct(productId);
+  if (product.status === "closed") {
+    throw new ServerError("flow_conflict", "This product is closed");
+  }
+
+  // Limited supply: reserve a unit up front (race-safe via the per-product lock).
+  // recordProductSale rejects (sold out / closed) before any order is created, so
+  // a buyer is never charged for a unit that does not exist. Open supply is
+  // unlimited and intentionally skips reservation.
+  if (product.supply.mode === "limited") {
+    await recordProductSale(product.productId);
+  }
+
+  // Copy the product's self-contained ciphertext into a NEW order. create
+  // TransferOrder re-hashes and writes its own encrypted.bin, so the spawned
+  // purchase is a normal order with its own copy on disk — no shared state.
+  const encryptedFile = new Uint8Array(
+    await readFile(encryptedFilePath(product.productId)),
+  );
+
+  const order = await createTransferOrder({
+    encryptedFile,
+    fileName: product.fileName,
+    mimeType: product.mimeType,
+    originalSizeBytes: product.originalSizeBytes,
+    encryptedFileSha256: product.encryptedFileSha256,
+    encryptionIv: product.encryption.iv,
+    releaseSecretHash: product.releaseSecretHash,
+    amountZats: product.price.amountZats,
+    sellerPayoutAddress: product.sellerPayoutAddress,
+    sellerNote: product.sellerNote,
+    seller: product.seller,
+    productId: product.productId,
+  });
+
+  // Re-read the public projection from the store so callers always see the
+  // canonical secret-stripped order shape.
+  return getTransferPublicOrder(order.orderId);
 }
 
 function publicProduct(product: Product): PublicProduct {

@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, webcrypto } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { ServerError } from "../lib/server/error-kinds";
+import { registerDepositAddresses } from "../lib/server/deposit-pool";
 import {
   createProduct,
   getProduct,
@@ -14,9 +15,14 @@ import {
   listProductsForSeller,
   recordProductSale,
   remainingSupply,
+  spawnOrderFromProduct,
   type CreateProductInput,
   type ProductSupply,
 } from "../lib/server/product-store";
+import {
+  createPaymentIntentForOrder,
+  getTransferPublicOrder,
+} from "../lib/server/transfer-store";
 
 let runtimeDir: string;
 
@@ -253,5 +259,197 @@ describe("product-store recordProductSale", () => {
     const final = await getProduct(product.productId);
     expect(final.salesCount).toBe(3);
     expect(final.status).toBe("sold_out");
+  });
+});
+
+async function buyerPublicKeyJwk(): Promise<JsonWebKey> {
+  const keyPair = await webcrypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveBits"],
+  );
+  const jwk = await webcrypto.subtle.exportKey("jwk", keyPair.publicKey);
+  delete jwk.key_ops;
+  delete jwk.ext;
+  return jwk;
+}
+
+describe("product-store spawnOrderFromProduct", () => {
+  it("rejects an unknown product id", async () => {
+    await expect(
+      spawnOrderFromProduct("prd_ffffffffffffffffffffffff"),
+    ).rejects.toBeInstanceOf(ServerError);
+  });
+
+  it("spawns a self-contained purchase order from an open product", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "open" } }),
+    );
+
+    const order = await spawnOrderFromProduct(product.productId);
+
+    // A fresh normal order, linked back to its source product.
+    expect(order.orderId).toMatch(/^pl_[a-f0-9]{24}$/u);
+    expect(order.productId).toBe(product.productId);
+    expect(order.status).toBe("created");
+    // File metadata + price + seller copied from the product.
+    expect(order.file.fileName).toBe("course.zip");
+    expect(order.file.encryptedFileSha256).toBe(product.encryptedFileSha256);
+    expect(order.price.amountZats).toBe(product.price.amountZats);
+    expect(order.sellerPayoutAddress).toBe(product.sellerPayoutAddress);
+
+    // The purchase has its OWN ciphertext copied onto disk.
+    const bytes = new Uint8Array(
+      await readFile(
+        join(
+          runtimeDir,
+          "paid-transfers",
+          "orders",
+          order.orderId,
+          "encrypted.bin",
+        ),
+      ),
+    );
+    expect(bytes).toEqual(encryptedFixture());
+
+    // The order is also readable through the canonical store projection.
+    const reread = await getTransferPublicOrder(order.orderId);
+    expect(reread.productId).toBe(product.productId);
+  });
+
+  it("does NOT reserve a unit for an open product (unlimited)", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "open" } }),
+    );
+
+    await spawnOrderFromProduct(product.productId);
+    await spawnOrderFromProduct(product.productId);
+    await spawnOrderFromProduct(product.productId);
+
+    const after = await getProduct(product.productId);
+    // Open supply is never reserved on spawn, so salesCount stays at 0 and the
+    // product is never sold out.
+    expect(after.salesCount).toBe(0);
+    expect(after.status).toBe("open");
+  });
+
+  it("gives multiple open purchases distinct order ids and deposit addresses", async () => {
+    process.env.PAID_PRIVATE_FILE_ZCASH_ONCHAIN = "1";
+    process.env.PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET =
+      "test-spawn-token-secret";
+    try {
+      await registerDepositAddresses([
+        "u1depositpooladdressaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "u1depositpooladdressbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ]);
+      const product = await createProduct(
+        makeInput({ supply: { mode: "open" } }),
+      );
+
+      const first = await spawnOrderFromProduct(product.productId);
+      const second = await spawnOrderFromProduct(product.productId);
+
+      expect(first.orderId).not.toBe(second.orderId);
+
+      const firstIntent = await createPaymentIntentForOrder(
+        first.orderId,
+        await buyerPublicKeyJwk(),
+      );
+      const secondIntent = await createPaymentIntentForOrder(
+        second.orderId,
+        await buyerPublicKeyJwk(),
+      );
+
+      // Each purchase gets its own per-order deposit address — two buyers never
+      // collide on the same deposit.
+      expect(firstIntent.payment.paymentAddress).toBeTruthy();
+      expect(secondIntent.payment.paymentAddress).toBeTruthy();
+      expect(firstIntent.payment.paymentAddress).not.toBe(
+        secondIntent.payment.paymentAddress,
+      );
+    } finally {
+      delete process.env.PAID_PRIVATE_FILE_ZCASH_ONCHAIN;
+      delete process.env.PAID_PRIVATE_FILE_TRANSFER_TOKEN_SECRET;
+    }
+  });
+
+  it("reserves a unit and increments salesCount for a limited product", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "limited", max: 3 } }),
+    );
+
+    const order = await spawnOrderFromProduct(product.productId);
+    expect(order.productId).toBe(product.productId);
+
+    const after = await getProduct(product.productId);
+    expect(after.salesCount).toBe(1);
+    expect(after.status).toBe("open");
+    expect(remainingSupply(after)).toBe(2);
+  });
+
+  it("flips a limited product to sold_out and rejects the Nth+1 purchase", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "limited", max: 2 } }),
+    );
+
+    const first = await spawnOrderFromProduct(product.productId);
+    const second = await spawnOrderFromProduct(product.productId);
+    expect(first.orderId).not.toBe(second.orderId);
+
+    const soldOut = await getProduct(product.productId);
+    expect(soldOut.salesCount).toBe(2);
+    expect(soldOut.status).toBe("sold_out");
+    expect(isSoldOut(soldOut)).toBe(true);
+
+    // No paid buyer can ever be created against a sold-out product.
+    await expect(
+      spawnOrderFromProduct(product.productId),
+    ).rejects.toBeInstanceOf(ServerError);
+  });
+
+  it("handles a single buyer of a 1-supply product and rejects the second", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "limited", max: 1 } }),
+    );
+
+    const order = await spawnOrderFromProduct(product.productId);
+    expect(order.orderId).toMatch(/^pl_[a-f0-9]{24}$/u);
+
+    const after = await getProduct(product.productId);
+    expect(after.salesCount).toBe(1);
+    expect(after.status).toBe("sold_out");
+
+    await expect(
+      spawnOrderFromProduct(product.productId),
+    ).rejects.toBeInstanceOf(ServerError);
+  });
+
+  it("never oversells the last unit under concurrent spawns", async () => {
+    const product = await createProduct(
+      makeInput({ supply: { mode: "limited", max: 3 } }),
+    );
+
+    // Five concurrent purchases against a 3-unit product: exactly three orders
+    // are created, two are rejected sold-out. The per-product lock in
+    // recordProductSale serializes the reservation.
+    const results = await Promise.allSettled(
+      Array.from({ length: 5 }, () => spawnOrderFromProduct(product.productId)),
+    );
+    const settled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(settled).toHaveLength(3);
+    expect(rejected).toHaveLength(2);
+
+    const final = await getProduct(product.productId);
+    expect(final.salesCount).toBe(3);
+    expect(final.status).toBe("sold_out");
+
+    // Each successful purchase is a distinct order.
+    const orderIds = new Set(
+      settled.map(
+        (r) => (r as PromiseFulfilledResult<{ orderId: string }>).value.orderId,
+      ),
+    );
+    expect(orderIds.size).toBe(3);
   });
 });
