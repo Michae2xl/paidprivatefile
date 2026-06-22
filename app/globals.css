@@ -108,6 +108,37 @@ a {
   position: relative;
 }
 
+/* Large semi-transparent brand watermarks, one on each side margin. */
+.zectime-side-logo {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  width: clamp(160px, 22vw, 400px);
+  height: clamp(160px, 22vw, 400px);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  opacity: 0.15;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.zectime-side-logo--zcash {
+  left: -1.5vw;
+  background-image: url("/brand/zcash-brandmark-yellow.svg");
+}
+
+.zectime-side-logo--nym {
+  right: -1.5vw;
+  background-image: url("/brand/nym-app-icon.svg");
+}
+
+@media (max-width: 1024px) {
+  .zectime-side-logo {
+    display: none;
+  }
+}
+
 .zk-hub-topbar {
   display: flex;
   align-items: center;

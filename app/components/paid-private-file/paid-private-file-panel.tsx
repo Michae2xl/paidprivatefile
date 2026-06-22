@@ -2859,27 +2859,14 @@ export function PaidPrivateFilePanel({
   return (
     <main className="page-shell product-shell zk-hub-shell zk-timestamp-shell zectime-paid-link-shell">
       <div className="background-grid" aria-hidden="true" />
-
-      <header className="frame zk-hub-topbar surface-reveal">
-        <div className="zk-hub-topbar-brand">
-          <p className="eyebrow zk-hub-topbar-eyebrow">{copy.shell.eyebrow}</p>
-          <Link
-            className="zk-hub-topbar-back"
-            href={withProductLocale(backHref, locale)}
-          >
-            {backLabel ?? copy.shell.backLabel}
-          </Link>
-        </div>
-        <div className="zk-hub-topbar-tools">
-          <div
-            className="zectime-topbar-logos"
-            aria-label={copy.brand.railLabel}
-          >
-            <BrandMark kind="zcash" label={copy.brand.zcash} />
-            <BrandMark kind="nym" label={copy.brand.nym} />
-          </div>
-        </div>
-      </header>
+      <div
+        className="zectime-side-logo zectime-side-logo--zcash"
+        aria-hidden="true"
+      />
+      <div
+        className="zectime-side-logo zectime-side-logo--nym"
+        aria-hidden="true"
+      />
 
       <div className="zk-hub-body zectime-paid-body">
         <section className="frame zectime-paid-hero surface-reveal">
