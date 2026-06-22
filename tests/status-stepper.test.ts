@@ -1,114 +1,17 @@
-// The buyer + seller status steppers drive their highlight off two pure helpers:
-//   - getBuyerStatusStageIndex: (phase, order, downloadUrl) -> 0..4
+// The seller status stepper drives its highlight off a pure helper:
 //   - getSellerStatusStageIndex: (order delivery state) -> 0..4
-// Plus shortNymAddress for the buyer Nym-health line. These pin the stage
-// transitions (including the pure-Nym "delivered" terminal) without React.
+// Plus shortNymAddress for the seller-side compact address display. These pin
+// the stage transitions (including the pure-Nym "delivered" terminal) without
+// React. The buyer-side stepper was removed in favour of a dead-simple flow
+// (single "Receiving your file…" card + auto-download), so there is no buyer
+// stage helper to cover here anymore.
 
 import { describe, expect, it } from "vitest";
 
 import {
-  getBuyerStatusStageIndex,
   getSellerStatusStageIndex,
   shortNymAddress,
 } from "../app/components/paid-private-file/paid-private-file-panel";
-
-describe("getBuyerStatusStageIndex", () => {
-  it("is stage 0 (awaiting payment) while loading or awaiting payment", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "loading",
-        order: { status: "created", payment: null },
-        downloadUrl: "",
-      }),
-    ).toBe(0);
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "awaiting-payment",
-        order: { status: "payment_pending", payment: { status: "pending" } },
-        downloadUrl: "",
-      }),
-    ).toBe(0);
-  });
-
-  it("is stage 1 (payment detected) on a 0-conf sighting before it confirms", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "detected",
-        order: {
-          status: "payment_pending",
-          payment: { status: "pending", detectedAt: "2026-01-01T00:00:00Z" },
-        },
-        downloadUrl: "",
-      }),
-    ).toBe(1);
-  });
-
-  it("is stage 1 (payment detected) from an onchain sighting even if phase lags", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "awaiting-payment",
-        order: {
-          status: "payment_pending",
-          payment: { status: "pending", onchain: { txid: "a".repeat(64) } },
-        },
-        downloadUrl: "",
-      }),
-    ).toBe(1);
-  });
-
-  it("is stage 2 (paid) when paid but the key is not released yet", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "in-transit",
-        order: {
-          status: "paid",
-          payment: { status: "paid" },
-          release: { status: "seller_pending" },
-        },
-        downloadUrl: "",
-      }),
-    ).toBe(2);
-  });
-
-  it("is stage 3 (receiving key) once the seller has released the key", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "in-transit",
-        order: {
-          status: "paid",
-          payment: { status: "paid" },
-          release: { status: "ready" },
-        },
-        downloadUrl: "",
-      }),
-    ).toBe(3);
-  });
-
-  it("is stage 4 (done) once the file is opened locally", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "done",
-        order: { status: "claimed", payment: { status: "paid" } },
-        downloadUrl: "blob:abc",
-      }),
-    ).toBe(4);
-  });
-
-  it("is stage 4 (done) once the Nym session reports delivered", () => {
-    expect(
-      getBuyerStatusStageIndex({
-        phase: "in-transit",
-        order: {
-          status: "paid",
-          payment: { status: "paid" },
-          release: { status: "ready" },
-          delivery: { nymSession: { status: "delivered" } },
-        },
-        downloadUrl: "",
-      }),
-    ).toBe(4);
-  });
-});
 
 describe("getSellerStatusStageIndex", () => {
   it("is stage 0 (awaiting payment) before payment", () => {

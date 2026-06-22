@@ -454,10 +454,17 @@ export async function listScanWatchlistEntries(): Promise<
   const bindings = await listBindings();
   const scanRefCache = new Map<string, string | null>();
   const entries: ScanWatchlistEntry[] = [];
+  // Drop stale pending orders off the watchlist so dead/abandoned test orders
+  // stop being scanned (and stop hitting the webhook) forever.
+  const now = Date.now();
+  const WATCHLIST_TTL_MS = 24 * 60 * 60 * 1000;
 
   for (const binding of bindings) {
     const order = await readOrderOrNull(binding.orderId);
     if (!order || order.status !== "payment_pending" || !order.payment) {
+      continue;
+    }
+    if (now - new Date(order.createdAt).getTime() > WATCHLIST_TTL_MS) {
       continue;
     }
     const scanRef = await resolveSellerScanRefCached(binding, scanRefCache);

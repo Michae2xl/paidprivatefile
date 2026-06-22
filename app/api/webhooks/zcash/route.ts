@@ -60,13 +60,16 @@ export async function POST(request: Request) {
     }
 
     // Non-custodial marketplace (Phase 1): when the scanner reports a sellerId,
-    // it must match the order's seller. This binds the deposit to the seller
-    // whose UFVK derived the address and blocks cross-seller misattribution.
+    // it must match the order's seller (blocks cross-seller misattribution). A
+    // mismatch is IGNORED (200), not an error — same as underpayment — so a stale
+    // / legacy order whose binding diverged doesn't spam ServerError logs every
+    // scan tick. The order simply never settles.
     if (report.sellerId && order.seller?.sellerId !== report.sellerId) {
-      throw new ServerError(
-        "validation",
-        "Deposit sellerId did not match the order seller",
-      );
+      return NextResponse.json({
+        ok: true,
+        ignored: true,
+        reason: "seller_mismatch",
+      });
     }
 
     if (report.amountZats < order.price.amountZats) {

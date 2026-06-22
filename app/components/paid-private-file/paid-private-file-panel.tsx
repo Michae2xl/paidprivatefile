@@ -351,11 +351,7 @@ export function PaidPrivateFilePanel({
   // Guards against double-firing the auto re-send tick (a slow send must not
   // overlap the next interval) and tracks the orderId the loop is bound to.
   const resendInFlightRef = useRef(false);
-  // Dead-simple buyer flow: a confirmation modal pops once the order flips to
-  // "paid". We track the previous payment status so it fires exactly once.
-  const [showPaidModal, setShowPaidModal] = useState(false);
   const [addressCopied, setAddressCopied] = useState(false);
-  const buyerPaidSeenRef = useRef(false);
   const browserNymClientRef = useRef<BrowserNymClient | null>(null);
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   const autoReleaseRef = useRef(false);
@@ -368,6 +364,21 @@ export function PaidPrivateFilePanel({
   // Dashboard auto-release: orders this browser has already fired a silent
   // release for, so the periodic dashboard scan never re-releases the same order.
   const dashboardReleasedRef = useRef<Set<string>>(new Set());
+  // Dashboard auto re-send-until-acked: the SAME robust pure-Nym loop the Manage
+  // screen runs, but driven by the dashboard/files poll so delivery completes
+  // with the seller just sitting on the dashboard (no Manage screen needed).
+  // dashboardResendInFlightRef guards per-order against a slow send overlapping
+  // the next tick; dashboardDelivering powers the subtle "Delivering over Nym…"
+  // indicator on the affected file rows.
+  const dashboardResendInFlightRef = useRef<Set<string>>(new Set());
+  const [dashboardDelivering, setDashboardDelivering] = useState<Set<string>>(
+    () => new Set(),
+  );
+  // Buyer auto-download: the object URL we have already auto-saved, so the
+  // happy-path programmatic download fires exactly once per decrypted file (a
+  // re-render must not re-trigger it). The "Save file" button is always a manual
+  // fallback for browsers that block the programmatic click (Safari can be strict).
+  const buyerAutoDownloadedRef = useRef<string>("");
 
   useEffect(() => {
     if (!initialOrderId) {
@@ -913,9 +924,9 @@ export function PaidPrivateFilePanel({
     setBusyAction("loading");
     setDownloadUrl("");
     setDownloadFileName("");
-    setShowPaidModal(false);
     pendingDownloadRef.current = null;
     buyerReceivedRef.current = false;
+    buyerAutoDownloadedRef.current = "";
 
     try {
       const body = await postJson<{ order: TransferPublicOrder }>(
@@ -926,9 +937,6 @@ export function PaidPrivateFilePanel({
       setPayment(body.order.payment);
       setOrderInput(orderId);
       setMode("receive");
-      // Seed the paid-modal tracker so re-loading an already-paid order does NOT
-      // re-pop the confirmation modal; the buyer simply sees the download/done.
-      buyerPaidSeenRef.current = isOrderPaid(body.order);
       // Auto-create the payment intent so the QR + address appear with NO
       // button. createPaymentIntentForOrder is idempotent server-side (it
       // returns the existing payment), so this is safe on every (re)load.
@@ -1370,6 +1378,16 @@ export function PaidPrivateFilePanel({
     setNymStatus("ready");
     setNymMessage(copy.receive.nymReadyLabel);
 
+    // Dead-simple buyer: the instant the decrypted file is ready, AUTO-TRIGGER
+    // the download so the file saves WITHOUT a click in the happy path. Guard on
+    // the object URL so a re-render never re-fires. The inline preview + the
+    // "Save file" button (rendered in the done card) are the fallbacks for
+    // browsers that block the programmatic click (Safari can be strict).
+    if (buyerAutoDownloadedRef.current !== objectUrl) {
+      buyerAutoDownloadedRef.current = objectUrl;
+      triggerBrowserDownload(objectUrl, payload.manifest.fileName);
+    }
+
     // Pure-Nym delivery ack (status only, no key material): tell the server the
     // buyer actually received + opened the file so the seller's re-send loop can
     // stop. Best-effort — a failed ack must not break the buyer's download.
@@ -1795,6 +1813,96 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, seller?.sellerId, sellerScreen, sellerFiles]);
 
+  // Dashboard auto re-send-until-acked (~6s): the SAME robust pure-Nym loop the
+  // Manage screen runs, but driven by the dashboard/files poll. While a logged-in
+  // seller sits on the dashboard, for each "paid" file whose release secret lives
+  // in THIS browser, re-fetch the full order and (once it is released, not yet
+  // delivered, and the secret is held) re-emit the wrapped key over Nym via the
+  // existing onResendKeyOverNym, until nymSession.status === "delivered". So
+  // delivery completes with the seller just sitting on the dashboard — no Manage
+  // screen needed. dashboardResendInFlightRef guards each order against a slow
+  // send overlapping the next tick; dashboardDelivering drives the subtle
+  // "Delivering over Nym…" indicator on the affected rows.
+  useEffect(() => {
+    if (mode !== "send" || !seller) {
+      return;
+    }
+    if (sellerScreen !== "dashboard" && sellerScreen !== "files") {
+      return;
+    }
+    const candidates = sellerFiles
+      .filter((file) => file.status === "paid" || file.status === "claimed")
+      .map((file) => file.orderId)
+      .filter((orderId) => Boolean(loadSellerReleaseDraft(orderId)));
+    if (candidates.length === 0) {
+      return;
+    }
+
+    let active = true;
+    const inFlight = dashboardResendInFlightRef.current;
+
+    async function resendScan() {
+      for (const orderId of candidates) {
+        if (!active || inFlight.has(orderId)) {
+          continue;
+        }
+        try {
+          const body = await postJson<{ order: TransferPublicOrder }>(
+            `/api/transfers/${encodeURIComponent(orderId)}`,
+            { method: "GET" },
+          );
+          if (!active) {
+            return;
+          }
+          const order = body.order;
+          const released = order.release?.status === "ready";
+          const delivered = order.delivery.nymSession?.status === "delivered";
+          if (delivered || !released || !loadSellerReleaseDraft(orderId)) {
+            // Stop tracking this order the moment the buyer ACKs (or it is not
+            // re-sendable from this browser yet).
+            setDashboardDelivering((current) => {
+              if (!current.has(orderId)) {
+                return current;
+              }
+              const next = new Set(current);
+              next.delete(orderId);
+              return next;
+            });
+            continue;
+          }
+          setDashboardDelivering((current) => {
+            if (current.has(orderId)) {
+              return current;
+            }
+            const next = new Set(current);
+            next.add(orderId);
+            return next;
+          });
+          inFlight.add(orderId);
+          try {
+            await onResendKeyOverNym(order, { silent: true });
+          } finally {
+            inFlight.delete(orderId);
+          }
+        } catch {
+          // Transient failures are non-fatal; the next ~6s tick retries.
+          inFlight.delete(orderId);
+        }
+      }
+    }
+
+    void resendScan();
+    const interval = window.setInterval(() => {
+      void resendScan();
+    }, RESEND_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, seller?.sellerId, sellerScreen, sellerFiles]);
+
   // Buyer-side polling: while a buyer order is loaded and not yet downloaded,
   // poll the public order status so the flow advances on its own (waiting to
   // pay -> in transit -> confirmed). Stops once the file is opened locally
@@ -1833,34 +1941,11 @@ export function PaidPrivateFilePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, loadedOrder?.orderId, downloadUrl]);
 
-  // Buyer paid-modal trigger: pop the confirmation modal exactly once, the first
-  // time polling observes the order transition into "paid". buyerPaidSeenRef is
-  // seeded in loadOrder so an already-paid order on first load does NOT re-pop.
-  useEffect(() => {
-    if (mode !== "receive" || !loadedOrder) {
-      return;
-    }
-    const paid = isOrderPaid(loadedOrder);
-    if (paid && !buyerPaidSeenRef.current && !downloadUrl) {
-      buyerPaidSeenRef.current = true;
-      setShowPaidModal(true);
-    }
-    if (!paid) {
-      buyerPaidSeenRef.current = false;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    mode,
-    loadedOrder?.orderId,
-    loadedOrder?.payment?.status,
-    loadedOrder?.status,
-    downloadUrl,
-  ]);
-
   // Buyer auto-claim: once the seller releases the key (release "ready") for a
-  // paid order, fetch + decrypt + download automatically so the buyer never has
-  // to hunt for a button (the modal can be dismissed). Fires once; the in-transit
-  // Download button is the manual fallback. Resets when no longer paid+ready.
+  // paid order, fetch + decrypt + auto-download automatically so the buyer never
+  // touches a button — this is the dead-simple happy path. openClaimPayload sets
+  // downloadUrl AND fires the programmatic save; the inline preview + "Save file"
+  // button are the only fallbacks. Fires once; resets when no longer paid+ready.
   useEffect(() => {
     if (mode !== "receive" || !loadedOrder) {
       return;
@@ -1998,6 +2083,7 @@ export function PaidPrivateFilePanel({
             onResend={(order) => void onResendKeyOverNym(order)}
             resending={resending}
             resendAttempt={resendAttempt}
+            deliveringOrderIds={dashboardDelivering}
             releaseBusy={busyAction === "release"}
             newSellerAccessKey={newSellerAccessKey}
             displayNameInput={sellerDisplayName}
@@ -2367,8 +2453,6 @@ export function PaidPrivateFilePanel({
             busyAction={busyAction}
             isBusy={isBusy}
             nymMessage={nymMessage}
-            nymStatus={nymStatus}
-            onReconnectNym={() => void startBrowserNym()}
             buyerNymAddress={buyerNymAddress}
             onBuyerNymAddressChange={setBuyerNymAddress}
             showManualNymAddress={showManualNymAddress}
@@ -2378,22 +2462,9 @@ export function PaidPrivateFilePanel({
             addressCopied={addressCopied}
             onCopyAddress={() => void onCopyPaymentAddress()}
             onDevPay={() => void onDevPay()}
-            onDownload={() => void onUnlockFile()}
           />
         )}
       </div>
-
-      {mode === "receive" && showPaidModal ? (
-        <PaidConfirmationModal
-          copy={copy}
-          order={loadedOrder}
-          busy={busyAction === "unlocking"}
-          downloadUrl={downloadUrl}
-          downloadFileName={downloadFileName}
-          onDownload={() => void onUnlockFile()}
-          onClose={() => setShowPaidModal(false)}
-        />
-      ) : null}
     </main>
   );
 
@@ -2425,8 +2496,6 @@ function BuyerCheckout({
   busyAction,
   isBusy,
   nymMessage,
-  nymStatus,
-  onReconnectNym,
   buyerNymAddress,
   onBuyerNymAddressChange,
   showManualNymAddress,
@@ -2434,7 +2503,6 @@ function BuyerCheckout({
   addressCopied,
   onCopyAddress,
   onDevPay,
-  onDownload,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
@@ -2448,8 +2516,6 @@ function BuyerCheckout({
   busyAction: BusyAction;
   isBusy: boolean;
   nymMessage: string;
-  nymStatus: BrowserNymStatus;
-  onReconnectNym: () => void;
   buyerNymAddress: string;
   onBuyerNymAddressChange: (value: string) => void;
   showManualNymAddress: boolean;
@@ -2457,7 +2523,6 @@ function BuyerCheckout({
   addressCopied: boolean;
   onCopyAddress: () => void;
   onDevPay: () => void;
-  onDownload: () => void;
 }) {
   const phase = getBuyerFlowPhase({
     order: loadedOrder,
@@ -2475,18 +2540,6 @@ function BuyerCheckout({
       </div>
 
       <div className="ppf-buyer">
-        {loadedOrder ? (
-          <BuyerStatusStepper
-            copy={copy}
-            phase={phase}
-            order={loadedOrder}
-            downloadUrl={downloadUrl}
-            nymStatus={nymStatus}
-            buyerNymAddress={buyerNymAddress}
-            onReconnectNym={onReconnectNym}
-            reconnectBusy={busyAction === "nym"}
-          />
-        ) : null}
         {!loadedOrder ? (
           <form className="zk-hub-form ppf-buyer-load" onSubmit={onLoadOrder}>
             <label className="zk-hub-form-field">
@@ -2511,9 +2564,14 @@ function BuyerCheckout({
             <OrderDetails order={loadedOrder} copy={copy} />
 
             {phase === "done" ? (
+              // The decrypted file is in hand. The download was already
+              // AUTO-TRIGGERED in openClaimPayload (saves without a click); we
+              // show the file inline (image/*) so the buyer sees it immediately,
+              // and keep a single "Save file" button as the fallback for
+              // browsers that block the programmatic download (Safari).
               <div className="ppf-buyer-done" role="status">
-                <p className="eyebrow">{copy.receive.doneTitle}</p>
-                <p>{copy.receive.doneBody}</p>
+                <p className="eyebrow">{copy.receive.arrivedTitle}</p>
+                <p>{copy.receive.arrivedBody}</p>
                 {downloadUrl &&
                 loadedOrder.file.mimeType.startsWith("image/") ? (
                   <img
@@ -2530,7 +2588,7 @@ function BuyerCheckout({
                     target="_blank"
                     rel="noreferrer"
                   >
-                    {copy.receive.downloadLabel}
+                    {copy.receive.saveFileLabel}
                   </a>
                 ) : null}
               </div>
@@ -2550,40 +2608,22 @@ function BuyerCheckout({
                 </div>
               </div>
             ) : phase === "in-transit" ? (
-              loadedOrder.release?.status === "ready" ? (
-                <div
-                  className="ppf-buyer-status"
-                  data-tone="ready"
-                  role="status"
-                >
-                  <div>
-                    <p className="eyebrow">{copy.receive.modalTitle}</p>
-                    <p>{copy.receive.modalBody}</p>
-                  </div>
-                  <button
-                    type="button"
-                    className="button-primary ppf-buyer-download"
-                    onClick={onDownload}
-                    disabled={busyAction === "unlocking"}
-                  >
-                    {busyAction === "unlocking"
-                      ? copy.receive.modalPreparingLabel
-                      : copy.receive.modalDownloadLabel}
-                  </button>
+              // Dead-simple buyer: payment is confirmed and the file has NOT
+              // arrived yet. A single "Receiving your file…" spinner card — no
+              // stepper, no Nym-health row, and crucially NO Download button
+              // (the auto-claim + auto-download fire on their own once the
+              // package lands over Nym).
+              <div
+                className="ppf-buyer-status"
+                data-tone="transit"
+                role="status"
+              >
+                <span className="ppf-buyer-spinner" aria-hidden="true" />
+                <div>
+                  <p className="eyebrow">{copy.receive.receivingTitle}</p>
+                  <p>{copy.receive.receivingBody}</p>
                 </div>
-              ) : (
-                <div
-                  className="ppf-buyer-status"
-                  data-tone="transit"
-                  role="status"
-                >
-                  <span className="ppf-buyer-spinner" aria-hidden="true" />
-                  <div>
-                    <p className="eyebrow">{copy.receive.inTransitTitle}</p>
-                    <p>{copy.receive.inTransitBody}</p>
-                  </div>
-                </div>
-              )
+              </div>
             ) : phase === "awaiting-payment" && payment?.paymentAddress ? (
               <div className="ppf-buyer-pay">
                 <div className="ppf-buyer-pay-head">
@@ -2677,98 +2717,6 @@ function BuyerCheckout({
   );
 }
 
-// Accessible confirmation modal that pops when the order flips to "paid". It
-// contains the single "Download file" button (the existing claim/unlock
-// handler). If the key is not released yet (paid but seller_pending), the button
-// shows a brief "preparing your file..." state; polling + the unlock retry
-// resolve it, so the buyer never dead-ends. Closes on Esc / x / click-outside.
-function PaidConfirmationModal({
-  copy,
-  order,
-  busy,
-  downloadUrl,
-  downloadFileName,
-  onDownload,
-  onClose,
-}: {
-  copy: PaidPrivateFileCopy;
-  order: TransferPublicOrder | null;
-  busy: boolean;
-  downloadUrl: string;
-  downloadFileName: string;
-  onDownload: () => void;
-  onClose: () => void;
-}) {
-  const downloadRef = useRef<HTMLButtonElement | null>(null);
-  const preparing = order?.release?.status === "seller_pending";
-
-  useEffect(() => {
-    downloadRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-
-  return (
-    <div className="ppf-modal-overlay" role="presentation" onClick={onClose}>
-      <div
-        className="ppf-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="ppf-modal-title"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button
-          type="button"
-          className="ppf-modal-close"
-          aria-label={copy.receive.modalCloseLabel}
-          onClick={onClose}
-        >
-          &times;
-        </button>
-        <div className="ppf-modal-badge" aria-hidden="true">
-          &#10003;
-        </div>
-        <h2 id="ppf-modal-title">{copy.receive.modalTitle}</h2>
-        <p>{copy.receive.modalBody}</p>
-        {downloadUrl ? (
-          <a
-            className="button-primary ppf-modal-button"
-            href={downloadUrl}
-            download={downloadFileName}
-          >
-            {copy.receive.downloadLabel}
-          </a>
-        ) : (
-          <button
-            ref={downloadRef}
-            type="button"
-            className="button-primary ppf-modal-button"
-            onClick={onDownload}
-            disabled={busy || preparing}
-          >
-            {busy || preparing
-              ? copy.receive.modalPreparingLabel
-              : copy.receive.modalDownloadLabel}
-          </button>
-        )}
-        {preparing && !downloadUrl ? (
-          <p className="zk-hub-form-hint ppf-modal-hint">
-            {copy.receive.modalPreparingLabel}
-          </p>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
 function SellerDashboard({
   copy,
   locale,
@@ -2790,6 +2738,7 @@ function SellerDashboard({
   onResend,
   resending,
   resendAttempt,
+  deliveringOrderIds,
   releaseBusy,
   newSellerAccessKey,
   displayNameInput,
@@ -2822,6 +2771,7 @@ function SellerDashboard({
   onResend: (order: TransferPublicOrder) => void;
   resending: boolean;
   resendAttempt: number;
+  deliveringOrderIds: Set<string>;
   releaseBusy: boolean;
   newSellerAccessKey: string;
   displayNameInput: string;
@@ -2944,6 +2894,7 @@ function SellerDashboard({
             files={files}
             filesStatus={filesStatus}
             onOpenManage={onOpenManage}
+            deliveringOrderIds={deliveringOrderIds}
           />
         </div>
       ) : (
@@ -2961,6 +2912,7 @@ function SellerDashboard({
             files={files}
             filesStatus={filesStatus}
             onOpenManage={onOpenManage}
+            deliveringOrderIds={deliveringOrderIds}
           />
         </div>
       )}
@@ -3024,12 +2976,14 @@ function SellerFilesList({
   files,
   filesStatus,
   onOpenManage,
+  deliveringOrderIds,
 }: {
   copy: PaidPrivateFileCopy;
   locale: ProductLocale;
   files: SellerFile[];
   filesStatus: "idle" | "loading" | "ready" | "error";
   onOpenManage: (orderId: string) => void;
+  deliveringOrderIds: Set<string>;
 }) {
   return (
     <div className="ppf-files">
@@ -3052,11 +3006,24 @@ function SellerFilesList({
             const manageLabel = isPaid
               ? copy.dashboard.fileReleaseLabel
               : copy.dashboard.fileManageLabel;
+            // Subtle indicator: this browser is actively re-sending the key over
+            // Nym for this order (the dashboard auto re-send loop), so the seller
+            // sees delivery in progress without opening Manage.
+            const delivering = deliveringOrderIds.has(file.orderId);
             return (
               <li key={file.orderId} className="ppf-file-row">
                 <div className="ppf-file-main">
                   <span className="ppf-file-name">{file.fileName}</span>
                   <span className="ppf-file-price">{file.displayZec} ZEC</span>
+                  {delivering ? (
+                    <span className="ppf-file-delivering" role="status">
+                      <span
+                        className="ppf-file-delivering-dot"
+                        aria-hidden="true"
+                      />
+                      {copy.sellerStatus.autoResendingLabel}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="ppf-file-side">
                   <span className="ppf-status-badge" data-status={file.status}>
@@ -3632,177 +3599,6 @@ export function getBuyerFlowPhase(input: {
     return "awaiting-payment";
   }
   return "loading";
-}
-
-// Buyer status stepper: a 5-stage view of where THIS purchase is, so the buyer
-// always sees movement (the owner reported "doesn't seem to update"). It reuses
-// the .zectime-flow-strip dark-theme visual. Stage 4 ("Receiving key") also shows
-// the Nym receiver health + a Reconnect button — the diagnostics the buyer needs
-// when a pure-Nym delivery stalls.
-export type BuyerStatusStageId =
-  | "awaiting-payment"
-  | "in-transit"
-  | "paid"
-  | "receiving-key"
-  | "done";
-
-// Pure mapping of (phase, order, downloadUrl) -> active stage index (0..4). Kept
-// React-free so the transitions can be unit-tested.
-export function getBuyerStatusStageIndex(input: {
-  phase: BuyerFlowPhase;
-  order:
-    | (BuyerOrderStatusView & {
-        release?: { status: "seller_pending" | "ready" } | null;
-        delivery?: {
-          nymSession?: { status: string } | null;
-        } | null;
-      })
-    | null;
-  downloadUrl: string;
-}): number {
-  if (
-    input.downloadUrl ||
-    input.order?.status === "claimed" ||
-    input.order?.delivery?.nymSession?.status === "delivered"
-  ) {
-    return 4; // done
-  }
-  if (input.phase === "in-transit" || isOrderPaid(input.order)) {
-    // Paid: payment detected + paid are behind us. If the seller has released
-    // the key it is now in flight over Nym (receiving-key); otherwise we are at
-    // "paid" waiting for the seller to release.
-    return input.order?.release?.status === "ready" ? 3 : 2;
-  }
-  // 0-conf: a real mempool sighting (detectedAt/onchain) lights "Payment
-  // detected" (stage 1) the instant the webhook lands, before "Paid" (stage 2).
-  if (input.phase === "detected" || isPaymentDetected(input.order)) {
-    return 1;
-  }
-  if (input.phase === "awaiting-payment") {
-    return 0;
-  }
-  return 0; // loading -> still awaiting payment
-}
-
-function BuyerStatusStepper({
-  copy,
-  phase,
-  order,
-  downloadUrl,
-  nymStatus,
-  buyerNymAddress,
-  onReconnectNym,
-  reconnectBusy,
-}: {
-  copy: PaidPrivateFileCopy;
-  phase: BuyerFlowPhase;
-  order: TransferPublicOrder | null;
-  downloadUrl: string;
-  nymStatus: BrowserNymStatus;
-  buyerNymAddress: string;
-  onReconnectNym: () => void;
-  reconnectBusy: boolean;
-}) {
-  const activeIndex = getBuyerStatusStageIndex({ phase, order, downloadUrl });
-  const steps: Array<{
-    id: BuyerStatusStageId;
-    label: string;
-    body: string;
-  }> = [
-    {
-      id: "awaiting-payment",
-      label: copy.buyerStatus.stepAwaitingPayment,
-      body: copy.buyerStatus.stepAwaitingPaymentBody,
-    },
-    {
-      id: "in-transit",
-      label: copy.buyerStatus.stepInTransit,
-      body: copy.buyerStatus.stepInTransitBody,
-    },
-    {
-      id: "paid",
-      label: copy.buyerStatus.stepPaid,
-      body: copy.buyerStatus.stepPaidBody,
-    },
-    {
-      id: "receiving-key",
-      label: copy.buyerStatus.stepReceivingKey,
-      body: copy.buyerStatus.stepReceivingKeyBody,
-    },
-    {
-      id: "done",
-      label: copy.buyerStatus.stepDone,
-      body: copy.buyerStatus.stepDoneBody,
-    },
-  ];
-  const active = steps[activeIndex];
-
-  return (
-    <div className="ppf-status-stepper" data-role="buyer">
-      <p className="eyebrow">{copy.buyerStatus.title}</p>
-      <ol
-        className="zectime-flow-strip"
-        data-stage={active.id}
-        aria-label={copy.buyerStatus.title}
-      >
-        {steps.map((step, index) => {
-          const state =
-            index < activeIndex
-              ? "done"
-              : index === activeIndex
-                ? "active"
-                : "pending";
-          return (
-            <li key={step.id} data-state={state}>
-              <span className="zectime-flow-dot" aria-hidden="true" />
-              <span>{step.label}</span>
-            </li>
-          );
-        })}
-      </ol>
-      <p className="zk-hub-form-hint ppf-status-stepper-body">{active.body}</p>
-
-      {active.id === "receiving-key" ? (
-        <div className="ppf-nym-health" role="status">
-          <span
-            className="ppf-nym-health-dot"
-            data-status={nymStatus}
-            aria-hidden="true"
-          />
-          <div className="ppf-nym-health-body">
-            <p className="ppf-nym-health-line">
-              {nymStatus === "ready" || nymStatus === "waiting"
-                ? copy.buyerStatus.nymConnected
-                : nymStatus === "starting"
-                  ? copy.buyerStatus.nymConnecting
-                  : copy.buyerStatus.nymNotConnected}
-            </p>
-            {buyerNymAddress ? (
-              <p className="ppf-nym-health-address">
-                <span className="ppf-muted">
-                  {copy.buyerStatus.nymAddressLabel}
-                </span>
-                <code>{shortNymAddress(buyerNymAddress)}</code>
-              </p>
-            ) : null}
-            <p className="zk-hub-form-hint">
-              {copy.buyerStatus.keepTabOpenHint}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="button-secondary ppf-nym-reconnect"
-            onClick={onReconnectNym}
-            disabled={reconnectBusy}
-          >
-            {reconnectBusy
-              ? copy.buyerStatus.nymConnecting
-              : copy.buyerStatus.reconnectNymLabel}
-          </button>
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 // Render a scannable QR encoding the Zcash payment URI. The data URL is
@@ -4382,6 +4178,30 @@ export function buildZcashPaymentUri(
     return base;
   }
   return `${base}?amount=${encodeURIComponent(cleanedAmount)}`;
+}
+
+// Programmatic download: create a temporary <a download={fileName} href={url}>,
+// append it to the document body, click it, then remove it. This saves the file
+// WITHOUT the buyer clicking. Best-effort and wrapped in try/catch — Safari can
+// block a programmatic click, in which case the visible "Save file" button (a
+// single user click) is the fallback, so a failure here must never throw.
+// Exported for unit testing the anchor wiring (download attr + click + cleanup).
+export function triggerBrowserDownload(url: string, fileName: string): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.rel = "noopener";
+    anchor.style.display = "none";
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+  } catch {
+    // Programmatic download blocked: the buyer uses the "Save file" button.
+  }
 }
 
 function formatBytes(bytes: number): string {

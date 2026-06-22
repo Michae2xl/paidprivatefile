@@ -311,7 +311,7 @@ describe("webhook sellerId cross-check", () => {
     expect(parsed.order?.status).toBe("paid");
   });
 
-  it("rejects when the sellerId does not match the order seller", async () => {
+  it("ignores (200) a sellerId that does not match the order seller", async () => {
     const { receivingAddress } = await pendingUfvkOrder("hook-b");
     const body = JSON.stringify({
       receivingAddress,
@@ -320,15 +320,16 @@ describe("webhook sellerId cross-check", () => {
       confirmations: 12,
       sellerId: "sel_000000000000000000000000",
     });
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      const response = await zcashWebhookRoute(signedWebhookRequest(body));
-      expect(response.status).not.toBe(200);
-      const parsed = (await response.json()) as ErrorEnvelope;
-      expect(parsed.error.message).toMatch(/seller/iu);
-    } finally {
-      consoleSpy.mockRestore();
-    }
+    const response = await zcashWebhookRoute(signedWebhookRequest(body));
+    expect(response.status).toBe(200);
+    const parsed = (await response.json()) as {
+      ok: boolean;
+      ignored?: boolean;
+      reason?: string;
+    };
+    expect(parsed.ok).toBe(true);
+    expect(parsed.ignored).toBe(true);
+    expect(parsed.reason).toBe("seller_mismatch");
   });
 
   it("still settles when no sellerId is provided (back-compat)", async () => {

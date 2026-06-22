@@ -180,6 +180,14 @@ export interface PaidPrivateFileCopy {
     modalCloseLabel: string;
     doneTitle: string;
     doneBody: string;
+    // Dead-simple buyer: a single "Receiving your file…" spinner card (no
+    // stepper) while the package is in flight over Nym, then an auto-download
+    // "your file arrived" done card with a single "Save file" fallback button.
+    receivingTitle: string;
+    receivingBody: string;
+    arrivedTitle: string;
+    arrivedBody: string;
+    saveFileLabel: string;
   };
   // Buyer status stepper + Nym receiver health (visibility into where a transfer
   // is). All layperson, en + pt.
@@ -443,6 +451,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       doneTitle: "Concluido",
       doneBody:
         "Seu arquivo esta pronto e aparece abaixo. Toque em Baixar para salvar (ou pressione e segure a imagem).",
+      receivingTitle: "Recebendo seu arquivo...",
+      receivingBody:
+        "Pagamento confirmado. Estamos trazendo seu arquivo com seguranca. Pode deixar esta pagina aberta.",
+      arrivedTitle: "Seu arquivo chegou - salvando agora.",
+      arrivedBody:
+        "O download deve comecar sozinho. Se nao comecar, toque em Salvar arquivo.",
+      saveFileLabel: "Salvar arquivo",
     },
     buyerStatus: {
       title: "Status da sua compra",
@@ -708,6 +723,13 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       doneTitle: "Done",
       doneBody:
         "Your file is ready and shown below. Tap Download to save it (or long-press the image).",
+      receivingTitle: "Receiving your file...",
+      receivingBody:
+        "Payment confirmed. We're bringing your file in securely. You can keep this page open.",
+      arrivedTitle: "Your file arrived - saving it now.",
+      arrivedBody:
+        "The download should start on its own. If it doesn't, tap Save file.",
+      saveFileLabel: "Save file",
     },
     buyerStatus: {
       title: "Your purchase status",

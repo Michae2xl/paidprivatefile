@@ -2387,6 +2387,44 @@ a {
   font-size: 0.82rem;
 }
 
+/* Subtle "Delivering over Nym…" indicator on a file row the dashboard auto
+   re-send loop is actively working. A small pulsing dot + quiet label, never a
+   button — it disappears the moment the buyer ACKs. */
+.ppf-file-delivering {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: rgba(20, 232, 140, 0.85);
+}
+
+.ppf-file-delivering-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #14e88c;
+  box-shadow: 0 0 0 3px rgba(20, 232, 140, 0.18);
+  animation: ppf-delivering-pulse 1.3s ease-in-out infinite;
+}
+
+@keyframes ppf-delivering-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ppf-file-delivering-dot {
+    animation: none;
+  }
+}
+
 .ppf-file-side {
   display: flex;
   align-items: center;
