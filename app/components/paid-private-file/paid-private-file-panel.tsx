@@ -35,6 +35,11 @@ import {
   type NymFileReceiver,
 } from "../../../lib/nym-file-transfer";
 import { createClientTimestampDraft } from "../../../lib/timestamp-client-crypto";
+import {
+  deleteSellerCiphertext,
+  getSellerCiphertext,
+  putSellerCiphertext,
+} from "../../../lib/seller-ciphertext-store";
 import type { ProductLocale } from "../../../lib/types";
 import { withProductLocale } from "../../../lib/locale";
 import type { PaidPrivateFileCopy } from "../../../lib/paid-private-file-copy";
@@ -416,8 +421,18 @@ export function PaidPrivateFilePanel({
   // key lands (handleNymTextMessage) — removes the file-before-key race.
   const nymReassembledRef = useRef<Map<string, Uint8Array>>(new Map());
   // Buyer side: per-order timer that triggers the HTTPS fallback if the Nym file
-  // transfer has not delivered within a generous bound after the key arrived.
+  // transfer STALLS (no receive progress) for a generous bound. It is a
+  // no-progress stall timer, NOT a fixed wall-clock: a healthy slow transfer of
+  // a large file keeps re-arming the timer (see armBuyerHttpsFallback) so it
+  // never gets yanked off the Nym path mid-flight.
   const buyerFallbackTimerRef = useRef<Map<string, number>>(new Map());
+  // Buyer side: per-order timestamp (Date.now()) of the most recent receive
+  // progress, plus the latest received/total so the fallback timer can tell a
+  // healthy-but-slow transfer (still progressing, not yet complete) apart from a
+  // genuine stall. Browser-only code, so Date.now() is fine here.
+  const buyerProgressRef = useRef<
+    Map<string, { lastProgressAt: number; received: number; total: number }>
+  >(new Map());
   // Orders whose file we have already received (or are actively receiving) over
   // Nym this session, so a duplicate Offer never starts a second receiver.
   const nymFileHandledRef = useRef<Set<string>>(new Set());
@@ -444,6 +459,15 @@ export function PaidPrivateFilePanel({
   // ignore further envelopes. The Nym subscription closure captures stale state,
   // so the guard reads this ref (kept current by an effect) instead.
   const buyerReceivedRef = useRef(false);
+  // The raw/text Nym subscriptions are wired once when the client bootstraps and
+  // are NOT re-subscribed when the client is reused (bootstrap returns early on
+  // an existing client). So the handler closures capture whatever loadedOrder /
+  // downloadUrl existed at wiring time and would drop inbound packets after an
+  // order reload / Nym reconnect. These refs (kept current by the effects below)
+  // give the handlers LIVE access to that state without re-wiring the
+  // subscription. Same pattern as buyerReceivedRef above.
+  const loadedOrderRef = useRef<TransferPublicOrder | null>(null);
+  const downloadUrlRef = useRef<string>("");
   // Dashboard auto-release: orders this browser has already fired a silent
   // release for, so the periodic dashboard scan never re-releases the same order.
   const dashboardReleasedRef = useRef<Set<string>>(new Set());
@@ -516,6 +540,17 @@ export function PaidPrivateFilePanel({
         window.URL.revokeObjectURL(downloadUrl);
       }
     };
+  }, [downloadUrl]);
+
+  // Keep the live mirrors of loadedOrder / downloadUrl current so the pinned Nym
+  // raw/text handler closures (wired once at client bootstrap) always read the
+  // current order + download state instead of a stale snapshot.
+  useEffect(() => {
+    loadedOrderRef.current = loadedOrder;
+  }, [loadedOrder]);
+
+  useEffect(() => {
+    downloadUrlRef.current = downloadUrl;
   }, [downloadUrl]);
 
   useEffect(() => {
@@ -986,6 +1021,13 @@ export function PaidPrivateFilePanel({
           await encrypted.encryptedFile.arrayBuffer(),
         );
         sellerCiphertextRef.current.set(body.order.orderId, encryptedBytes);
+        // Also persist to IndexedDB (best-effort, never blocks create) so this
+        // browser can still deliver the file over Nym after a reload / in a
+        // later session. Any IndexedDB failure leaves the in-memory + HTTPS
+        // fallback behavior unchanged.
+        void putSellerCiphertext(body.order.orderId, encryptedBytes).catch(
+          () => undefined,
+        );
       } catch {
         // Non-fatal: without the in-memory bytes the buyer uses HTTPS.
       }
@@ -1041,6 +1083,7 @@ export function PaidPrivateFilePanel({
       window.clearTimeout(handle),
     );
     buyerFallbackTimerRef.current.clear();
+    buyerProgressRef.current.clear();
     transferInProgressRef.current = false;
     setBuyerReceiveProgress(null);
 
@@ -1421,10 +1464,23 @@ export function PaidPrivateFilePanel({
     orderId: string;
     buyerNymAddress: string;
   }): Promise<boolean> {
-    const ciphertext = sellerCiphertextRef.current.get(input.orderId);
+    let ciphertext = sellerCiphertextRef.current.get(input.orderId);
+    if (!ciphertext) {
+      // Not in memory (created in a previous session / after a reload). Try the
+      // best-effort IndexedDB store this browser persisted at create time. If
+      // found, repopulate the in-memory ref and proceed with the Nym send.
+      const persisted = await getSellerCiphertext(input.orderId).catch(
+        () => null,
+      );
+      if (persisted) {
+        sellerCiphertextRef.current.set(input.orderId, persisted);
+        ciphertext = persisted;
+      }
+    }
     if (!ciphertext) {
       // This browser does not hold the ciphertext bytes (created elsewhere, or
-      // reloaded). The buyer's HTTPS fallback still works.
+      // reloaded without a persisted copy). The buyer's HTTPS fallback still
+      // works.
       return false;
     }
     const { client } = await bootstrapBrowserNymClient({ subscribe: false });
@@ -1494,19 +1550,19 @@ export function PaidPrivateFilePanel({
     if (sellerFileSendInFlightRef.current.has(input.orderId)) {
       return;
     }
-    if (!sellerCiphertextRef.current.has(input.orderId)) {
-      // This browser does not hold the ciphertext (created elsewhere/reloaded);
-      // the buyer falls back to HTTPS, so do not even start.
-      return;
-    }
+    // NOTE: we no longer early-return when the in-memory ref lacks the order —
+    // the ciphertext may still be in IndexedDB from a previous session.
+    // sendFileOverNym loads it just-in-time and returns false if neither source
+    // has it (the buyer then falls back to HTTPS).
     sellerFileSendInFlightRef.current.add(input.orderId);
     void sendFileOverNym(input)
       .then((acked) => {
-        // Free the in-memory ciphertext once the buyer has confirmed receipt so
-        // it is not held for the rest of the session. A failed send keeps it so
-        // a later re-send tick can retry.
+        // Free the in-memory ciphertext AND the persisted copy once the buyer has
+        // confirmed receipt so neither is held longer than needed. A failed send
+        // keeps both so a later re-send tick (this or a later session) can retry.
         if (acked) {
           sellerCiphertextRef.current.delete(input.orderId);
+          void deleteSellerCiphertext(input.orderId).catch(() => undefined);
         }
       })
       .finally(() => {
@@ -1536,13 +1592,16 @@ export function PaidPrivateFilePanel({
     if (!packet) {
       return;
     }
-    const order = loadedOrder;
+    // Read LIVE state from the ref (the subscription closure that calls this is
+    // pinned at bootstrap and never re-wired, so the captured loadedOrder may be
+    // stale/null after an order reload / Nym reconnect).
+    const order = loadedOrderRef.current;
     // Only accept chunks for the order this buyer is actively receiving.
     if (!order || packetOrderId !== order.orderId) {
       return;
     }
     // Already have the file (HTTPS or a prior Nym receive) — ignore.
-    if (buyerReceivedRef.current || downloadUrl) {
+    if (buyerReceivedRef.current || downloadUrlRef.current) {
       return;
     }
     if (!nymFileReceiverRef.current) {
@@ -1567,6 +1626,13 @@ export function PaidPrivateFilePanel({
     nymFileHandledRef.current.add(order.orderId);
     transferInProgressRef.current = true;
     setBuyerReceiveProgress(0);
+    // Seed the stall tracker so the progress-aware fallback measures "no progress
+    // since the receiver started", not "since the key arrived".
+    buyerProgressRef.current.set(order.orderId, {
+      lastProgressAt: Date.now(),
+      received: 0,
+      total: 0,
+    });
     const receiver = createNymFileReceiver(
       order.orderId,
       (payload, recipient) =>
@@ -1574,6 +1640,17 @@ export function PaidPrivateFilePanel({
       {
         expectedSha256: order.file.encryptedFileSha256,
         onProgress: (received, total) => {
+          // Record forward progress for the stall-aware fallback timer: stamp the
+          // time + latest counts so a healthy slow transfer keeps re-arming the
+          // timer instead of being yanked off the Nym path mid-flight.
+          const prev = buyerProgressRef.current.get(order.orderId);
+          if (!prev || received > prev.received || total !== prev.total) {
+            buyerProgressRef.current.set(order.orderId, {
+              lastProgressAt: Date.now(),
+              received,
+              total,
+            });
+          }
           setBuyerReceiveProgress(
             total > 0 ? Math.round((received / total) * 100) : 0,
           );
@@ -1598,6 +1675,7 @@ export function PaidPrivateFilePanel({
         }
         transferInProgressRef.current = false;
         setBuyerReceiveProgress(null);
+        buyerProgressRef.current.delete(order.orderId);
       });
   }
 
@@ -1668,11 +1746,42 @@ export function PaidPrivateFilePanel({
     if (buyerFallbackTimerRef.current.has(order.orderId)) {
       return;
     }
+    scheduleBuyerHttpsFallbackTimer(order);
+  }
+
+  // (Re)schedule the progress-aware stall timer for one order. Always sets a
+  // fresh handle (callers either guard against double-arm in armBuyerHttpsFallback
+  // or are the timer itself re-arming). When it fires it only aborts to HTTPS on a
+  // TRUE no-progress stall: if the receiver is still making forward progress AND
+  // the transfer is genuinely in-flight (received < total, not yet errored), it
+  // re-arms instead so a healthy slow transfer of a large file completes over Nym.
+  function scheduleBuyerHttpsFallbackTimer(order: TransferPublicOrder): void {
     const handle = window.setTimeout(() => {
       buyerFallbackTimerRef.current.delete(order.orderId);
-      if (buyerReceivedRef.current || downloadUrl) {
+      // Already have the file (Nym or a prior HTTPS) — nothing to fall back to.
+      if (buyerReceivedRef.current || downloadUrlRef.current) {
         return;
       }
+      const progress = buyerProgressRef.current.get(order.orderId);
+      const receiverActive = nymFileReceiverRef.current !== null;
+      const inFlight =
+        receiverActive &&
+        progress !== undefined &&
+        // total === 0 means the Offer/first chunk has not landed yet — treat as
+        // in-flight only while progress is still being stamped (below).
+        (progress.total === 0 || progress.received < progress.total);
+      const sinceProgress = progress
+        ? Date.now() - progress.lastProgressAt
+        : Number.POSITIVE_INFINITY;
+      // Healthy slow transfer: still progressing within the no-progress window AND
+      // in-flight — re-arm rather than abort. The receiver's own error/600s
+      // ceiling still covers a transfer that never completes.
+      if (inFlight && sinceProgress < BROWSER_NYM_FILE_FALLBACK_MS) {
+        scheduleBuyerHttpsFallbackTimer(order);
+        return;
+      }
+      // True stall (or the key never arrived / no receiver running) — abort the
+      // Nym receiver and fall back to the HTTPS fetch.
       nymFileReceiverRef.current?.abort("https fallback");
       nymFileReceiverRef.current = null;
       void buyerHttpsFallback(order);
@@ -1747,6 +1856,13 @@ export function PaidPrivateFilePanel({
   }
 
   async function handleNymTextMessage(payload: string): Promise<void> {
+    // Read LIVE state from the refs: this handler runs inside the text-message
+    // subscription closure pinned at client bootstrap, so the captured
+    // loadedOrder / downloadUrl can be stale/null after an order reload or Nym
+    // reconnect (which would silently drop every inbound key envelope). The refs
+    // are kept current by the effects above.
+    const loadedOrder = loadedOrderRef.current;
+    const downloadUrl = downloadUrlRef.current;
     // Diagnostic: count EVERY inbound envelope (even ones we then ignore as
     // duplicates) so the "Receiving your file…" card can show envelopes are
     // actually reaching this receiver — proving the listener is wired up.
