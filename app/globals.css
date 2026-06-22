@@ -125,6 +125,9 @@ a {
 
 .zectime-side-logo--zcash {
   left: -1.5vw;
+  /* The Zcash circle fills only 50% of its 1080 viewBox; zoom it so it matches
+     the Nym icon (which fills its whole box). */
+  background-size: 200%;
   background-image: url("/brand/zcash-brandmark-yellow.svg");
 }
 
