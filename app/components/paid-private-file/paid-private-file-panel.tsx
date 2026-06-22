@@ -2497,11 +2497,21 @@ function BuyerCheckout({
               <div className="ppf-buyer-done" role="status">
                 <p className="eyebrow">{copy.receive.doneTitle}</p>
                 <p>{copy.receive.doneBody}</p>
+                {downloadUrl &&
+                loadedOrder.file.mimeType.startsWith("image/") ? (
+                  <img
+                    className="ppf-buyer-file-preview"
+                    src={downloadUrl}
+                    alt={downloadFileName}
+                  />
+                ) : null}
                 {downloadUrl ? (
                   <a
                     className="button-primary zectime-paid-download"
                     href={downloadUrl}
                     download={downloadFileName}
+                    target="_blank"
+                    rel="noreferrer"
                   >
                     {copy.receive.downloadLabel}
                   </a>

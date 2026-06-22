@@ -435,7 +435,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       modalCloseLabel: "Fechar",
       doneTitle: "Concluido",
       doneBody:
-        "Seu arquivo foi aberto neste navegador. Use o link abaixo para salvar.",
+        "Seu arquivo esta pronto e aparece abaixo. Toque em Baixar para salvar (ou pressione e segure a imagem).",
     },
     buyerStatus: {
       title: "Status da sua compra",
@@ -697,7 +697,7 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       modalCloseLabel: "Close",
       doneTitle: "Done",
       doneBody:
-        "Your file was opened in this browser. Use the link below to save it.",
+        "Your file is ready and shown below. Tap Download to save it (or long-press the image).",
     },
     buyerStatus: {
       title: "Your purchase status",

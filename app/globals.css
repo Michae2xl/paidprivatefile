@@ -1108,6 +1108,19 @@ a {
     linear-gradient(135deg, rgba(20, 232, 140, 0.18), transparent 60%), #eefbf4;
 }
 
+/* Inline preview of the decrypted image so the buyer SEES the file immediately,
+   without depending on a browser download (Safari is unreliable for blob <a
+   download>). They can long-press / right-click to save, or use the button. */
+.ppf-buyer-file-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 340px;
+  width: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(15, 112, 72, 0.25);
+  background: #ffffff;
+}
+
 .ppf-buyer-done .eyebrow {
   color: #0f7048;
 }
