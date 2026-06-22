@@ -4975,6 +4975,21 @@ function SupplySelector({
     },
   ];
 
+  const groupRef = useRef<HTMLDivElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  // APG radiogroup: focus must follow selection. When the selection changes while
+  // the group already owns focus (keyboard nav), move browser focus to the newly
+  // checked card so the focus ring and aria-checked never diverge. Guarded by
+  // contains(activeElement) so we never steal focus on mount or external change.
+  useEffect(() => {
+    const group = groupRef.current;
+    if (!group || !group.contains(document.activeElement)) {
+      return;
+    }
+    optionRefs.current[SUPPLY_ORDER.indexOf(value)]?.focus();
+  }, [value]);
+
   function moveSelection(delta: number) {
     if (disabled) {
       return;
@@ -4987,15 +5002,19 @@ function SupplySelector({
 
   return (
     <div
+      ref={groupRef}
       className="ppf-supply-options"
       role="radiogroup"
       aria-label={copy.products.supplyLabel}
     >
-      {options.map((option) => {
+      {options.map((option, index) => {
         const selected = value === option.mode;
         return (
           <button
             key={option.mode}
+            ref={(el) => {
+              optionRefs.current[index] = el;
+            }}
             type="button"
             role="radio"
             aria-checked={selected}
