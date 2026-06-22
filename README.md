@@ -1,5 +1,7 @@
 # Paid Private File
 
+**Live:** https://paidprivatefile.zkglobalcredit.tech/
+
 Sell an encrypted file for Zcash. The decryption key **and** the encrypted file are delivered browser-to-browser over the Nym mixnet, and decrypted only on the buyer's device.
 
 ## What it is
