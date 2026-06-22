@@ -9,8 +9,10 @@ A non-custodial marketplace for selling a single file. The seller encrypts a fil
 ## What it uses from Zcash
 
 - **Payment in ZEC on mainnet** — shielded, peer-to-peer money.
-- **Non-custodial, view-only.** The seller registers a Unified Address + a view-only **Unified Full Viewing Key (UFVK)**. The platform derives a **unique per-order shielded address** from the UFVK; the buyer pays the seller's own account directly. The platform can **detect** payments but can **never spend** — the spending keys never leave the seller's wallet.
-- **View-only detection** via librustzcash + lightwalletd (a Rust scanner), including an instant **0-conf mempool** sighting ("payment detected"); the order settles once confirmations reach the minimum.
+- **Non-custodial, view-only.** The seller registers a Unified Address + a view-only **Unified Full Viewing Key (UFVK)**. The platform can **detect** payments but can **never spend** — spending keys never leave the seller's wallet.
+- **Per-order address derivation.** A **unique per-order diversified Unified Address** is derived from the UFVK — offline, pure crypto with no spend authority — in the Rust scanner via **`zcash_keys`** (exposed as `POST /derive`). The buyer pays the seller's own account directly; no address is ever pasted.
+- **View-only scanning** uses **`zcash_client_backend`** over **`tonic`** gRPC against **lightwalletd** (default `zec.rocks:443`): compact blocks for confirmed payments, plus `GetMempoolStream` + `decrypt_transaction` for instant **0-conf** ("payment detected"). The order settles once confirmations reach the minimum.
+- **Zcash stack:** [librustzcash](https://github.com/zcash/librustzcash) — `zcash_client_backend`, `zcash_keys`, `zcash_primitives`, `zcash_protocol`, `zcash_address`, `orchard`, `sapling-crypto`; lightwalletd over `tonic` gRPC.
 
 ## What it uses from Nym
 
