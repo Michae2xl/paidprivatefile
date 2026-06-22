@@ -339,6 +339,121 @@ a {
   background: #14e88c;
 }
 
+/* Buyer + seller status steppers: a labelled wrapper around .zectime-flow-strip
+   plus the active-stage body line, the buyer Nym-receiver health row, and the
+   seller re-send controls. All on the dark theme tokens. */
+.ppf-status-stepper {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 254, 248, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 254, 248, 0.03);
+}
+
+.ppf-status-stepper-body {
+  margin: 0;
+}
+
+.ppf-nym-health {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 254, 248, 0.1);
+  background: rgba(20, 232, 140, 0.05);
+}
+
+.ppf-nym-health-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex: 0 0 auto;
+  background: rgba(255, 254, 248, 0.35);
+}
+
+.ppf-nym-health-dot[data-status="ready"],
+.ppf-nym-health-dot[data-status="waiting"] {
+  background: #14e88c;
+  box-shadow: 0 0 0 4px rgba(20, 232, 140, 0.18);
+}
+
+.ppf-nym-health-dot[data-status="starting"] {
+  background: #c99725;
+  box-shadow: 0 0 0 4px rgba(201, 151, 37, 0.18);
+}
+
+.ppf-nym-health-dot[data-status="error"],
+.ppf-nym-health-dot[data-status="idle"] {
+  background: #ff6b6b;
+  box-shadow: 0 0 0 4px rgba(255, 107, 107, 0.16);
+}
+
+.ppf-nym-health-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.ppf-nym-health-line {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #fffef8;
+}
+
+.ppf-nym-health-address {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 0.74rem;
+}
+
+.ppf-nym-health-address code {
+  word-break: break-all;
+}
+
+.ppf-nym-reconnect {
+  flex: 0 0 auto;
+}
+
+.ppf-resend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 254, 248, 0.1);
+  background: rgba(255, 254, 248, 0.03);
+}
+
+.ppf-resend[data-tone="ok"] {
+  border-color: rgba(20, 232, 140, 0.4);
+  background: rgba(20, 232, 140, 0.07);
+}
+
+.ppf-resend-status {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: rgba(255, 254, 248, 0.78);
+}
+
+.ppf-resend-status[data-delivered="true"] {
+  color: #14e88c;
+}
+
+.ppf-resend-button {
+  align-self: flex-start;
+}
+
 .zectime-paid-panel {
   display: grid;
   grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1fr);
@@ -756,6 +871,9 @@ a {
   border-radius: 8px;
   background:
     linear-gradient(135deg, rgba(20, 232, 140, 0.18), transparent 60%), #eefbf4;
+  /* Light card -> force dark text so the body copy is readable (it otherwise
+     inherits the page's light-on-dark color and vanishes on this background). */
+  color: var(--ink);
 }
 
 .zectime-key-vault code {

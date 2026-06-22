@@ -177,6 +177,42 @@ export interface PaidPrivateFileCopy {
     doneTitle: string;
     doneBody: string;
   };
+  // Buyer status stepper + Nym receiver health (visibility into where a transfer
+  // is). All layperson, en + pt.
+  buyerStatus: {
+    title: string;
+    stepAwaitingPayment: string;
+    stepAwaitingPaymentBody: string;
+    stepInTransit: string;
+    stepInTransitBody: string;
+    stepPaid: string;
+    stepPaidBody: string;
+    stepReceivingKey: string;
+    stepReceivingKeyBody: string;
+    stepDone: string;
+    stepDoneBody: string;
+    nymConnected: string;
+    nymConnecting: string;
+    nymNotConnected: string;
+    nymAddressLabel: string;
+    reconnectNymLabel: string;
+    keepTabOpenHint: string;
+  };
+  // Seller status stepper + robust re-send controls.
+  sellerStatus: {
+    title: string;
+    stepAwaitingPayment: string;
+    stepPaid: string;
+    stepReleased: string;
+    stepSent: string;
+    stepDelivered: string;
+    resendLabel: string;
+    resendingLabel: string;
+    autoResendingLabel: string;
+    deliveredToBuyer: string;
+    notDeliveredYet: string;
+    keepTabOpenHint: string;
+  };
   details: {
     price: string;
     sellerPayoutAddress: string;
@@ -400,6 +436,43 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       doneTitle: "Concluido",
       doneBody:
         "Seu arquivo foi aberto neste navegador. Use o link abaixo para salvar.",
+    },
+    buyerStatus: {
+      title: "Status da sua compra",
+      stepAwaitingPayment: "Aguardando pagamento",
+      stepAwaitingPaymentBody: "Escaneie o QR e pague em ZEC para abrir.",
+      stepInTransit: "Pagamento detectado",
+      stepInTransitBody: "Recebemos seu pagamento e estamos confirmando.",
+      stepPaid: "Pago",
+      stepPaidBody: "Pagamento confirmado. Preparando a entrega da chave.",
+      stepReceivingKey: "Recebendo a chave (Nym)",
+      stepReceivingKeyBody:
+        "A chave esta chegando pela rede Nym. Mantenha esta aba aberta.",
+      stepDone: "Concluido",
+      stepDoneBody: "Arquivo baixado e aberto neste navegador.",
+      nymConnected: "Conectado a Nym - aguardando a chave",
+      nymConnecting: "Conectando a Nym...",
+      nymNotConnected: "Sem conexao Nym - tente reconectar",
+      nymAddressLabel: "Seu endereco Nym",
+      reconnectNymLabel: "Reconectar Nym",
+      keepTabOpenHint:
+        "Mantenha esta aba aberta. Se demorar, clique em Reconectar Nym - o vendedor reenvia a chave automaticamente.",
+    },
+    sellerStatus: {
+      title: "Status da entrega",
+      stepAwaitingPayment: "Aguardando pagamento",
+      stepPaid: "Pago",
+      stepReleased: "Chave liberada",
+      stepSent: "Enviada pela Nym",
+      stepDelivered: "Entregue ao comprador",
+      resendLabel: "Reenviar chave pela Nym",
+      resendingLabel: "Reenviando...",
+      autoResendingLabel: "Reenviando pela Nym...",
+      deliveredToBuyer: "Entregue ao comprador",
+      notDeliveredYet:
+        "Enviada pela Nym, aguardando confirmacao do comprador. Reenviando automaticamente enquanto esta tela estiver aberta.",
+      keepTabOpenHint:
+        "Mantenha esta tela aberta ate aparecer Entregue ao comprador.",
     },
     details: {
       price: "Preco",
@@ -625,6 +698,43 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       doneTitle: "Done",
       doneBody:
         "Your file was opened in this browser. Use the link below to save it.",
+    },
+    buyerStatus: {
+      title: "Your purchase status",
+      stepAwaitingPayment: "Awaiting payment",
+      stepAwaitingPaymentBody: "Scan the QR and pay in ZEC to open.",
+      stepInTransit: "Payment detected",
+      stepInTransitBody: "We received your payment and are confirming it.",
+      stepPaid: "Paid",
+      stepPaidBody: "Payment confirmed. Preparing the key delivery.",
+      stepReceivingKey: "Receiving key (Nym)",
+      stepReceivingKeyBody:
+        "The key is arriving over the Nym network. Keep this tab open.",
+      stepDone: "Done",
+      stepDoneBody: "File downloaded and opened in this browser.",
+      nymConnected: "Connected to Nym - listening for the key",
+      nymConnecting: "Connecting to Nym...",
+      nymNotConnected: "Not connected to Nym - try reconnecting",
+      nymAddressLabel: "Your Nym address",
+      reconnectNymLabel: "Reconnect Nym",
+      keepTabOpenHint:
+        "Keep this tab open. If it stalls, click Reconnect Nym - the seller re-sends the key automatically.",
+    },
+    sellerStatus: {
+      title: "Delivery status",
+      stepAwaitingPayment: "Awaiting payment",
+      stepPaid: "Paid",
+      stepReleased: "Key released",
+      stepSent: "Sent over Nym",
+      stepDelivered: "Delivered to buyer",
+      resendLabel: "Re-send key over Nym",
+      resendingLabel: "Re-sending...",
+      autoResendingLabel: "Re-sending over Nym...",
+      deliveredToBuyer: "Delivered to buyer",
+      notDeliveredYet:
+        "Sent over Nym, waiting for the buyer to confirm receipt. Re-sending automatically while this screen is open.",
+      keepTabOpenHint:
+        "Keep this screen open until it shows Delivered to buyer.",
     },
     details: {
       price: "Price",

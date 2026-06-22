@@ -22,6 +22,7 @@ import {
 } from "../app/api/seller-session/route";
 import { GET as readTransferRoute } from "../app/api/transfers/[orderId]/route";
 import { POST as claimTransferRoute } from "../app/api/transfers/[orderId]/claim/route";
+import { POST as deliveredTransferRoute } from "../app/api/transfers/[orderId]/delivered/route";
 import { POST as devPayRoute } from "../app/api/transfers/[orderId]/dev-pay/route";
 import { GET as fileRoute } from "../app/api/transfers/[orderId]/file/route";
 import { POST as nymSessionRoute } from "../app/api/transfers/[orderId]/nym-session/route";
@@ -221,6 +222,117 @@ describe("/api/transfers", () => {
     expect(new Uint8Array(await fileResponse.arrayBuffer())).toEqual(
       encryptedFixture(),
     );
+  });
+
+  it("marks the Nym session delivered via the status-only delivery ack", async () => {
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await nymSessionRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
+      ),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
+      routeContext(order.orderId),
+    );
+    await releaseKeyForOrder(order.orderId);
+    await claimTransferRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/claim`, {
+        buyerPublicKeyJwk: keyPair.publicJwk,
+      }),
+      routeContext(order.orderId),
+    );
+
+    const deliveredResponse = await deliveredTransferRoute(
+      jsonRequest(`http://localhost/api/transfers/${order.orderId}/delivered`, {
+        buyerPublicKeyJwk: keyPair.publicJwk,
+      }),
+      routeContext(order.orderId),
+    );
+    expect(deliveredResponse.status).toBe(200);
+    const deliveredBody = (await deliveredResponse.json()) as {
+      order: TransferPublicOrder & {
+        delivery: {
+          nymSession: {
+            status: string;
+            lastDelivery?: { status?: string } | null;
+          } | null;
+        };
+      };
+    };
+    expect(deliveredBody.order.delivery.nymSession?.status).toBe("delivered");
+    expect(deliveredBody.order.delivery.nymSession?.lastDelivery?.status).toBe(
+      "delivered",
+    );
+    // Pure-Nym invariant: the ack carries no key material in or out.
+    expect(JSON.stringify(deliveredBody)).not.toContain("keyEnvelope");
+    expect(JSON.stringify(deliveredBody)).not.toContain("ciphertext");
+  });
+
+  it("rejects a delivery ack from a buyer key not bound to the payment", async () => {
+    const order = await createOrder();
+    const keyPair = await createBuyerKeyPair();
+    const otherKeyPair = await createBuyerKeyPair();
+
+    await paymentIntentRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/payment-intent`,
+        { buyerPublicKeyJwk: keyPair.publicJwk },
+      ),
+      routeContext(order.orderId),
+    );
+    await nymSessionRoute(
+      jsonRequest(
+        `http://localhost/api/transfers/${order.orderId}/nym-session`,
+        {
+          buyerNymAddress: testBuyerNymAddress(),
+          buyerPublicKeyJwk: keyPair.publicJwk,
+          transport: "nym-claim-v1",
+        },
+      ),
+      routeContext(order.orderId),
+    );
+    await devPayRoute(
+      new Request(`http://localhost/api/transfers/${order.orderId}/dev-pay`, {
+        method: "POST",
+      }),
+      routeContext(order.orderId),
+    );
+
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const rejected = await deliveredTransferRoute(
+        jsonRequest(
+          `http://localhost/api/transfers/${order.orderId}/delivered`,
+          {
+            buyerPublicKeyJwk: otherKeyPair.publicJwk,
+          },
+        ),
+        routeContext(order.orderId),
+      );
+      expect(rejected.status).toBe(402);
+      const body = (await rejected.json()) as ErrorEnvelope;
+      expect(body.error.kind).toBe("payment_required");
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 
   it("accepts a paid CipherPay webhook using the invoice id index", async () => {

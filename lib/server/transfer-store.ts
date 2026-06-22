@@ -71,7 +71,7 @@ export interface TransferNymSession {
   transport: NymTransportMode;
   buyerNymAddress: string;
   buyerPublicKeyHash: string;
-  status: "waiting_for_payment" | "ready_for_delivery" | "queued";
+  status: "waiting_for_payment" | "ready_for_delivery" | "queued" | "delivered";
   createdAt: string;
   updatedAt: string;
   lastDelivery?: NymDeliveryReceipt;
@@ -1002,6 +1002,66 @@ export async function claimTransfer(
       };
     }
     return response;
+  });
+}
+
+// Pure-Nym delivery acknowledgement. The buyer calls this AFTER it has decrypted
+// + downloaded the file (browser-to-browser Nym delivery succeeded). It is a
+// STATUS-ONLY flag: the server never receives the raw or wrapped file key here.
+// It authenticates the same way as claim (the buyer public key must match the
+// confirmed payment), then marks the Nym session "delivered" so the seller's
+// re-send-until-acked loop can stop and show an honest "Delivered to buyer".
+export async function markTransferDelivered(
+  orderId: string,
+  buyerPublicKeyJwk: JsonWebKey,
+): Promise<TransferPublicOrder> {
+  validateBuyerPublicKeyJwk(buyerPublicKeyJwk);
+  const buyerPublicKeyHash = hashBuyerPublicKey(buyerPublicKeyJwk);
+
+  return withOrderLock(orderId, async () => {
+    const order = await readOrder(orderId);
+    if (
+      !order.payment ||
+      order.payment.buyerPublicKeyHash !== buyerPublicKeyHash
+    ) {
+      throw new ServerError(
+        "payment_required",
+        "This buyer key is not bound to the confirmed payment",
+      );
+    }
+
+    order.delivery = normalizeDeliveryState(order.delivery);
+    if (
+      !order.delivery.nymSession ||
+      order.delivery.nymSession.buyerPublicKeyHash !== buyerPublicKeyHash
+    ) {
+      throw new ServerError(
+        "validation",
+        "A Nym delivery session must be registered before delivery can be acknowledged",
+      );
+    }
+
+    const now = new Date().toISOString();
+    order.delivery.nymSession.status = "delivered";
+    order.delivery.nymSession.updatedAt = now;
+    if (order.delivery.nymSession.lastDelivery) {
+      order.delivery.nymSession.lastDelivery = {
+        ...order.delivery.nymSession.lastDelivery,
+        status: "delivered",
+        deliveredAt: now,
+      };
+    } else {
+      order.delivery.nymSession.lastDelivery = {
+        deliveryId: `nym_${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        transport: order.delivery.nymSession.transport,
+        status: "delivered",
+        queuedAt: now,
+        deliveredAt: now,
+      };
+    }
+    order.updatedAt = now;
+    await writeOrder(order);
+    return publicOrder(order);
   });
 }
 

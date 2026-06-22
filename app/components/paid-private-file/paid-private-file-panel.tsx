@@ -77,9 +77,20 @@ interface TransferPublicOrder {
     nymSession: {
       transport: "nym-claim-v1" | "nym-transfer-v1";
       buyerNymAddress: string;
-      status: "waiting_for_payment" | "ready_for_delivery" | "queued";
+      status:
+        | "waiting_for_payment"
+        | "ready_for_delivery"
+        | "queued"
+        | "delivered";
       createdAt: string;
       updatedAt: string;
+      lastDelivery?: {
+        deliveryId: string;
+        transport: "nym-claim-v1" | "nym-transfer-v1";
+        status: "queued_local_outbox" | "sent_nym_client" | "delivered";
+        queuedAt: string;
+        deliveredAt?: string;
+      };
     } | null;
   };
   release: {
@@ -230,6 +241,12 @@ type BusyAction =
   | "unlocking";
 type BrowserNymStatus = "idle" | "starting" | "ready" | "waiting" | "error";
 
+// Robust pure-Nym re-send-until-acked loop (seller manage screen): re-emit the
+// wrapped key every RESEND_INTERVAL_MS until the buyer ACKs, capped at
+// RESEND_MAX_ATTEMPTS (~6s × 20 ≈ 2 min).
+const RESEND_INTERVAL_MS = 6000;
+const RESEND_MAX_ATTEMPTS = 20;
+
 const SELLER_PAYOUT_STORAGE_KEY = "paidprivatefile_seller_payout_address";
 const SELLER_PRICE_STORAGE_KEY = "paidprivatefile_seller_price_zec";
 const BUYER_NYM_CLIENT_ID_STORAGE_KEY = "paidprivatefile_buyer_nym_client_id";
@@ -315,6 +332,15 @@ export function PaidPrivateFilePanel({
   const [nymMessage, setNymMessage] = useState("");
   const [sellerBuyerCode, setSellerBuyerCode] = useState("");
   const [sellerCodeConfirmed, setSellerCodeConfirmed] = useState(false);
+  // Robust pure-Nym re-send: while the manage screen is open for a released order
+  // that the buyer has NOT yet ACKed (nymSession !== "delivered"), the seller
+  // browser (which holds the release secret) re-emits the wrapped key every ~6s
+  // up to a cap. resendAttempt drives the "Re-sending over Nym… (n)" label.
+  const [resending, setResending] = useState(false);
+  const [resendAttempt, setResendAttempt] = useState(0);
+  // Guards against double-firing the auto re-send tick (a slow send must not
+  // overlap the next interval) and tracks the orderId the loop is bound to.
+  const resendInFlightRef = useRef(false);
   // Dead-simple buyer flow: a confirmation modal pops once the order flips to
   // "paid". We track the previous payment status so it fires exactly once.
   const [showPaidModal, setShowPaidModal] = useState(false);
@@ -324,6 +350,11 @@ export function PaidPrivateFilePanel({
   const browserNymUnsubscribeRef = useRef<(() => void) | null>(null);
   const autoReleaseRef = useRef(false);
   const buyerAutoClaimRef = useRef(false);
+  // Idempotency for the Nym receive handler: the seller re-sends the same key
+  // envelope until the buyer ACKs, so once this buyer has opened the file we must
+  // ignore further envelopes. The Nym subscription closure captures stale state,
+  // so the guard reads this ref (kept current by an effect) instead.
+  const buyerReceivedRef = useRef(false);
   // Dashboard auto-release: orders this browser has already fired a silent
   // release for, so the periodic dashboard scan never re-releases the same order.
   const dashboardReleasedRef = useRef<Set<string>>(new Set());
@@ -488,15 +519,10 @@ export function PaidPrivateFilePanel({
       );
       setManageOrder(body.order);
       setManageStatus("ready");
-      // If the key is already released and this browser holds the secret, re-emit
-      // it over the mixnet now: a buyer who is listening but missed the one-shot
-      // delivery (stuck on "queued") then receives it. Re-clicking Manage re-sends.
-      if (
-        body.order.release?.status === "ready" &&
-        loadSellerReleaseDraft(orderId)
-      ) {
-        void onResendKeyOverNym(body.order);
-      }
+      // No explicit re-send here: the auto re-send-until-acked loop (keyed on the
+      // manage screen + a released, undelivered order) fires its first tick as
+      // soon as this manageOrder is set, so a buyer who missed the one-shot
+      // delivery gets it without a redundant double-send on open.
     } catch {
       setManageStatus("error");
     }
@@ -523,6 +549,110 @@ export function PaidPrivateFilePanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadedOrder, sellerScreen, manageOrderId]);
+
+  // Manage-screen order poll (~5s): while a single file's manage screen is open,
+  // refresh the full order so the seller stepper + delivery status reflect the
+  // buyer's pure-Nym ack (nymSession.status flips to "delivered"). This is what
+  // lets the auto re-send loop below STOP once the buyer confirms receipt. Stops
+  // once delivered.
+  useEffect(() => {
+    if (sellerScreen !== "manage" || !manageOrderId) {
+      return;
+    }
+    if (manageOrder?.delivery.nymSession?.status === "delivered") {
+      return;
+    }
+    const orderId = manageOrderId;
+    let active = true;
+    const interval = window.setInterval(() => {
+      void (async () => {
+        try {
+          const body = await postJson<{ order: TransferPublicOrder }>(
+            `/api/transfers/${encodeURIComponent(orderId)}`,
+            { method: "GET" },
+          );
+          if (active) {
+            setManageOrder(body.order);
+          }
+        } catch {
+          // Transient polling failures are non-fatal; retry on next tick.
+        }
+      })();
+    }, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sellerScreen, manageOrderId, manageOrder?.delivery.nymSession?.status]);
+
+  // Auto re-send-until-acked (~6s, up to RESEND_MAX_ATTEMPTS ≈ 2 min): while the
+  // manage screen is open for a RELEASED order the buyer has not yet ACKed, and
+  // THIS browser holds the release secret, re-emit the wrapped key over Nym so a
+  // buyer who is now listening (but missed the one-shot delivery) finally gets
+  // it. Stops the instant the manage poll above reports nymSession "delivered".
+  // resendInFlightRef guards against a slow send overlapping the next tick.
+  useEffect(() => {
+    const order = manageOrder;
+    if (
+      sellerScreen !== "manage" ||
+      !order ||
+      order.orderId !== manageOrderId
+    ) {
+      setResending(false);
+      setResendAttempt(0);
+      return;
+    }
+    const released = order.release?.status === "ready";
+    const delivered = order.delivery.nymSession?.status === "delivered";
+    const hasSecret = Boolean(loadSellerReleaseDraft(order.orderId));
+    if (!released || delivered || !hasSecret) {
+      setResending(false);
+      setResendAttempt(0);
+      return;
+    }
+
+    const resendOrder: TransferPublicOrder = order;
+    let active = true;
+    let attempts = 0;
+    setResending(true);
+    setResendAttempt(0);
+
+    async function resendTick() {
+      if (!active || resendInFlightRef.current) {
+        return;
+      }
+      if (attempts >= RESEND_MAX_ATTEMPTS) {
+        setResending(false);
+        return;
+      }
+      resendInFlightRef.current = true;
+      attempts += 1;
+      setResendAttempt(attempts);
+      try {
+        await onResendKeyOverNym(resendOrder, { silent: true });
+      } finally {
+        resendInFlightRef.current = false;
+      }
+    }
+
+    void resendTick();
+    const interval = window.setInterval(() => {
+      void resendTick();
+    }, RESEND_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    sellerScreen,
+    manageOrderId,
+    manageOrder?.orderId,
+    manageOrder?.release?.status,
+    manageOrder?.delivery.nymSession?.status,
+  ]);
 
   async function onCreateSeller() {
     setErrorMessage("");
@@ -775,6 +905,7 @@ export function PaidPrivateFilePanel({
     setDownloadFileName("");
     setShowPaidModal(false);
     pendingDownloadRef.current = null;
+    buyerReceivedRef.current = false;
 
     try {
       const body = await postJson<{ order: TransferPublicOrder }>(
@@ -1083,6 +1214,19 @@ export function PaidPrivateFilePanel({
   }
 
   async function handleNymTextMessage(payload: string): Promise<void> {
+    // Idempotency: the seller re-sends the same envelope until the buyer ACKs.
+    // Once the file is already opened locally (downloadUrl set) or the order is
+    // delivered/claimed, IGNORE further envelopes so re-sends never trigger a
+    // repeat download. The ack itself is what stops the re-send loop.
+    if (
+      buyerReceivedRef.current ||
+      downloadUrl ||
+      loadedOrder?.status === "claimed" ||
+      loadedOrder?.delivery.nymSession?.status === "delivered"
+    ) {
+      return;
+    }
+
     // Legacy full payload (server-relayed) carries the manifest + file URL.
     const parsed = parseNymClaimPayload(payload);
     if (parsed) {
@@ -1094,7 +1238,16 @@ export function PaidPrivateFilePanel({
         setErrorMessage(copy.errors.paymentRequired);
         return;
       }
-      await openClaimPayload(parsed, keyPair);
+      // Commit: a matching, decryptable envelope. Block re-sends now so a burst
+      // arriving back-to-back cannot each start a decrypt before downloadUrl is
+      // set. If opening fails, release the guard so a later re-send can retry.
+      buyerReceivedRef.current = true;
+      try {
+        await openClaimPayload(parsed, keyPair);
+      } catch (error) {
+        buyerReceivedRef.current = false;
+        setErrorMessage(formatError(error, copy.errors.serverError));
+      }
       return;
     }
 
@@ -1113,6 +1266,9 @@ export function PaidPrivateFilePanel({
       setErrorMessage(copy.errors.paymentRequired);
       return;
     }
+    // Commit before the await-heavy claim/decrypt below so concurrent re-sends
+    // (the seller fires every ~6s) cannot each kick off a download.
+    buyerReceivedRef.current = true;
     // The seller's envelope can arrive over the mixnet BEFORE this buyer ran its
     // own claim (the claim is what stashes the signed ciphertext URL). If the URL
     // is missing, claim NOW to fetch it, then decrypt with the envelope we just
@@ -1135,30 +1291,38 @@ export function PaidPrivateFilePanel({
           download = claim.download;
         }
       } catch (error) {
+        // Claim failed: allow a later re-send to retry this buyer.
+        buyerReceivedRef.current = false;
         setErrorMessage(formatError(error, copy.errors.serverError));
         return;
       }
     }
     if (!download) {
+      buyerReceivedRef.current = false;
       setErrorMessage(copy.errors.paymentRequired);
       return;
     }
-    await openClaimPayload(
-      {
-        schema: "paidprivatefile.nym.claim.v1",
-        orderId: loadedOrder.orderId,
-        manifest: {
+    try {
+      await openClaimPayload(
+        {
+          schema: "paidprivatefile.nym.claim.v1",
           orderId: loadedOrder.orderId,
-          fileName: loadedOrder.file.fileName,
-          mimeType: loadedOrder.file.mimeType,
-          encryptedFileSha256: loadedOrder.file.encryptedFileSha256,
-          encryptionIv: loadedOrder.file.encryptionIv,
+          manifest: {
+            orderId: loadedOrder.orderId,
+            fileName: loadedOrder.file.fileName,
+            mimeType: loadedOrder.file.mimeType,
+            encryptedFileSha256: loadedOrder.file.encryptedFileSha256,
+            encryptionIv: loadedOrder.file.encryptionIv,
+          },
+          keyEnvelope: keyOnly.keyEnvelope,
+          encryptedFileDownload: download,
         },
-        keyEnvelope: keyOnly.keyEnvelope,
-        encryptedFileDownload: download,
-      },
-      keyPair,
-    );
+        keyPair,
+      );
+    } catch (error) {
+      buyerReceivedRef.current = false;
+      setErrorMessage(formatError(error, copy.errors.serverError));
+    }
   }
 
   async function openClaimPayload(
@@ -1194,6 +1358,37 @@ export function PaidPrivateFilePanel({
     setDownloadFileName(payload.manifest.fileName);
     setNymStatus("ready");
     setNymMessage(copy.receive.nymReadyLabel);
+
+    // Pure-Nym delivery ack (status only, no key material): tell the server the
+    // buyer actually received + opened the file so the seller's re-send loop can
+    // stop. Best-effort — a failed ack must not break the buyer's download.
+    void acknowledgeDelivery(payload.orderId, keyPair);
+  }
+
+  // POST the status-only delivery acknowledgement. The body carries ONLY the
+  // buyer public key (same auth as claim); no key material is sent. Silently
+  // ignores failures so the buyer flow never depends on the ack.
+  async function acknowledgeDelivery(
+    orderId: string,
+    keyPair: PaidLinkBuyerKeyPair,
+  ): Promise<void> {
+    try {
+      const body = await postJson<{ order: TransferPublicOrder }>(
+        `/api/transfers/${encodeURIComponent(orderId)}/delivered`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ buyerPublicKeyJwk: keyPair.publicJwk }),
+        },
+      );
+      // Reflect the delivered flag locally so the buyer stepper shows "Done".
+      if (loadedOrder && body.order.orderId === loadedOrder.orderId) {
+        setLoadedOrder(body.order);
+        setPayment(body.order.payment);
+      }
+    } catch {
+      // Best-effort: the seller re-send loop tolerates a missed ack.
+    }
   }
 
   async function getOrCreateBuyerKeyPair(
@@ -1368,9 +1563,20 @@ export function PaidPrivateFilePanel({
   // browser still holds the file-key secret, so it re-wraps for the buyer (read
   // from the release challenge) and re-emits over the mixnet. Used when the
   // one-shot delivery did not reach a buyer who is now listening ("queued").
-  async function onResendKeyOverNym(order: TransferPublicOrder): Promise<void> {
-    setErrorMessage("");
-    setBusyAction("release");
+  //
+  // The manual button calls this directly (busy state + a status message). The
+  // auto re-send-until-acked loop calls it with { silent: true }, so each ~6s
+  // tick does NOT churn busyAction (which would lock the manual button) or spam
+  // a per-tick message — the stepper + "Re-sending… (n)" counter carry status.
+  async function onResendKeyOverNym(
+    order: TransferPublicOrder,
+    options?: { silent?: boolean },
+  ): Promise<void> {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setErrorMessage("");
+      setBusyAction("release");
+    }
     try {
       const draft = loadSellerReleaseDraft(order.orderId);
       if (!draft) {
@@ -1407,15 +1613,22 @@ export function PaidPrivateFilePanel({
         keyEnvelope,
         buyerNymAddress: challenge.release.buyerNymAddress,
       });
-      setReleaseMessage(
-        locale === "pt"
-          ? "Chave reenviada pela Nym. O comprador (aba aberta) deve receber em segundos."
-          : "Key re-sent over Nym. The buyer (tab open) should receive it shortly.",
-      );
+      if (!silent) {
+        setReleaseMessage(
+          locale === "pt"
+            ? "Chave reenviada pela Nym. O comprador (aba aberta) deve receber em segundos."
+            : "Key re-sent over Nym. The buyer (tab open) should receive it shortly.",
+        );
+      }
     } catch (error) {
-      setReleaseMessage(formatError(error, copy.errors.serverError));
+      if (!silent) {
+        setReleaseMessage(formatError(error, copy.errors.serverError));
+      }
+      // Silent (auto-loop) failures are swallowed: the next ~6s tick retries.
     } finally {
-      setBusyAction("idle");
+      if (!silent) {
+        setBusyAction("idle");
+      }
     }
   }
 
@@ -1654,6 +1867,23 @@ export function PaidPrivateFilePanel({
     busyAction,
   ]);
 
+  // Keep the Nym-receive idempotency ref current. Once the file is opened locally
+  // (downloadUrl) or the order reports delivered/claimed, the receive handler must
+  // drop further re-sent envelopes.
+  useEffect(() => {
+    if (
+      downloadUrl ||
+      loadedOrder?.status === "claimed" ||
+      loadedOrder?.delivery.nymSession?.status === "delivered"
+    ) {
+      buyerReceivedRef.current = true;
+    }
+  }, [
+    downloadUrl,
+    loadedOrder?.status,
+    loadedOrder?.delivery.nymSession?.status,
+  ]);
+
   const isBusy = busyAction !== "idle";
   const mustAcknowledgeAccessKey =
     Boolean(newSellerAccessKey) && !accessKeyAcknowledged;
@@ -1748,6 +1978,9 @@ export function PaidPrivateFilePanel({
             onConfirmCodeChange={setSellerCodeConfirmed}
             onRevealCode={(order) => void onRevealBuyerCode(order)}
             onRelease={(order) => void onReleaseSellerKey(order)}
+            onResend={(order) => void onResendKeyOverNym(order)}
+            resending={resending}
+            resendAttempt={resendAttempt}
             releaseBusy={busyAction === "release"}
             newSellerAccessKey={newSellerAccessKey}
             displayNameInput={sellerDisplayName}
@@ -2117,6 +2350,8 @@ export function PaidPrivateFilePanel({
             busyAction={busyAction}
             isBusy={isBusy}
             nymMessage={nymMessage}
+            nymStatus={nymStatus}
+            onReconnectNym={() => void startBrowserNym()}
             buyerNymAddress={buyerNymAddress}
             onBuyerNymAddressChange={setBuyerNymAddress}
             showManualNymAddress={showManualNymAddress}
@@ -2173,6 +2408,8 @@ function BuyerCheckout({
   busyAction,
   isBusy,
   nymMessage,
+  nymStatus,
+  onReconnectNym,
   buyerNymAddress,
   onBuyerNymAddressChange,
   showManualNymAddress,
@@ -2194,6 +2431,8 @@ function BuyerCheckout({
   busyAction: BusyAction;
   isBusy: boolean;
   nymMessage: string;
+  nymStatus: BrowserNymStatus;
+  onReconnectNym: () => void;
   buyerNymAddress: string;
   onBuyerNymAddressChange: (value: string) => void;
   showManualNymAddress: boolean;
@@ -2219,6 +2458,18 @@ function BuyerCheckout({
       </div>
 
       <div className="ppf-buyer">
+        {loadedOrder ? (
+          <BuyerStatusStepper
+            copy={copy}
+            phase={phase}
+            order={loadedOrder}
+            downloadUrl={downloadUrl}
+            nymStatus={nymStatus}
+            buyerNymAddress={buyerNymAddress}
+            onReconnectNym={onReconnectNym}
+            reconnectBusy={busyAction === "nym"}
+          />
+        ) : null}
         {!loadedOrder ? (
           <form className="zk-hub-form ppf-buyer-load" onSubmit={onLoadOrder}>
             <label className="zk-hub-form-field">
@@ -2494,6 +2745,9 @@ function SellerDashboard({
   onConfirmCodeChange,
   onRevealCode,
   onRelease,
+  onResend,
+  resending,
+  resendAttempt,
   releaseBusy,
   newSellerAccessKey,
   displayNameInput,
@@ -2523,6 +2777,9 @@ function SellerDashboard({
   onConfirmCodeChange: (confirmed: boolean) => void;
   onRevealCode: (order: TransferPublicOrder) => void;
   onRelease: (order: TransferPublicOrder) => void;
+  onResend: (order: TransferPublicOrder) => void;
+  resending: boolean;
+  resendAttempt: number;
   releaseBusy: boolean;
   newSellerAccessKey: string;
   displayNameInput: string;
@@ -2617,6 +2874,9 @@ function SellerDashboard({
             onConfirmCodeChange={onConfirmCodeChange}
             onRevealCode={onRevealCode}
             onRelease={onRelease}
+            onResend={onResend}
+            resending={resending}
+            resendAttempt={resendAttempt}
             releaseBusy={releaseBusy}
             isBusy={isBusy}
           />
@@ -2838,6 +3098,9 @@ function SellerManageScreen({
   onConfirmCodeChange,
   onRevealCode,
   onRelease,
+  onResend,
+  resending,
+  resendAttempt,
   releaseBusy,
   isBusy,
 }: {
@@ -2852,6 +3115,9 @@ function SellerManageScreen({
   onConfirmCodeChange: (confirmed: boolean) => void;
   onRevealCode: (order: TransferPublicOrder) => void;
   onRelease: (order: TransferPublicOrder) => void;
+  onResend: (order: TransferPublicOrder) => void;
+  resending: boolean;
+  resendAttempt: number;
   releaseBusy: boolean;
   isBusy: boolean;
 }) {
@@ -2872,6 +3138,8 @@ function SellerManageScreen({
   // Seller-held custody: the wrap secret lives only in the browser that created
   // the file. If it is absent here, no release is possible from this device.
   const hasSecret = Boolean(loadSellerReleaseDraft(order.orderId));
+  const released = order.release?.status === "ready";
+  const delivered = order.delivery.nymSession?.status === "delivered";
 
   return (
     <div className="ppf-manage">
@@ -2886,19 +3154,62 @@ function SellerManageScreen({
           {formatFileStatus(order.status, copy)}
         </span>
       </div>
+
+      <SellerStatusStepper copy={copy} order={order} />
+
       {hasSecret ? (
-        <SellerReleasePanel
-          order={order}
-          locale={locale}
-          busy={releaseBusy}
-          releaseMessage={releaseMessage}
-          buyerCode={buyerCode}
-          codeConfirmed={codeConfirmed}
-          onConfirmCodeChange={onConfirmCodeChange}
-          onRevealCode={() => onRevealCode(order)}
-          onRelease={() => onRelease(order)}
-          disabled={isBusy}
-        />
+        <>
+          <SellerReleasePanel
+            order={order}
+            locale={locale}
+            busy={releaseBusy}
+            releaseMessage={releaseMessage}
+            buyerCode={buyerCode}
+            codeConfirmed={codeConfirmed}
+            onConfirmCodeChange={onConfirmCodeChange}
+            onRevealCode={() => onRevealCode(order)}
+            onRelease={() => onRelease(order)}
+            disabled={isBusy}
+          />
+
+          {/* Robust pure-Nym delivery: an always-visible re-send button plus an
+              auto re-send-until-acked loop. Shown only once the key is released
+              (there is nothing to send before that). */}
+          {released ? (
+            <div
+              className="ppf-resend"
+              data-tone={delivered ? "ok" : "pending"}
+            >
+              <p
+                className="ppf-resend-status"
+                data-delivered={delivered ? "true" : "false"}
+              >
+                {delivered
+                  ? `${copy.sellerStatus.deliveredToBuyer} ✓`
+                  : resending
+                    ? `${copy.sellerStatus.autoResendingLabel} (${resendAttempt})`
+                    : copy.sellerStatus.notDeliveredYet}
+              </p>
+              {!delivered ? (
+                <>
+                  <button
+                    type="button"
+                    className="button-secondary ppf-resend-button"
+                    onClick={() => onResend(order)}
+                    disabled={releaseBusy}
+                  >
+                    {releaseBusy
+                      ? copy.sellerStatus.resendingLabel
+                      : copy.sellerStatus.resendLabel}
+                  </button>
+                  <p className="zk-hub-form-hint">
+                    {copy.sellerStatus.keepTabOpenHint}
+                  </p>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+        </>
       ) : (
         <div className="ppf-shop-reminder" role="note" data-tone="warning">
           <p className="eyebrow">{copy.dashboard.secretMissingTitle}</p>
@@ -3255,6 +3566,172 @@ export function getBuyerFlowPhase(input: {
   return "loading";
 }
 
+// Buyer status stepper: a 5-stage view of where THIS purchase is, so the buyer
+// always sees movement (the owner reported "doesn't seem to update"). It reuses
+// the .zectime-flow-strip dark-theme visual. Stage 4 ("Receiving key") also shows
+// the Nym receiver health + a Reconnect button — the diagnostics the buyer needs
+// when a pure-Nym delivery stalls.
+export type BuyerStatusStageId =
+  | "awaiting-payment"
+  | "in-transit"
+  | "paid"
+  | "receiving-key"
+  | "done";
+
+// Pure mapping of (phase, order, downloadUrl) -> active stage index (0..4). Kept
+// React-free so the transitions can be unit-tested.
+export function getBuyerStatusStageIndex(input: {
+  phase: BuyerFlowPhase;
+  order: {
+    status: TransferPublicOrder["status"];
+    payment: { status: TransferPayment["status"] } | null;
+    release?: { status: "seller_pending" | "ready" } | null;
+    delivery?: {
+      nymSession?: { status: string } | null;
+    } | null;
+  } | null;
+  downloadUrl: string;
+}): number {
+  if (
+    input.downloadUrl ||
+    input.order?.status === "claimed" ||
+    input.order?.delivery?.nymSession?.status === "delivered"
+  ) {
+    return 4; // done
+  }
+  if (input.phase === "in-transit" || isOrderPaid(input.order)) {
+    // Paid: payment detected + paid are behind us. If the seller has released
+    // the key it is now in flight over Nym (receiving-key); otherwise we are at
+    // "paid" waiting for the seller to release.
+    return input.order?.release?.status === "ready" ? 3 : 2;
+  }
+  if (input.phase === "awaiting-payment") {
+    return 0;
+  }
+  return 0; // loading -> still awaiting payment
+}
+
+function BuyerStatusStepper({
+  copy,
+  phase,
+  order,
+  downloadUrl,
+  nymStatus,
+  buyerNymAddress,
+  onReconnectNym,
+  reconnectBusy,
+}: {
+  copy: PaidPrivateFileCopy;
+  phase: BuyerFlowPhase;
+  order: TransferPublicOrder | null;
+  downloadUrl: string;
+  nymStatus: BrowserNymStatus;
+  buyerNymAddress: string;
+  onReconnectNym: () => void;
+  reconnectBusy: boolean;
+}) {
+  const activeIndex = getBuyerStatusStageIndex({ phase, order, downloadUrl });
+  const steps: Array<{
+    id: BuyerStatusStageId;
+    label: string;
+    body: string;
+  }> = [
+    {
+      id: "awaiting-payment",
+      label: copy.buyerStatus.stepAwaitingPayment,
+      body: copy.buyerStatus.stepAwaitingPaymentBody,
+    },
+    {
+      id: "in-transit",
+      label: copy.buyerStatus.stepInTransit,
+      body: copy.buyerStatus.stepInTransitBody,
+    },
+    {
+      id: "paid",
+      label: copy.buyerStatus.stepPaid,
+      body: copy.buyerStatus.stepPaidBody,
+    },
+    {
+      id: "receiving-key",
+      label: copy.buyerStatus.stepReceivingKey,
+      body: copy.buyerStatus.stepReceivingKeyBody,
+    },
+    {
+      id: "done",
+      label: copy.buyerStatus.stepDone,
+      body: copy.buyerStatus.stepDoneBody,
+    },
+  ];
+  const active = steps[activeIndex];
+
+  return (
+    <div className="ppf-status-stepper" data-role="buyer">
+      <p className="eyebrow">{copy.buyerStatus.title}</p>
+      <ol
+        className="zectime-flow-strip"
+        data-stage={active.id}
+        aria-label={copy.buyerStatus.title}
+      >
+        {steps.map((step, index) => {
+          const state =
+            index < activeIndex
+              ? "done"
+              : index === activeIndex
+                ? "active"
+                : "pending";
+          return (
+            <li key={step.id} data-state={state}>
+              <span className="zectime-flow-dot" aria-hidden="true" />
+              <span>{step.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+      <p className="zk-hub-form-hint ppf-status-stepper-body">{active.body}</p>
+
+      {active.id === "receiving-key" ? (
+        <div className="ppf-nym-health" role="status">
+          <span
+            className="ppf-nym-health-dot"
+            data-status={nymStatus}
+            aria-hidden="true"
+          />
+          <div className="ppf-nym-health-body">
+            <p className="ppf-nym-health-line">
+              {nymStatus === "ready" || nymStatus === "waiting"
+                ? copy.buyerStatus.nymConnected
+                : nymStatus === "starting"
+                  ? copy.buyerStatus.nymConnecting
+                  : copy.buyerStatus.nymNotConnected}
+            </p>
+            {buyerNymAddress ? (
+              <p className="ppf-nym-health-address">
+                <span className="ppf-muted">
+                  {copy.buyerStatus.nymAddressLabel}
+                </span>
+                <code>{shortNymAddress(buyerNymAddress)}</code>
+              </p>
+            ) : null}
+            <p className="zk-hub-form-hint">
+              {copy.buyerStatus.keepTabOpenHint}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="button-secondary ppf-nym-reconnect"
+            onClick={onReconnectNym}
+            disabled={reconnectBusy}
+          >
+            {reconnectBusy
+              ? copy.buyerStatus.nymConnecting
+              : copy.buyerStatus.reconnectNymLabel}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 // Render a scannable QR encoding the Zcash payment URI. The data URL is
 // generated CLIENT-SIDE in an effect keyed on address + amount so it never runs
 // during SSR (qrcode.toDataURL is async + browser-friendly), and the CSP allows
@@ -3311,6 +3788,95 @@ function PaymentQr({
       <img src={dataUrl} alt={copy.details.qrAlt} width={192} height={192} />
       <figcaption>{caption}</figcaption>
     </figure>
+  );
+}
+
+// Seller status stepper: a 5-stage view of an order's delivery so the seller can
+// SEE where it is (the owner reported no visibility). Stage 5 ("Delivered to
+// buyer") only lights up on the buyer's pure-Nym ack (nymSession.status ===
+// "delivered") — that is the honest terminal, replacing the old "Delivered" that
+// only meant "sent". Reuses the .zectime-flow-strip dark-theme visual.
+export type SellerStatusStageId =
+  | "awaiting-payment"
+  | "paid"
+  | "released"
+  | "sent"
+  | "delivered";
+
+// Pure mapping of an order's delivery state -> active stage index (0..4). Kept
+// React-free for unit testing.
+export function getSellerStatusStageIndex(input: {
+  status: TransferPublicOrder["status"];
+  payment: { status: TransferPayment["status"] } | null;
+  release?: { status: "seller_pending" | "ready" } | null;
+  nymSession?: { status: string } | null;
+}): number {
+  const nymStatus = input.nymSession?.status;
+  if (nymStatus === "delivered") {
+    return 4; // delivered to buyer (buyer ACKed over the status-only flag)
+  }
+  const released = input.release?.status === "ready";
+  if (released) {
+    // Once released, the seller browser sends over Nym (nymSession "queued"). The
+    // re-send loop keeps firing until the buyer ACKs, so we sit on "sent" (3) —
+    // not a terminal — until nymSession flips to "delivered" above.
+    return 3;
+  }
+  if (isOrderPaid({ status: input.status, payment: input.payment ?? null })) {
+    return 1; // paid, key not yet released
+  }
+  return 0; // awaiting payment
+}
+
+function SellerStatusStepper({
+  copy,
+  order,
+}: {
+  copy: PaidPrivateFileCopy;
+  order: TransferPublicOrder;
+}) {
+  const activeIndex = getSellerStatusStageIndex({
+    status: order.status,
+    payment: order.payment,
+    release: order.release,
+    nymSession: order.delivery.nymSession,
+  });
+  const steps: Array<{ id: SellerStatusStageId; label: string }> = [
+    { id: "awaiting-payment", label: copy.sellerStatus.stepAwaitingPayment },
+    { id: "paid", label: copy.sellerStatus.stepPaid },
+    { id: "released", label: copy.sellerStatus.stepReleased },
+    { id: "sent", label: copy.sellerStatus.stepSent },
+    { id: "delivered", label: copy.sellerStatus.stepDelivered },
+  ];
+  const delivered = order.delivery.nymSession?.status === "delivered";
+
+  return (
+    <div className="ppf-status-stepper" data-role="seller">
+      <p className="eyebrow">{copy.sellerStatus.title}</p>
+      <ol
+        className="zectime-flow-strip"
+        data-stage={steps[activeIndex].id}
+        aria-label={copy.sellerStatus.title}
+      >
+        {steps.map((step, index) => {
+          const state =
+            index < activeIndex
+              ? "done"
+              : index === activeIndex
+                ? "active"
+                : "pending";
+          return (
+            <li key={step.id} data-state={state}>
+              <span className="zectime-flow-dot" aria-hidden="true" />
+              <span>
+                {step.label}
+                {step.id === "delivered" && delivered ? " ✓" : ""}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 
@@ -3689,6 +4255,16 @@ function browserNymDeliveryEnabled(): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Nym addresses are long (gateway-suffixed). Show a compact head…tail so the
+// buyer can sanity-check their receiver address without it dominating the UI.
+export function shortNymAddress(value: string): string {
+  const cleaned = value.trim();
+  if (cleaned.length <= 24) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, 12)}…${cleaned.slice(-8)}`;
 }
 
 function parseZecToZats(value: string): number {

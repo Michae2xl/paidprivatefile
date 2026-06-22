@@ -18,9 +18,12 @@ export interface NymDeliveryPayload {
 export interface NymDeliveryReceipt {
   deliveryId: string;
   transport: NymTransportMode;
-  status: "queued_local_outbox" | "sent_nym_client";
+  status: "queued_local_outbox" | "sent_nym_client" | "delivered";
   queuedAt: string;
   nymClientEndpoint?: string;
+  // Stamped by the buyer's status-only delivery ack (no key material). Lets the
+  // seller honestly distinguish "sent over Nym" from "received by buyer".
+  deliveredAt?: string;
 }
 
 export async function queueNymDelivery(
@@ -118,11 +121,10 @@ async function sendWithStandaloneNymClient(
 
     timer = setTimeout(() => {
       finish(
-        new ServerError(
-          "cli_unavailable",
-          "Nym client send timed out",
-          { endpoint, timeoutMs },
-        ),
+        new ServerError("cli_unavailable", "Nym client send timed out", {
+          endpoint,
+          timeoutMs,
+        }),
       );
     }, timeoutMs);
 
@@ -130,11 +132,10 @@ async function sendWithStandaloneNymClient(
       socket.send(wireMessage, (error) => {
         if (error) {
           finish(
-            new ServerError(
-              "cli_unavailable",
-              "Nym client send failed",
-              { endpoint, cause: error.message },
-            ),
+            new ServerError("cli_unavailable", "Nym client send failed", {
+              endpoint,
+              cause: error.message,
+            }),
           );
           return;
         }
@@ -144,11 +145,10 @@ async function sendWithStandaloneNymClient(
 
     socket.once("error", (error) => {
       finish(
-        new ServerError(
-          "cli_unavailable",
-          "Nym client connection failed",
-          { endpoint, cause: error.message },
-        ),
+        new ServerError("cli_unavailable", "Nym client connection failed", {
+          endpoint,
+          cause: error.message,
+        }),
       );
     });
   });
