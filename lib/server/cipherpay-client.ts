@@ -89,7 +89,10 @@ export async function createCipherPayInvoice(
   }
 
   if (!isRecord(raw)) {
-    throw new ServerError("validation", "CipherPay returned an invalid invoice");
+    throw new ServerError(
+      "validation",
+      "CipherPay returned an invalid invoice",
+    );
   }
 
   const invoiceId = pickString(raw, [
@@ -177,7 +180,21 @@ export function parseCipherPayWebhook(
   };
 }
 
-function createDevInvoice(input: CreateCipherPayInvoiceInput): CipherPayInvoice {
+function createDevInvoice(
+  input: CreateCipherPayInvoiceInput,
+): CipherPayInvoice {
+  // FAIL CLOSED in production. A "dev" invoice has no real settlement path: a
+  // buyer who pays the displayed address is never marked paid (undeliverable),
+  // and combined with a stray dev-pay flag it would hand out free files. Never
+  // silently emit one in prod — force a real rail (PAID_PRIVATE_FILE_ZCASH_ONCHAIN
+  // =1, or CIPHERPAY_API_URL + CIPHERPAY_API_KEY) so a misconfigured deploy fails
+  // loudly at order creation instead of leaking free/unsettleable orders.
+  if (process.env.NODE_ENV === "production") {
+    throw new ServerError(
+      "validation",
+      "No payment provider configured in production. Set PAID_PRIVATE_FILE_ZCASH_ONCHAIN=1, or CIPHERPAY_API_URL and CIPHERPAY_API_KEY. Refusing to create a free dev invoice.",
+    );
+  }
   return {
     provider: "dev",
     invoiceId: `dev_${input.orderId}_${randomUUID().replaceAll("-", "")}`,

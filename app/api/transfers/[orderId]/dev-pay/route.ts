@@ -18,10 +18,12 @@ export async function POST(request: Request, context: RouteContext) {
   if (throttled) return throttled;
 
   try {
+    // Production guard: dev-pay is OFF unless explicitly enabled. The legacy
+    // ZECTIME_ENABLE_DEV_PAY escape hatch is removed — only the current,
+    // documented flag can ever enable free payments, and only outside the default.
     if (
       process.env.NODE_ENV === "production" &&
-      process.env.PAID_PRIVATE_FILE_ENABLE_DEV_PAY !== "1" &&
-      process.env.ZECTIME_ENABLE_DEV_PAY !== "1"
+      process.env.PAID_PRIVATE_FILE_ENABLE_DEV_PAY !== "1"
     ) {
       throw new ServerError("validation", "Dev payment is disabled");
     }
