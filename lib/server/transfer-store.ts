@@ -22,8 +22,10 @@ import {
 import {
   bindOrderDeposit,
   findOrderIdByBoundAddress,
+  isDepositAddressCollision,
   listBindings,
   nextDiversifierIndex,
+  reconcileDiversifierMark,
   type DepositBinding,
 } from "./deposit-bindings";
 import {
@@ -680,22 +682,46 @@ async function deriveSellerDepositAddress(
   // Resolve the scanner lazily: only sellers with a scanRef reach the scanner,
   // so the pool path never requires PPF_SCANNER_URL to be configured.
   const scannerClient = scanner ?? getScannerClient();
-  const diversifierIndex = await nextDiversifierIndex(sellerId);
-  const derived = await scannerClient.deriveAddress({
-    scanRef,
-    diversifierIndex,
-  });
-  await bindOrderDeposit(order.orderId, {
-    address: derived.address,
-    sellerId,
-    diversifierIndex: derived.actualIndex,
-    // MVP: startHeight defaults to 0 (full rescan) unless
-    // PPF_SCAN_DEFAULT_START_HEIGHT is configured to a recent height. Phase 2
-    // will read the chain tip from the scanner at order-creation time.
-    startHeight: defaultScanStartHeight(),
-  });
-  return derived.address;
+  // Derive a UNIQUE per-order deposit address. The scanner returns the next VALID
+  // diversifier at/after the requested index, so actualIndex is often > requested;
+  // we reconcile the high-water mark to actualIndex+1 after each derivation so a
+  // later order never requests an index that re-derives this address. The bind
+  // also has a hard uniqueness guard — if a concurrent order grabbed this address
+  // first we rederive (the reconcile above already bumped the mark, so the next
+  // attempt is fresh). Without this, a collision would misattribute a buyer's real
+  // ZEC to another order (paid, no file, no refund).
+  for (let attempt = 0; attempt < MAX_DERIVE_ATTEMPTS; attempt += 1) {
+    const diversifierIndex = await nextDiversifierIndex(sellerId);
+    const derived = await scannerClient.deriveAddress({
+      scanRef,
+      diversifierIndex,
+    });
+    await reconcileDiversifierMark(sellerId, derived.actualIndex + 1);
+    try {
+      await bindOrderDeposit(order.orderId, {
+        address: derived.address,
+        sellerId,
+        diversifierIndex: derived.actualIndex,
+        // MVP: startHeight defaults to 0 (full rescan) unless
+        // PPF_SCAN_DEFAULT_START_HEIGHT is configured to a recent height. Phase 2
+        // will read the chain tip from the scanner at order-creation time.
+        startHeight: defaultScanStartHeight(),
+      });
+      return derived.address;
+    } catch (error) {
+      if (isDepositAddressCollision(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new ServerError(
+    "flow_conflict",
+    "Could not derive a unique deposit address after multiple attempts",
+  );
 }
+
+const MAX_DERIVE_ATTEMPTS = 8;
 
 function defaultScanStartHeight(): number {
   const raw = process.env.PPF_SCAN_DEFAULT_START_HEIGHT;

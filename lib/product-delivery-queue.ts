@@ -25,11 +25,16 @@ export interface DeliverableSummary {
   // Pure-Nym delivery state. "delivered" means the buyer ACKed — nothing left to
   // do. Anything else (or absent) means the purchase still needs delivery.
   nymSessionStatus?: string | null;
-  // ISO timestamp of the buyer's last Nym session registration. The buyer
-  // heartbeat re-registers every ~8s, so a stale timestamp means the buyer has
-  // gone away (closed tab). Used to skip absent buyers so an abandoned purchase
-  // never head-of-line-blocks the sequential queue. Null when never registered.
+  // ISO timestamp of the buyer's last Nym session registration (diagnostic only).
   nymSessionUpdatedAt?: string | null;
+  // SERVER-COMPUTED age (ms) of the buyer's last Nym session registration:
+  // serverNow - nymSession.updatedAt, both on the server clock. The buyer
+  // heartbeat re-registers every ~8s, so a large age means the buyer has gone
+  // away (closed tab). Used to skip absent buyers so an abandoned purchase never
+  // head-of-line-blocks the queue. Server-relative ON PURPOSE: comparing the
+  // seller browser's Date.now() against a server timestamp would wrongly skip a
+  // present buyer under clock skew. Null when never registered.
+  nymSessionAgeMs?: number | null;
 }
 
 // A buyer is PRESENT if its Nym session was (re)registered within this window.
@@ -37,22 +42,21 @@ export interface DeliverableSummary {
 // has almost certainly closed its tab.
 export const BUYER_PRESENCE_STALE_MS = 40_000;
 
-// True when the buyer for this purchase is still present (recent heartbeat). A
-// purchase with no nymSession yet is NOT present (no address to deliver to).
-// Pure: the caller passes the current epoch ms (and optionally the window).
+// True when the buyer for this purchase is still present (recent heartbeat). Uses
+// the SERVER-computed age (single clock) — never the seller's local clock — so
+// clock skew on the seller's machine can't wrongly skip a present, paying buyer.
+// A purchase with no nymSession yet is NOT present (no address to deliver to).
 export function isBuyerPresent(
   summary: DeliverableSummary,
-  nowMs: number,
   staleMs: number = BUYER_PRESENCE_STALE_MS,
 ): boolean {
-  if (!summary.nymSessionUpdatedAt) {
+  const ageMs = summary.nymSessionAgeMs;
+  if (typeof ageMs !== "number" || !Number.isFinite(ageMs)) {
     return false;
   }
-  const seenMs = Date.parse(summary.nymSessionUpdatedAt);
-  if (Number.isNaN(seenMs)) {
-    return false;
-  }
-  return nowMs - seenMs <= staleMs;
+  // Negative age = server-side skew between the write and the read; treat as
+  // fresh (the buyer just registered).
+  return ageMs <= staleMs;
 }
 
 // True when a summary is a PRODUCT purchase (has a productId). Single-use orders

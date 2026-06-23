@@ -43,6 +43,25 @@ const MAX_ADDRESS_LENGTH = 512;
 let bindingsLock: Promise<void> = Promise.resolve();
 let diversifierLock: Promise<void> = Promise.resolve();
 
+// Thrown when an address is already bound to a DIFFERENT order — a derivation
+// collision that, if silently bound, would misattribute a buyer's real ZEC to
+// another order (paid, no file, no refund). The caller rederives at a higher
+// diversifier index on this error.
+export class DepositAddressCollisionError extends Error {
+  readonly code = "DEPOSIT_ADDRESS_COLLISION";
+  constructor(
+    readonly address: string,
+    readonly existingOrderId: string,
+  ) {
+    super("Deposit address already bound to another order");
+    this.name = "DepositAddressCollisionError";
+  }
+}
+
+export function isDepositAddressCollision(error: unknown): boolean {
+  return error instanceof DepositAddressCollisionError;
+}
+
 export async function bindOrderDeposit(
   orderId: string,
   input: {
@@ -70,6 +89,15 @@ export async function bindOrderDeposit(
     if (existing) {
       // Idempotent: the same order keeps its first binding.
       return existing;
+    }
+    // Uniqueness guard: never bind one address to two orders. A diversifier
+    // collision would otherwise be bound silently and the deposit webhook would
+    // credit only the FIRST order — the other buyer pays with no file/refund.
+    const addressClash = file.bindings.find(
+      (entry) => entry.address === address,
+    );
+    if (addressClash) {
+      throw new DepositAddressCollisionError(address, addressClash.orderId);
     }
     const binding: DepositBinding = {
       orderId,
@@ -134,6 +162,32 @@ export async function nextDiversifierIndex(sellerId: string): Promise<number> {
     };
     await writeDiversifiers(updated);
     return next;
+  });
+}
+
+// Advance the per-seller high-water mark to AT LEAST `atLeastNext`. The scanner
+// returns the next VALID diversified address at/after the requested index, so the
+// actual index used is frequently GREATER than requested (Sapling diversifiers
+// are valid only ~half the time). Reconciling the mark to actualIndex+1 after
+// each derivation stops a later order from requesting an index that re-derives a
+// prior order's address (which would misattribute that buyer's payment).
+// Monotonic + idempotent: never lowers the mark.
+export async function reconcileDiversifierMark(
+  sellerId: string,
+  atLeastNext: number,
+): Promise<void> {
+  validateSellerId(sellerId);
+  const floor = requireNonNegativeInteger(atLeastNext, "atLeastNext");
+  await withDiversifierLock(async () => {
+    const file = await readDiversifiers();
+    const current = file.marks[sellerId] ?? 0;
+    if (current >= floor) {
+      return;
+    }
+    await writeDiversifiers({
+      schema: "paidprivatefile.diversifier-marks.v1",
+      marks: { ...file.marks, [sellerId]: floor },
+    });
   });
 }
 

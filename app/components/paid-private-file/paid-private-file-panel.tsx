@@ -222,10 +222,12 @@ interface SellerFile {
   // still "Delivering"/"Awaiting delivery". Optional so older API responses (and
   // orders with no session yet) degrade to the bare status label.
   nymSessionStatus?: string | null;
-  // Last buyer heartbeat (Nym session re-registration). The delivery queue uses
-  // its freshness to skip a buyer that has gone away (closed tab) so an abandoned
-  // purchase never head-of-line-blocks the queue. Null when never registered.
+  // Last buyer heartbeat, ISO (diagnostic only).
   nymSessionUpdatedAt?: string | null;
+  // SERVER-computed age (ms) of the last buyer heartbeat. The delivery queue uses
+  // it to skip a buyer that has gone away (closed tab) without comparing the
+  // seller's local clock to a server timestamp (which clock skew would corrupt).
+  nymSessionAgeMs?: number | null;
   // Provenance of a completed delivery: how this order's file reached the buyer.
   // "nym" = streamed over the mixnet; "https" = the Nym fallback fetch; null for
   // orders delivered before the field existed (degrades to a bare "Delivered").
@@ -3332,15 +3334,16 @@ export function PaidPrivateFilePanel({
     async function deliverNext() {
       // Pick the single next purchase to deliver (null when one is in flight or
       // nothing is deliverable). hasReleaseDraft is the localStorage probe.
-      const nowMs = Date.now();
       const next = selectNextPurchaseToDeliver({
         summaries: sellerFiles,
         inFlightOrderId: productDeliveryInFlightRef.current,
         hasReleaseDraft: (productId) =>
           Boolean(loadProductReleaseDraft(productId)),
         // Skip a buyer whose heartbeat has gone stale (closed tab) so an abandoned
-        // purchase never head-of-line-blocks the buyers behind it in the queue.
-        isBuyerPresent: (s) => isBuyerPresent(s, nowMs),
+        // purchase never head-of-line-blocks the buyers behind it. Presence uses
+        // the SERVER-computed age (nymSessionAgeMs) — not the seller's local clock
+        // — so clock skew can't wrongly skip a present, paying buyer.
+        isBuyerPresent: (s) => isBuyerPresent(s),
       });
       if (!next || !active) {
         return;

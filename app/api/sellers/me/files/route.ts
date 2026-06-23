@@ -19,6 +19,8 @@ export async function GET(request: Request) {
   try {
     const seller = await requireSellerFromRequest(request);
     const orders = await listOrdersForSeller(seller.sellerId);
+    // Single server-clock reference for all per-row heartbeat ages below.
+    const nowMs = Date.now();
     const files = orders.map((order) => ({
       orderId: order.orderId,
       fileName: order.file.fileName,
@@ -35,10 +37,15 @@ export async function GET(request: Request) {
       // it to show "Delivered" only after the buyer's pure-Nym ack, not the
       // moment the buyer merely claimed the ciphertext URL.
       nymSessionStatus: order.delivery.nymSession?.status ?? null,
-      // Last buyer heartbeat (Nym session re-registration). The dashboard's
-      // delivery queue uses its freshness to skip a buyer that has gone away so
-      // an abandoned purchase never head-of-line-blocks the sequential queue.
+      // Last buyer heartbeat (ISO, diagnostic).
       nymSessionUpdatedAt: order.delivery.nymSession?.updatedAt ?? null,
+      // SERVER-computed age (ms) of the last buyer heartbeat. The dashboard's
+      // delivery queue uses it to skip a buyer that has gone away — computed on
+      // the server clock so the seller's local clock skew can't wrongly skip a
+      // present, paying buyer (both ends of the comparison are server time).
+      nymSessionAgeMs: order.delivery.nymSession?.updatedAt
+        ? Math.max(0, nowMs - Date.parse(order.delivery.nymSession.updatedAt))
+        : null,
       // Provenance of a completed delivery: "nym" | "https" | null. Lets the
       // dashboard show how each order was delivered (pitch value). Null for
       // orders delivered before this field existed.

@@ -6,10 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   bindOrderDeposit,
+  DepositAddressCollisionError,
   findBindingByAddress,
   findOrderIdByBoundAddress,
+  isDepositAddressCollision,
   listBoundOrderIds,
   nextDiversifierIndex,
+  reconcileDiversifierMark,
 } from "../lib/server/deposit-bindings";
 import { findOrderIdForDeposit } from "../lib/server/transfer-store";
 
@@ -54,6 +57,48 @@ describe("deposit bindings", () => {
   it("returns null for an unknown address", async () => {
     expect(await findOrderIdByBoundAddress(ADDRESS_A)).toBeNull();
     expect(await findBindingByAddress(ADDRESS_A)).toBeNull();
+  });
+
+  it("rejects binding one address to a SECOND order (collision guard)", async () => {
+    await bindOrderDeposit(ORDER_A, {
+      address: ADDRESS_A,
+      sellerId: SELLER_A,
+      diversifierIndex: 3,
+      startHeight: 0,
+    });
+    // A different order deriving the SAME address must be rejected, not silently
+    // bound (which would misattribute that buyer's payment to ORDER_A).
+    let caught: unknown;
+    try {
+      await bindOrderDeposit(ORDER_B, {
+        address: ADDRESS_A,
+        sellerId: SELLER_A,
+        diversifierIndex: 3,
+        startHeight: 0,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(DepositAddressCollisionError);
+    expect(isDepositAddressCollision(caught)).toBe(true);
+    // The original binding is untouched.
+    expect(await findOrderIdByBoundAddress(ADDRESS_A)).toBe(ORDER_A);
+  });
+
+  it("is idempotent for the SAME order (no collision on its own address)", async () => {
+    const first = await bindOrderDeposit(ORDER_A, {
+      address: ADDRESS_A,
+      sellerId: SELLER_A,
+      diversifierIndex: 3,
+      startHeight: 0,
+    });
+    const again = await bindOrderDeposit(ORDER_A, {
+      address: ADDRESS_A,
+      sellerId: SELLER_A,
+      diversifierIndex: 3,
+      startHeight: 0,
+    });
+    expect(again).toEqual(first);
   });
 
   it("findOrderIdForDeposit resolves a binding (and still resolves pool entries)", async () => {
@@ -115,5 +160,32 @@ describe("nextDiversifierIndex", () => {
 
     // And the next index continues from the persisted mark.
     expect(await nextDiversifierIndex(SELLER_A)).toBe(3);
+  });
+});
+
+describe("reconcileDiversifierMark", () => {
+  it("advances the mark past the scanner's actual index so the next order can't collide", async () => {
+    // Order 1 requests index 1 but the scanner returns actualIndex 5 (skipped
+    // invalid diversifiers). Reconciling to actualIndex+1 must push the mark to 6,
+    // so the NEXT order requests 6 — never 2..5, which could re-derive order 1's
+    // address.
+    expect(await nextDiversifierIndex(SELLER_A)).toBe(1);
+    await reconcileDiversifierMark(SELLER_A, 5 + 1);
+    expect(await nextDiversifierIndex(SELLER_A)).toBe(7);
+  });
+
+  it("is monotonic — never lowers the mark", async () => {
+    await nextDiversifierIndex(SELLER_A); // mark = 1
+    await nextDiversifierIndex(SELLER_A); // mark = 2
+    await nextDiversifierIndex(SELLER_A); // mark = 3
+    // A reconcile to a LOWER floor is a no-op.
+    await reconcileDiversifierMark(SELLER_A, 2);
+    expect(await nextDiversifierIndex(SELLER_A)).toBe(4);
+  });
+
+  it("is per-seller", async () => {
+    await reconcileDiversifierMark(SELLER_A, 10);
+    expect(await nextDiversifierIndex(SELLER_B)).toBe(1);
+    expect(await nextDiversifierIndex(SELLER_A)).toBe(11);
   });
 });

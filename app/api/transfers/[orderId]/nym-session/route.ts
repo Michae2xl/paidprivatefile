@@ -26,16 +26,22 @@ interface NymSessionResponse {
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  const throttled = enforceRateLimit(
-    request,
-    "transfers/nym-session",
-    RATE_LIMIT,
-  );
-  if (throttled) return throttled;
-
   try {
-    const body = await readLimitedJsonObject(request, MAX_BODY_BYTES);
     const { orderId } = await context.params;
+    // Per-ORDER rate limit. A global "transfers/nym-session" bucket is shared by
+    // every buyer (behind a proxy the client key collapses to one), so at ~5
+    // concurrent buyers their ~8s heartbeats saturate the 40/min budget and the
+    // next buyer's re-registration 429s — the seller's delivery queue then sees a
+    // stale address and skips that PAID buyer. Scoping by orderId gives each buyer
+    // its own budget so concurrent buyers never collide.
+    const throttled = enforceRateLimit(
+      request,
+      `transfers/nym-session:${orderId}`,
+      RATE_LIMIT,
+    );
+    if (throttled) return throttled;
+
+    const body = await readLimitedJsonObject(request, MAX_BODY_BYTES);
     const registered = await registerNymSessionForOrder(orderId, {
       buyerNymAddress: requireString(body.buyerNymAddress, "buyerNymAddress"),
       transport:

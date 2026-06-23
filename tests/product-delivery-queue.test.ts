@@ -170,36 +170,30 @@ describe("selectNextPurchaseToDeliver", () => {
 });
 
 describe("isBuyerPresent", () => {
-  const now = 1_000_000_000_000;
-
-  it("is true within the staleness window, false past it", () => {
-    const fresh = summary({
-      orderId: "pl_a",
-      nymSessionUpdatedAt: new Date(now - 8_000).toISOString(),
-    });
-    const stale = summary({
-      orderId: "pl_b",
-      nymSessionUpdatedAt: new Date(
-        now - BUYER_PRESENCE_STALE_MS - 1_000,
-      ).toISOString(),
-    });
-    expect(isBuyerPresent(fresh, now)).toBe(true);
-    expect(isBuyerPresent(stale, now)).toBe(false);
-  });
-
-  it("is false when the buyer never registered or the timestamp is invalid", () => {
-    expect(isBuyerPresent(summary({ orderId: "pl_a" }), now)).toBe(false);
+  it("is true within the staleness window, false past it (server-computed age)", () => {
+    expect(
+      isBuyerPresent(summary({ orderId: "pl_a", nymSessionAgeMs: 8_000 })),
+    ).toBe(true);
     expect(
       isBuyerPresent(
-        summary({ orderId: "pl_a", nymSessionUpdatedAt: null }),
-        now,
+        summary({
+          orderId: "pl_b",
+          nymSessionAgeMs: BUYER_PRESENCE_STALE_MS + 1_000,
+        }),
       ),
     ).toBe(false);
+  });
+
+  it("treats a negative age (server write/read skew) as present", () => {
     expect(
-      isBuyerPresent(
-        summary({ orderId: "pl_a", nymSessionUpdatedAt: "not-a-date" }),
-        now,
-      ),
+      isBuyerPresent(summary({ orderId: "pl_a", nymSessionAgeMs: -500 })),
+    ).toBe(true);
+  });
+
+  it("is false when the buyer never registered (no age)", () => {
+    expect(isBuyerPresent(summary({ orderId: "pl_a" }))).toBe(false);
+    expect(
+      isBuyerPresent(summary({ orderId: "pl_a", nymSessionAgeMs: null })),
     ).toBe(false);
   });
 });
