@@ -228,6 +228,10 @@ interface SellerFile {
   // it to skip a buyer that has gone away (closed tab) without comparing the
   // seller's local clock to a server timestamp (which clock skew would corrupt).
   nymSessionAgeMs?: number | null;
+  // Buyer-reported file bytes received so far. The delivery queue watches this
+  // for advancement to demote a present-but-stuck buyer (heartbeats but never
+  // receives) without penalizing a slow-but-progressing one.
+  nymSessionReceivedBytes?: number | null;
   // Provenance of a completed delivery: how this order's file reached the buyer.
   // "nym" = streamed over the mixnet; "https" = the Nym fallback fetch; null for
   // orders delivered before the field existed (degrades to a bare "Delivered").
@@ -383,6 +387,12 @@ type BrowserNymStatus = "idle" | "starting" | "ready" | "waiting" | "error";
 // RESEND_MAX_ATTEMPTS (~6s × 20 ≈ 2 min).
 const RESEND_INTERVAL_MS = 6000;
 const RESEND_MAX_ATTEMPTS = 20;
+
+// Sequential delivery queue: how long a head buyer's reported received-bytes may
+// sit UNCHANGED (present/heartbeating but stuck) before the queue demotes it
+// behind the others. Generous so a transient mixnet pause on a slow-but-still-
+// advancing transfer never trips it — only a genuinely stuck buyer does.
+const DELIVERY_STUCK_DEMOTE_MS = 90_000;
 
 // Multi-buyer "product" model (Phase 3c): how often the buyer-listing view
 // re-fetches a LIMITED product so it flips to sold-out without a manual reload.
@@ -659,6 +669,14 @@ export function PaidPrivateFilePanel({
   // the next tick; dashboardDelivering powers the subtle "Delivering over Nym…"
   // indicator on the affected file rows.
   const dashboardResendInFlightRef = useRef<Set<string>>(new Set());
+  // Per-head delivery-progress tracker for the queue's stuck-buyer demotion:
+  // orderId -> { bytes: last buyer-reported received-bytes, since: when it last
+  // advanced }. A head whose bytes sit unchanged past DELIVERY_STUCK_DEMOTE_MS is
+  // rotated behind the others; a buyer that keeps advancing resets `since` and is
+  // never demoted (so a slow-but-progressing transfer is safe).
+  const headDeliveryProgressRef = useRef<
+    Map<string, { bytes: number; since: number }>
+  >(new Map());
   const [dashboardDelivering, setDashboardDelivering] = useState<Set<string>>(
     () => new Set(),
   );
@@ -1750,6 +1768,12 @@ export function PaidPrivateFilePanel({
       explicitNymAddress?.trim() ||
       buyerNymAddress.trim() ||
       (await startBrowserNym());
+    // Report how many file bytes this receiver has actually got. The seller's
+    // delivery queue uses it to tell a slow-but-PROGRESSING buyer apart from a
+    // present-but-STUCK one (heartbeats yet never receives): only the latter is
+    // demoted, so one stuck buyer can't head-of-line-block the others.
+    const receivedBytes =
+      buyerProgressRef.current.get(order.orderId)?.received ?? 0;
     await postJson<{ order: TransferPublicOrder }>(
       `/api/transfers/${encodeURIComponent(order.orderId)}/nym-session`,
       {
@@ -1759,6 +1783,7 @@ export function PaidPrivateFilePanel({
           buyerNymAddress: nymAddress,
           buyerPublicKeyJwk: keyPair.publicJwk,
           transport: order.delivery.requiredTransport,
+          receivedBytes,
         }),
       },
     );
@@ -3332,6 +3357,27 @@ export function PaidPrivateFilePanel({
     let active = true;
 
     async function deliverNext() {
+      const now = Date.now();
+      // Refresh stuck-tracking: for each head we're watching, if the buyer's
+      // reported received-bytes ADVANCED, reset its "stuck since" clock; drop
+      // tracking for delivered/gone orders so the map stays bounded. A buyer that
+      // keeps progressing (even slowly) never goes stale; only one whose bytes sit
+      // unchanged for DELIVERY_STUCK_DEMOTE_MS does.
+      const fileByOrder = new Map(
+        sellerFiles.map((file) => [file.orderId, file]),
+      );
+      for (const [orderId, tracked] of headDeliveryProgressRef.current) {
+        const file = fileByOrder.get(orderId);
+        if (!file || file.nymSessionStatus === "delivered") {
+          headDeliveryProgressRef.current.delete(orderId);
+          continue;
+        }
+        const bytes = file.nymSessionReceivedBytes ?? 0;
+        if (bytes > tracked.bytes) {
+          headDeliveryProgressRef.current.set(orderId, { bytes, since: now });
+        }
+      }
+
       // Pick the single next purchase to deliver (null when one is in flight or
       // nothing is deliverable). hasReleaseDraft is the localStorage probe.
       const next = selectNextPurchaseToDeliver({
@@ -3344,9 +3390,26 @@ export function PaidPrivateFilePanel({
         // the SERVER-computed age (nymSessionAgeMs) — not the seller's local clock
         // — so clock skew can't wrongly skip a present, paying buyer.
         isBuyerPresent: (s) => isBuyerPresent(s),
+        // Demote a PRESENT but STUCK head (heartbeats yet received-bytes haven't
+        // advanced for DELIVERY_STUCK_DEMOTE_MS) so it can't block the buyers
+        // behind it. A slow-but-advancing buyer resets its clock above and is
+        // never demoted; a demoted buyer is still retried when it's the only one.
+        isDeprioritized: (s) => {
+          const tracked = headDeliveryProgressRef.current.get(s.orderId);
+          return Boolean(
+            tracked && now - tracked.since > DELIVERY_STUCK_DEMOTE_MS,
+          );
+        },
       });
       if (!next || !active) {
         return;
+      }
+      // Start watching this head's progress so a future stall can demote it.
+      if (!headDeliveryProgressRef.current.has(next.orderId)) {
+        headDeliveryProgressRef.current.set(next.orderId, {
+          bytes: fileByOrder.get(next.orderId)?.nymSessionReceivedBytes ?? 0,
+          since: now,
+        });
       }
       productDeliveryInFlightRef.current = next.orderId;
       setDashboardDelivering((current) => {

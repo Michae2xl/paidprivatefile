@@ -46,6 +46,11 @@ export async function GET(request: Request) {
       nymSessionAgeMs: order.delivery.nymSession?.updatedAt
         ? Math.max(0, nowMs - Date.parse(order.delivery.nymSession.updatedAt))
         : null,
+      // Buyer-reported bytes received so far. The delivery queue watches this
+      // for ADVANCEMENT to tell a slow-but-progressing buyer from a stuck one
+      // (so a stuck head doesn't block the buyers behind it).
+      nymSessionReceivedBytes:
+        order.delivery.nymSession?.buyerReceivedBytes ?? null,
       // Provenance of a completed delivery: "nym" | "https" | null. Lets the
       // dashboard show how each order was delivered (pitch value). Null for
       // orders delivered before this field existed.

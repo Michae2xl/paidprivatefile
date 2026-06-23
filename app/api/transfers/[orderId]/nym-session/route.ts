@@ -49,6 +49,7 @@ export async function POST(request: Request, context: RouteContext) {
           ? "nym-transfer-v1"
           : "nym-claim-v1",
       buyerPublicKeyJwk: requireJsonWebKey(body.buyerPublicKeyJwk),
+      receivedBytes: optionalNonNegativeInt(body.receivedBytes),
     });
 
     return NextResponse.json<NymSessionResponse>(registered);
@@ -62,6 +63,15 @@ function requireString(value: unknown, field: string): string {
     throw new ServerError("validation", `Missing required field: ${field}`);
   }
   return value;
+}
+
+// Buyer-reported received-bytes counter (optional, untrusted): clamp to a safe
+// non-negative integer; anything malformed degrades to 0 (treated as "no progress
+// reported"), never throws — a bad value must not block re-registration.
+function optionalNonNegativeInt(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : 0;
 }
 
 function requireJsonWebKey(value: unknown): JsonWebKey {

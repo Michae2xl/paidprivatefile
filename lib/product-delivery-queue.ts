@@ -35,6 +35,10 @@ export interface DeliverableSummary {
   // seller browser's Date.now() against a server timestamp would wrongly skip a
   // present buyer under clock skew. Null when never registered.
   nymSessionAgeMs?: number | null;
+  // Buyer-reported file bytes received so far. The queue watches this for
+  // ADVANCEMENT (tracked by the caller across ticks) to demote a present-but-
+  // stuck buyer without penalizing a slow-but-progressing one.
+  nymSessionReceivedBytes?: number | null;
 }
 
 // A buyer is PRESENT if its Nym session was (re)registered within this window.
@@ -111,6 +115,12 @@ export function selectNextPurchaseToDeliver(args: {
   // (no recent heartbeat) so an abandoned tab never head-of-line-blocks the
   // queue. When omitted, every purchase is treated as present (back-compat).
   isBuyerPresent?: (summary: DeliverableSummary) => boolean;
+  // Optional demotion gate: a buyer that is PRESENT (heartbeating) but STUCK
+  // (received-bytes not advancing) is rotated to the back so the buyers behind it
+  // get served; it is still retried when it is the only candidate left. The
+  // caller decides "stuck" by tracking received-bytes advancement across ticks,
+  // so a slow-but-progressing buyer is never demoted. Omitted = nobody demoted.
+  isDeprioritized?: (summary: DeliverableSummary) => boolean;
 }): DeliverableSummary | null {
   const pending = pendingPurchases(args.summaries);
 
@@ -122,16 +132,26 @@ export function selectNextPurchaseToDeliver(args: {
     return null;
   }
 
-  for (const summary of pending) {
-    // productId is guaranteed by isProductPurchase, but narrow for the type.
-    if (!summary.productId || !args.hasReleaseDraft(summary.productId)) {
-      continue;
-    }
-    // Skip an absent buyer (gone tab) so it does not block the buyers behind it.
-    if (args.isBuyerPresent && !args.isBuyerPresent(summary)) {
-      continue;
-    }
-    return summary;
+  const deliverable = pending.filter(
+    (summary) =>
+      // productId is guaranteed by isProductPurchase, but narrow for the type.
+      Boolean(summary.productId) &&
+      args.hasReleaseDraft(summary.productId as string) &&
+      // Skip an absent buyer (gone tab) so it doesn't block the queue.
+      (!args.isBuyerPresent || args.isBuyerPresent(summary)),
+  );
+  if (deliverable.length === 0) {
+    return null;
   }
-  return null;
+  // Prefer a non-stuck buyer; fall back to the first deliverable (retry the
+  // stuck one) only when every candidate is deprioritized.
+  if (args.isDeprioritized) {
+    const fresh = deliverable.find(
+      (summary) => !args.isDeprioritized?.(summary),
+    );
+    if (fresh) {
+      return fresh;
+    }
+  }
+  return deliverable[0];
 }

@@ -88,6 +88,10 @@ export interface TransferNymSession {
   createdAt: string;
   updatedAt: string;
   lastDelivery?: NymDeliveryReceipt;
+  // Buyer-reported file bytes received so far (heartbeat). The seller's delivery
+  // queue uses its advancement to tell a slow-but-progressing buyer from a
+  // present-but-stuck one. Optional/back-compat: missing means "not reported".
+  buyerReceivedBytes?: number;
   // Provenance of the completed delivery (proves the transfer path to the
   // seller). Optional + backward-compatible: missing means "unknown path".
   deliveredVia?: TransferDeliveredVia | null;
@@ -738,6 +742,9 @@ export async function registerNymSessionForOrder(
     buyerNymAddress: string;
     transport?: NymTransportMode;
     buyerPublicKeyJwk: JsonWebKey;
+    // Buyer-reported count of file bytes received so far (heartbeat). Lets the
+    // seller's queue tell a slow-but-progressing buyer from a stuck one.
+    receivedBytes?: number;
   },
 ): Promise<{
   order: TransferPublicOrder;
@@ -773,6 +780,10 @@ export async function registerNymSessionForOrder(
       createdAt: order.delivery.nymSession?.createdAt ?? now,
       updatedAt: now,
       lastDelivery: order.delivery.nymSession?.lastDelivery,
+      buyerReceivedBytes:
+        input.receivedBytes ??
+        order.delivery.nymSession?.buyerReceivedBytes ??
+        0,
     };
     order.updatedAt = now;
     await writeOrder(order);

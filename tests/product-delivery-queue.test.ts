@@ -167,6 +167,27 @@ describe("selectNextPurchaseToDeliver", () => {
     });
     expect(next?.orderId).toBe("pl_a");
   });
+
+  it("demotes a present-but-stuck head behind a non-stuck buyer", () => {
+    // pl_a is heartbeating but stuck (deprioritized); pl_b is fine → serve pl_b.
+    const next = selectNextPurchaseToDeliver({
+      summaries: [summary({ orderId: "pl_a" }), summary({ orderId: "pl_b" })],
+      inFlightOrderId: null,
+      hasReleaseDraft: hasDraft,
+      isDeprioritized: (s) => s.orderId === "pl_a",
+    });
+    expect(next?.orderId).toBe("pl_b");
+  });
+
+  it("still retries the stuck buyer when it is the only candidate", () => {
+    const next = selectNextPurchaseToDeliver({
+      summaries: [summary({ orderId: "pl_a" })],
+      inFlightOrderId: null,
+      hasReleaseDraft: hasDraft,
+      isDeprioritized: () => true,
+    });
+    expect(next?.orderId).toBe("pl_a");
+  });
 });
 
 describe("isBuyerPresent", () => {
