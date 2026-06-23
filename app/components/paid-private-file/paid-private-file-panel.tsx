@@ -2003,6 +2003,18 @@ export function PaidPrivateFilePanel({
       orderId: input.orderId,
       keyEnvelope: input.keyEnvelope,
     });
+    // Diagnostic: the recipient we send the key to + our own address. Compare the
+    // recipient with the buyer's "PPF-NYM-DIAG buyer" register address — if they
+    // differ, the seller is sending to a dead address (the ENVELOPES-0 signature).
+    console.info(
+      "PPF-NYM-DIAG",
+      JSON.stringify({
+        side: "seller",
+        orderId: input.orderId,
+        recipient: shortNymAddress(input.buyerNymAddress),
+        self: shortNymAddress((await client.client.selfAddress()) ?? ""),
+      }),
+    );
     await client.client.send({
       payload: { message, mimeType: "application/json" },
       recipient: input.buyerNymAddress,
@@ -3476,9 +3488,33 @@ export function PaidPrivateFilePanel({
           nymStatus === "idle"
         ) {
           liveAddress = await startBrowserNym();
+        } else {
+          // Confirm the address the client is ACTUALLY listening on rather than
+          // trusting the React state, which can go stale if the SDK migrated the
+          // gateway/address while status stayed "ready". Registering the live
+          // selfAddress() keeps the seller's recipient in sync with this receiver
+          // and self-heals a transient address change, preventing a permanent
+          // ENVELOPES-0 stall (the seller would otherwise keep sending to a dead
+          // address). Falls back to the state address if selfAddress() is briefly
+          // empty (preserves prior behavior).
+          liveAddress =
+            (await browserNymClientRef.current.client.selfAddress()) ?? "";
         }
         if (!active) {
           return;
+        }
+        if (liveAddress) {
+          // Diagnostic: the address this receiver registers each tick. Compare with
+          // the seller's "PPF-NYM-DIAG seller" recipient to spot an address mismatch
+          // (the ENVELOPES-0 signature) in one glance.
+          console.info(
+            "PPF-NYM-DIAG",
+            JSON.stringify({
+              side: "buyer",
+              orderId,
+              register: shortNymAddress(liveAddress),
+            }),
+          );
         }
         // (b) Re-register the buyer's CURRENT live Nym address with the order so
         // order.delivery.nymSession.buyerNymAddress always equals the address
