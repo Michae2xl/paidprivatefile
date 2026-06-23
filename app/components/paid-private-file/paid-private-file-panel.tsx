@@ -2244,13 +2244,14 @@ export function PaidPrivateFilePanel({
         client.client.rawSend({ payload, recipient }).catch(() => undefined),
       {
         expectedSha256: order.file.encryptedFileSha256,
-        // Size-aware hard cap: a large file (e.g. ~50 MB ≈ 18 min ideal, longer
-        // with retransmits) must not hit a flat 10 min default and abort onto the
-        // HTTPS fallback mid-transfer. Scales to ~the file's expected drain time,
-        // floored at 10 min and capped at 60 min.
-        overallTimeoutMs: computeNymReceiveTimeoutMs(
-          order.file.encryptedSizeBytes,
-        ),
+        // With HTTPS fallback OFF (current default), let the transfer finish in
+        // its own time over Nym — a very long bound, NOT the size-aware fallback
+        // cap, so a slow large file is never aborted. When the fallback is later
+        // re-enabled (behind buyer consent), the size-aware cap decides when to
+        // offer HTTPS instead.
+        overallTimeoutMs: BROWSER_NYM_HTTPS_FALLBACK_ENABLED
+          ? computeNymReceiveTimeoutMs(order.file.encryptedSizeBytes)
+          : NYM_RECEIVE_NO_FALLBACK_TIMEOUT_MS,
         onProgress: (received, total) => {
           // Record forward progress for the stall-aware fallback timer: stamp the
           // time + latest counts so a healthy slow transfer keeps re-arming the
@@ -2364,6 +2365,12 @@ export function PaidPrivateFilePanel({
   // we abandon the Nym receiver and fetch over HTTPS. Re-arming is a no-op so a
   // burst of re-sent key envelopes does not stack timers.
   function armBuyerHttpsFallback(order: TransferPublicOrder): void {
+    // HTTPS fallback is OFF for now (100% Nym; never expose the buyer IP). Do not
+    // arm the stall timer — let the receiver keep asking for missing chunks until
+    // the transfer completes in its own time.
+    if (!BROWSER_NYM_HTTPS_FALLBACK_ENABLED) {
+      return;
+    }
     if (buyerFallbackTimerRef.current.has(order.orderId)) {
       return;
     }
@@ -2423,6 +2430,13 @@ export function PaidPrivateFilePanel({
   // out or the key is not yet in hand. No-op once the file has arrived.
   async function buyerHttpsFallback(order: TransferPublicOrder): Promise<void> {
     clearBuyerHttpsFallback(order.orderId);
+    // HTTPS fallback is OFF for now: stay 100% on the Nym mixnet so the buyer's
+    // IP is never exposed to the server. A large/slow transfer is allowed to
+    // finish in its own time (the receiver runs with a very long bound and keeps
+    // asking for missing chunks). Re-enable later behind explicit buyer consent.
+    if (!BROWSER_NYM_HTTPS_FALLBACK_ENABLED) {
+      return;
+    }
     if (buyerReceivedRef.current || downloadUrl) {
       return;
     }
@@ -6465,12 +6479,24 @@ function browserNymFileTransferEnabled(): boolean {
   );
 }
 
-// No-PROGRESS stall window: the buyer abandons the Nym file transfer for the
-// HTTPS fetch only after this long with zero forward progress. It is RE-ARMED on
-// every chunk (armBuyerHttpsFallback), so a healthy slow transfer of a large
-// file never trips it — only a genuine stall does. Sized generously (5 min) so a
-// transient mixnet pause or gateway hiccup doesn't yank a live transfer onto the
-// fallback prematurely; the receiver's size-aware overall cap is the hard limit.
+// Master switch for the HTTPS file fallback. OFF for now: the file is delivered
+// 100% over the Nym mixnet so the buyer's IP is never exposed to the server
+// (HTTPS would reveal who downloaded what, when — the file stays encrypted, but
+// the network metadata leaks). A large/slow transfer is allowed to finish in its
+// own time. When re-enabled it should be LAST-RESORT and behind explicit buyer
+// consent (a clear notice that their IP becomes visible), never silent.
+const BROWSER_NYM_HTTPS_FALLBACK_ENABLED = false;
+
+// Overall receive bound when the HTTPS fallback is OFF: generous enough that even
+// a slow large transfer (e.g. ~50 MB at a congested ~5 KiB/s ≈ 2.7 h) finishes on
+// Nym rather than being aborted. Not a fallback trigger — just a sanity ceiling.
+const NYM_RECEIVE_NO_FALLBACK_TIMEOUT_MS = 6 * 60 * 60 * 1000; // 6 h
+
+// No-PROGRESS stall window used ONLY when the HTTPS fallback is enabled: the buyer
+// abandons the Nym transfer for the HTTPS fetch after this long with zero forward
+// progress. Re-armed on every chunk (armBuyerHttpsFallback), so a healthy slow
+// transfer never trips it — only a genuine stall does. Inert while the fallback
+// is off (armBuyerHttpsFallback early-returns).
 const BROWSER_NYM_FILE_FALLBACK_MS = 300_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
