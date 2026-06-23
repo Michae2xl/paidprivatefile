@@ -2,6 +2,13 @@
   "name": "paidprivatefile",
   "version": "0.1.0",
   "private": true,
+  "description": "Non-custodial marketplace: sell an encrypted file for ZEC; the key and file are delivered browser-to-browser over the Nym mixnet and decrypted only on the buyer's device.",
+  "license": "MIT",
+  "homepage": "https://paidprivatefile.zkglobalcredit.tech/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Michae2xl/paidprivatefile.git"
+  },
   "engines": {
     "node": ">=20.9.0"
   },

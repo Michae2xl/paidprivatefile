@@ -42,7 +42,7 @@ The app never sees a seller's viewing key after registration — it holds only a
 
 ## Where Nym enters — THE KEY CHANGE
 
-In earlier versions Nym carried only the wrapped key (`nym-claim-v1`), and the encrypted file was always fetched over HTTPS. **Now both the wrapped decryption key and the encrypted file are delivered browser-to-browser over the mixnet, seller browser → buyer browser.** HTTPS is retained only as an automatic fallback.
+In earlier versions Nym carried only the wrapped key (`nym-claim-v1`), and the encrypted file was always fetched over HTTPS. **Now both the wrapped decryption key and the encrypted file are delivered browser-to-browser over the mixnet, seller browser → buyer browser.** Delivery is **100% over the mixnet** — the HTTPS fallback is **disabled by default** (see [HTTPS fallback](#https-fallback-disabled-by-default)).
 
 Transport modes still labelled in the order state:
 
@@ -137,22 +137,36 @@ A clean-room, framework-agnostic reliable-bytes layer over the SDK's binary `raw
 - **Reorder buffer.** The receiver stores chunks in a `Map<seq, bytes>` and reassembles order-independently.
 - **Selective retransmit / ARQ.** After a silence gap (`DEFAULT_GAP_TIMEOUT_MS = 30s`), or immediately on `Done`, the receiver sends a `Retransmit{seq}` for its first missing chunk to the sender's address. The sender re-streams that chunk plus a small forward window (`DEFAULT_RETRANSMIT_WINDOW = 4`), single-flight so overlapping requests are coalesced rather than self-amplifying.
 - **Integrity.** A SHA-256 over the whole ciphertext is pinned in the `Offer` and re-verified after reassembly, and also checked against the order's `encryptedFileSha256`. A mismatch rejects.
-- **Completion.** On a verified reassembly the receiver sends `Ack`; the sender's `done()` resolves on the Ack (with an ack timeout). The receiver has its own overall ceiling (`overallTimeoutMs`, default 600s).
+- **Completion.** On a verified reassembly the receiver sends `Ack`; the sender's `done()` resolves on the Ack (with an ack timeout). With the HTTPS fallback off (the default), the receiver runs with a generous **6 h** overall ceiling (`NYM_RECEIVE_NO_FALLBACK_TIMEOUT_MS`) so even a slow, congested large transfer finishes over Nym rather than aborting.
 
 On the buyer side, the reassembled-and-verified ciphertext is decrypted with the key envelope received over the Nym **text** channel, reusing the exact same crypto path as the HTTPS claim — so the file opens locally either way.
 
-### HTTPS fallback
+### HTTPS fallback (disabled by default)
 
-The encrypted file is also uploaded to the server, so if the Nym file transfer stalls the buyer can fetch it over HTTPS via a short-lived signed URL (HMAC token, 10-min TTL) and decrypt locally. The fallback is a **no-progress stall timer** (~90s, `BROWSER_NYM_FILE_FALLBACK_MS`): it is re-armed on every receive-progress event, so a healthy-but-slow large transfer is never yanked off the Nym path mid-flight; it only aborts to HTTPS on a genuine stall. A provenance badge records the actual path: `received over Nym (mixnet)` vs `received over HTTPS (Nym fallback)`.
+The encrypted file is **also** uploaded to the server (it is the source for re-streaming and the `encryptedFileSha256` integrity check), so a buyer _could_ fetch it over HTTPS via a short-lived signed URL (HMAC token, 10-min TTL) and decrypt locally.
+
+**This HTTPS fallback is OFF by default** (`BROWSER_NYM_HTTPS_FALLBACK_ENABLED = false`). Fetching the ciphertext from the server would expose the buyer's IP and download timing to the server/network — metadata the mixnet exists to hide (the file _content_ stays encrypted either way). So delivery is 100% over Nym, and a slow transfer is allowed to finish in its own time under the 6 h receive ceiling instead of bailing to HTTPS. `buyerHttpsFallback`/`armBuyerHttpsFallback` early-return on the flag (a single choke point covering every call site, including the `receiver.done()` catch).
+
+The machinery is kept for a future **last-resort, consent-based** re-enable: if it returns it must be the buyer's explicit choice (a clear notice that their IP becomes visible), never silent — and the size-aware cap (`computeNymReceiveTimeoutMs`) would decide when to offer it. A provenance badge already distinguishes the path: `received over Nym (mixnet)` vs `received over HTTPS (Nym fallback)`.
+
+## Multi-buyer products (one link, many buyers)
+
+A **product** lets one link be sold to many buyers. The seller creates a product (file ciphertext + price + supply, keyed by `productId`); each buyer who opens the link gets their **own order** — a _purchase_ carrying `order.productId` — with its own per-order deposit address and its own Nym delivery. Supply is either **unlimited** or a **fixed quantity** that sells out at the cap. The product's release secret + ciphertext live in the seller's browser; every purchase is delivered from that one browser using the shared product release draft.
+
+Because all deliveries share the seller's single ~46 KiB/s Nym gateway, purchases are delivered **sequentially — one in flight at a time** (`lib/product-delivery-queue.ts`, `selectNextPurchaseToDeliver`; pure + unit-tested). Two rules keep one buyer from blocking the rest:
+
+- **Skip absent buyers.** Each buyer heartbeats its Nym session every ~8s; the server stamps `nymSession.updatedAt`. The queue skips a purchase whose **server-computed** heartbeat age (`nymSessionAgeMs`) exceeds `BUYER_PRESENCE_STALE_MS` (~40s) — a buyer who closed their tab. Server-computed on purpose: comparing the seller's local clock to a server timestamp would skip a present buyer under clock skew. A returning buyer re-enters once it heartbeats again.
+- **Demote present-but-stuck buyers.** The buyer also reports its received-byte count in the heartbeat. A present buyer whose bytes keep advancing (slow but progressing) is never demoted; one that is present yet makes **no progress** is rotated to the back so the buyers behind it get served — distinguishing "slow" from "stuck" without penalizing a legitimately slow transfer.
+
+Supply is reserved race-safely under a per-product lock. (A known follow-up: a reservation TTL so an abandoned _unpaid_ limited purchase reclaims its unit — see the audit notes.)
 
 ## Reliability mechanisms
 
-- **Seller re-send-until-acked.** While the seller dashboard (or manage screen) is open for a released, undelivered order whose secret this browser holds, the seller browser re-emits the wrapped key and re-streams the file every ~6s, up to a cap (~2 min), stopping the instant the buyer's ack flips the Nym session to `delivered`. Driven by both the manage screen and the dashboard files poll, so delivery completes with the seller just sitting on the dashboard.
-- **Buyer self-healing receiver.** A heartbeat re-bootstraps the Nym client and re-registers the live Nym address if the connection drops. A no-rotate guard prevents the client from rotating gateways (and orphaning in-flight chunks) mid-transfer.
+- **Seller re-send-until-acked.** While the seller dashboard (or manage screen) is open for a released, undelivered order whose secret this browser holds, the seller browser re-emits the wrapped key and re-streams the file every ~6s, up to a cap (~2 min), stopping the instant the buyer's ack flips the Nym session to `delivered`. The key re-send **pauses while the file is actively streaming** (the two would otherwise compete for the seller's single ~46 KiB/s gateway). Driven by both the manage screen and the dashboard files poll, so delivery completes with the seller just sitting on the dashboard.
+- **Buyer self-healing receiver.** A heartbeat (~8s) re-bootstraps the Nym client when the connection drops and re-registers the address the client is **actually listening on** (`selfAddress()`, not stale React state) so the seller's recipient stays in sync. A no-rotate guard prevents the client from rotating gateways (and orphaning in-flight chunks) mid-transfer. The heartbeat also reports the buyer's received-byte count (see the delivery queue below).
 - **Claim-on-demand.** The buyer can claim/re-claim at any point after payment; the signed ciphertext URL is refreshed if a stashed one expired.
 - **Status-only delivery ack.** `POST /api/transfers/:orderId/delivered` carries only the buyer public key (same auth as claim) plus `via: "nym" | "https"` — never key material. It flips the Nym session to `delivered` and records the delivery path. The buyer retries it until the server confirms.
-- **IndexedDB ciphertext persistence** (`lib/seller-ciphertext-store.ts`). Best-effort: the seller's encrypted bytes are persisted by orderId so file-over-Nym survives a reload/new session; any IndexedDB failure transparently degrades to in-memory + HTTPS fallback. Deleted once the buyer acks.
-- **Progress-aware HTTPS fallback.** Re-armed on transfer progress (see above).
+- **IndexedDB ciphertext persistence** (`lib/seller-ciphertext-store.ts`). Best-effort: the seller's encrypted bytes are persisted by orderId so file-over-Nym survives a reload/new session; any IndexedDB failure transparently degrades to in-memory. Deleted once the buyer acks.
 - **`Cache-Control: no-store`** on the `/paid-private-file` document (`next.config.ts`) so the dynamic page never serves stale JS chunks after a deploy. Hashed `/_next/static` chunks stay immutable-cached.
 - **Watchlist TTL.** Pending orders older than 24h drop off the scan watchlist.
 - **Webhook seller-mismatch → 200 ignored** (above), so a stale binding never spams error logs.
