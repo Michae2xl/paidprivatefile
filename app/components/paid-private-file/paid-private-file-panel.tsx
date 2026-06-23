@@ -6424,6 +6424,13 @@ export async function startAndAwaitNymAddress(
       process.env.NEXT_PUBLIC_NYM_API_URL ??
       "https://validator.nymtech.net/api",
     forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
+    // Always pick the FASTEST gateway: the SDK probes candidate gateways and
+    // selects the lowest-latency one instead of a random draw. This is the main
+    // lever we have on transfer speed (the mixnet rate is the bottleneck), so we
+    // pay a few seconds of probing at connect for a much better route. Opt out
+    // with NEXT_PUBLIC_NYM_LATENCY_SELECTION="0".
+    latencyBasedSelection:
+      process.env.NEXT_PUBLIC_NYM_LATENCY_SELECTION !== "0",
   });
 
   // selfAddress() can be empty until the gateway handshake completes, so poll
