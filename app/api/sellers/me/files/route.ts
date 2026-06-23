@@ -35,6 +35,10 @@ export async function GET(request: Request) {
       // it to show "Delivered" only after the buyer's pure-Nym ack, not the
       // moment the buyer merely claimed the ciphertext URL.
       nymSessionStatus: order.delivery.nymSession?.status ?? null,
+      // Last buyer heartbeat (Nym session re-registration). The dashboard's
+      // delivery queue uses its freshness to skip a buyer that has gone away so
+      // an abandoned purchase never head-of-line-blocks the sequential queue.
+      nymSessionUpdatedAt: order.delivery.nymSession?.updatedAt ?? null,
       // Provenance of a completed delivery: "nym" | "https" | null. Lets the
       // dashboard show how each order was delivered (pitch value). Null for
       // orders delivered before this field existed.

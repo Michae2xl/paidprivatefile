@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BUYER_PRESENCE_STALE_MS,
+  isBuyerPresent,
   isProductPurchase,
   isPurchasePendingDelivery,
   pendingPurchases,
@@ -134,5 +136,70 @@ describe("selectNextPurchaseToDeliver", () => {
         hasReleaseDraft: hasDraft,
       }),
     ).toBeNull();
+  });
+
+  it("skips an absent (gone) buyer and delivers the present one behind it", () => {
+    // pl_a's buyer closed its tab (no recent heartbeat); pl_b's buyer is live.
+    const next = selectNextPurchaseToDeliver({
+      summaries: [summary({ orderId: "pl_a" }), summary({ orderId: "pl_b" })],
+      inFlightOrderId: null,
+      hasReleaseDraft: hasDraft,
+      isBuyerPresent: (s) => s.orderId === "pl_b",
+    });
+    expect(next?.orderId).toBe("pl_b");
+  });
+
+  it("returns null when every pending buyer is absent", () => {
+    const next = selectNextPurchaseToDeliver({
+      summaries: [summary({ orderId: "pl_a" }), summary({ orderId: "pl_b" })],
+      inFlightOrderId: null,
+      hasReleaseDraft: hasDraft,
+      isBuyerPresent: () => false,
+    });
+    expect(next).toBeNull();
+  });
+
+  it("treats every buyer as present when no presence gate is supplied (back-compat)", () => {
+    const next = selectNextPurchaseToDeliver({
+      summaries: [summary({ orderId: "pl_a" }), summary({ orderId: "pl_b" })],
+      inFlightOrderId: null,
+      hasReleaseDraft: hasDraft,
+    });
+    expect(next?.orderId).toBe("pl_a");
+  });
+});
+
+describe("isBuyerPresent", () => {
+  const now = 1_000_000_000_000;
+
+  it("is true within the staleness window, false past it", () => {
+    const fresh = summary({
+      orderId: "pl_a",
+      nymSessionUpdatedAt: new Date(now - 8_000).toISOString(),
+    });
+    const stale = summary({
+      orderId: "pl_b",
+      nymSessionUpdatedAt: new Date(
+        now - BUYER_PRESENCE_STALE_MS - 1_000,
+      ).toISOString(),
+    });
+    expect(isBuyerPresent(fresh, now)).toBe(true);
+    expect(isBuyerPresent(stale, now)).toBe(false);
+  });
+
+  it("is false when the buyer never registered or the timestamp is invalid", () => {
+    expect(isBuyerPresent(summary({ orderId: "pl_a" }), now)).toBe(false);
+    expect(
+      isBuyerPresent(
+        summary({ orderId: "pl_a", nymSessionUpdatedAt: null }),
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      isBuyerPresent(
+        summary({ orderId: "pl_a", nymSessionUpdatedAt: "not-a-date" }),
+        now,
+      ),
+    ).toBe(false);
   });
 });

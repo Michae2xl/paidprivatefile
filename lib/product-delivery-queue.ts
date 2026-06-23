@@ -25,6 +25,34 @@ export interface DeliverableSummary {
   // Pure-Nym delivery state. "delivered" means the buyer ACKed — nothing left to
   // do. Anything else (or absent) means the purchase still needs delivery.
   nymSessionStatus?: string | null;
+  // ISO timestamp of the buyer's last Nym session registration. The buyer
+  // heartbeat re-registers every ~8s, so a stale timestamp means the buyer has
+  // gone away (closed tab). Used to skip absent buyers so an abandoned purchase
+  // never head-of-line-blocks the sequential queue. Null when never registered.
+  nymSessionUpdatedAt?: string | null;
+}
+
+// A buyer is PRESENT if its Nym session was (re)registered within this window.
+// The heartbeat fires ~every 8s, so a buyer unseen for ~40s (≈5 missed beats)
+// has almost certainly closed its tab.
+export const BUYER_PRESENCE_STALE_MS = 40_000;
+
+// True when the buyer for this purchase is still present (recent heartbeat). A
+// purchase with no nymSession yet is NOT present (no address to deliver to).
+// Pure: the caller passes the current epoch ms (and optionally the window).
+export function isBuyerPresent(
+  summary: DeliverableSummary,
+  nowMs: number,
+  staleMs: number = BUYER_PRESENCE_STALE_MS,
+): boolean {
+  if (!summary.nymSessionUpdatedAt) {
+    return false;
+  }
+  const seenMs = Date.parse(summary.nymSessionUpdatedAt);
+  if (Number.isNaN(seenMs)) {
+    return false;
+  }
+  return nowMs - seenMs <= staleMs;
 }
 
 // True when a summary is a PRODUCT purchase (has a productId). Single-use orders
@@ -75,6 +103,10 @@ export function selectNextPurchaseToDeliver(args: {
   summaries: readonly DeliverableSummary[];
   inFlightOrderId: string | null;
   hasReleaseDraft: (productId: string) => boolean;
+  // Optional presence gate: skip a pending purchase whose buyer has gone away
+  // (no recent heartbeat) so an abandoned tab never head-of-line-blocks the
+  // queue. When omitted, every purchase is treated as present (back-compat).
+  isBuyerPresent?: (summary: DeliverableSummary) => boolean;
 }): DeliverableSummary | null {
   const pending = pendingPurchases(args.summaries);
 
@@ -88,9 +120,14 @@ export function selectNextPurchaseToDeliver(args: {
 
   for (const summary of pending) {
     // productId is guaranteed by isProductPurchase, but narrow for the type.
-    if (summary.productId && args.hasReleaseDraft(summary.productId)) {
-      return summary;
+    if (!summary.productId || !args.hasReleaseDraft(summary.productId)) {
+      continue;
     }
+    // Skip an absent buyer (gone tab) so it does not block the buyers behind it.
+    if (args.isBuyerPresent && !args.isBuyerPresent(summary)) {
+      continue;
+    }
+    return summary;
   }
   return null;
 }

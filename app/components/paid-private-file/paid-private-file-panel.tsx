@@ -30,7 +30,10 @@ import {
   type PaidLinkKeyEnvelope,
   type PaidLinkSellerReleaseDraft,
 } from "../../../lib/paid-link-client-crypto";
-import { selectNextPurchaseToDeliver } from "../../../lib/product-delivery-queue";
+import {
+  isBuyerPresent,
+  selectNextPurchaseToDeliver,
+} from "../../../lib/product-delivery-queue";
 import {
   computePurchaseCounts,
   formatPurchaseSummary,
@@ -219,6 +222,10 @@ interface SellerFile {
   // still "Delivering"/"Awaiting delivery". Optional so older API responses (and
   // orders with no session yet) degrade to the bare status label.
   nymSessionStatus?: string | null;
+  // Last buyer heartbeat (Nym session re-registration). The delivery queue uses
+  // its freshness to skip a buyer that has gone away (closed tab) so an abandoned
+  // purchase never head-of-line-blocks the queue. Null when never registered.
+  nymSessionUpdatedAt?: string | null;
   // Provenance of a completed delivery: how this order's file reached the buyer.
   // "nym" = streamed over the mixnet; "https" = the Nym fallback fetch; null for
   // orders delivered before the field existed (degrades to a bare "Delivered").
@@ -3325,11 +3332,15 @@ export function PaidPrivateFilePanel({
     async function deliverNext() {
       // Pick the single next purchase to deliver (null when one is in flight or
       // nothing is deliverable). hasReleaseDraft is the localStorage probe.
+      const nowMs = Date.now();
       const next = selectNextPurchaseToDeliver({
         summaries: sellerFiles,
         inFlightOrderId: productDeliveryInFlightRef.current,
         hasReleaseDraft: (productId) =>
           Boolean(loadProductReleaseDraft(productId)),
+        // Skip a buyer whose heartbeat has gone stale (closed tab) so an abandoned
+        // purchase never head-of-line-blocks the buyers behind it in the queue.
+        isBuyerPresent: (s) => isBuyerPresent(s, nowMs),
       });
       if (!next || !active) {
         return;
