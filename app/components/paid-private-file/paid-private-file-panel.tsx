@@ -6424,13 +6424,14 @@ export async function startAndAwaitNymAddress(
       process.env.NEXT_PUBLIC_NYM_API_URL ??
       "https://validator.nymtech.net/api",
     forceTls: process.env.NEXT_PUBLIC_NYM_FORCE_TLS !== "0",
-    // Always pick the FASTEST gateway: the SDK probes candidate gateways and
-    // selects the lowest-latency one instead of a random draw. This is the main
-    // lever we have on transfer speed (the mixnet rate is the bottleneck), so we
-    // pay a few seconds of probing at connect for a much better route. Opt out
-    // with NEXT_PUBLIC_NYM_LATENCY_SELECTION="0".
+    // Latency-based gateway selection (SDK probes candidates, picks lowest-latency)
+    // is DISABLED by default: enabling it coincided with a stuck transfer in prod
+    // (buyer "Connected to Nym" but ENVELOPES 0 — the seller's packets never
+    // landed, a new gateway/address that broke the seller↔buyer handshake). Needs
+    // investigation of the gateway-rotation + address-registration interaction
+    // before re-enabling. Opt in with NEXT_PUBLIC_NYM_LATENCY_SELECTION="1".
     latencyBasedSelection:
-      process.env.NEXT_PUBLIC_NYM_LATENCY_SELECTION !== "0",
+      process.env.NEXT_PUBLIC_NYM_LATENCY_SELECTION === "1",
   });
 
   // selfAddress() can be empty until the gateway handshake completes, so poll
