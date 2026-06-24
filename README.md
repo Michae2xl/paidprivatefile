@@ -1,6 +1,5 @@
 # Paid Private File
 
-[![CI](https://github.com/Michae2xl/paidprivatefile/actions/workflows/ci.yml/badge.svg)](https://github.com/Michae2xl/paidprivatefile/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Live:** https://paidprivatefile.zkglobalcredit.tech/

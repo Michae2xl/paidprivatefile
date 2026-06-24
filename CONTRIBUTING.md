@@ -21,7 +21,7 @@ delivery are gated behind environment flags — see `.env.example` and
 
 ## Before opening a PR
 
-Run the full gate locally — CI runs the same three steps on every push/PR:
+Run the full gate locally:
 
 ```bash
 npm run check   # next typegen + tsc --noEmit (typecheck)
