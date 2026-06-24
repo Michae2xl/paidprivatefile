@@ -2830,9 +2830,7 @@ export function PaidPrivateFilePanel({
       const draft = loadReleaseDraftForOrder(order);
       if (!draft) {
         throw new Error(
-          locale === "pt"
-            ? "Esta maquina nao tem o segredo local do vendedor para liberar a chave."
-            : "This browser does not hold the seller release secret for this file.",
+          "This browser does not hold the seller release secret for this file.",
         );
       }
       const challenge = await postJson<KeyReleaseResponse>(
@@ -2845,17 +2843,11 @@ export function PaidPrivateFilePanel({
       );
       applyOrderState(challenge.order);
       if (challenge.release.status !== "ready_to_release") {
-        setReleaseMessage(
-          formatReleaseStatus(challenge.release.status, locale),
-        );
+        setReleaseMessage(formatReleaseStatus(challenge.release.status));
         return;
       }
       if (!challenge.release.buyerPublicKeyJwk) {
-        throw new Error(
-          locale === "pt"
-            ? "A chave publica do comprador ainda nao esta disponivel."
-            : "The buyer public key is not available yet.",
-        );
+        throw new Error("The buyer public key is not available yet.");
       }
       const code = await fingerprintPaidLinkPublicKey(
         challenge.release.buyerPublicKeyJwk,
@@ -2883,9 +2875,7 @@ export function PaidPrivateFilePanel({
       const draft = loadReleaseDraftForOrder(order);
       if (!draft) {
         throw new Error(
-          locale === "pt"
-            ? "Esta maquina nao tem o segredo local do vendedor para liberar a chave."
-            : "This browser does not hold the seller release secret for this file.",
+          "This browser does not hold the seller release secret for this file.",
         );
       }
 
@@ -2899,11 +2889,11 @@ export function PaidPrivateFilePanel({
       );
       applyOrderState(challenge.order);
       if (challenge.release.status === "released") {
-        setReleaseMessage(formatReleaseStatus("released", locale));
+        setReleaseMessage(formatReleaseStatus("released"));
         return;
       }
       if (challenge.release.status !== "ready_to_release") {
-        const message = formatReleaseStatus(challenge.release.status, locale);
+        const message = formatReleaseStatus(challenge.release.status);
         if (silent) {
           setReleaseMessage(message);
         } else {
@@ -2912,11 +2902,7 @@ export function PaidPrivateFilePanel({
         return;
       }
       if (!challenge.release.buyerPublicKeyJwk) {
-        throw new Error(
-          locale === "pt"
-            ? "A chave publica do comprador ainda nao esta disponivel."
-            : "The buyer public key is not available yet.",
-        );
+        throw new Error("The buyer public key is not available yet.");
       }
 
       const keyEnvelope = await wrapPaidLinkFileKeyForBuyer(
@@ -2936,7 +2922,7 @@ export function PaidPrivateFilePanel({
         },
       );
       applyOrderState(released.order);
-      setReleaseMessage(formatReleaseStatus("released", locale));
+      setReleaseMessage(formatReleaseStatus("released"));
 
       // Frente B: keep the server key-release POST above (record + fallback),
       // then deliver the envelope to the buyer DIRECTLY over the Nym mixnet.
@@ -2961,18 +2947,11 @@ export function PaidPrivateFilePanel({
             productId: order.productId,
           });
           setReleaseMessage(
-            locale === "pt"
-              ? "Chave liberada e enviada ao comprador pela Nym."
-              : "Key released and delivered to the buyer over Nym.",
+            "Key released and delivered to the buyer over Nym.",
           );
         } catch (nymError) {
           setReleaseMessage(
-            formatError(
-              nymError,
-              locale === "pt"
-                ? "Chave liberada, mas o envio pela Nym falhou: "
-                : "Key released, but Nym delivery failed: ",
-            ),
+            formatError(nymError, "Key released, but Nym delivery failed: "),
           );
         }
       }
@@ -3009,9 +2988,7 @@ export function PaidPrivateFilePanel({
       const draft = loadReleaseDraftForOrder(order);
       if (!draft) {
         throw new Error(
-          locale === "pt"
-            ? "Esta maquina nao tem o segredo local do vendedor para este arquivo."
-            : "This browser does not hold the seller release secret for this file.",
+          "This browser does not hold the seller release secret for this file.",
         );
       }
       const challenge = await postJson<KeyReleaseResponse>(
@@ -3027,9 +3004,7 @@ export function PaidPrivateFilePanel({
         !challenge.release.buyerNymAddress
       ) {
         throw new Error(
-          locale === "pt"
-            ? "O comprador ainda nao registrou a sessao Nym para receber."
-            : "The buyer has not registered a Nym session to receive yet.",
+          "The buyer has not registered a Nym session to receive yet.",
         );
       }
       // Pause the KEY re-send while THIS order's file is actively streaming from
@@ -3065,9 +3040,7 @@ export function PaidPrivateFilePanel({
       });
       if (!silent) {
         setReleaseMessage(
-          locale === "pt"
-            ? "Chave reenviada pela Nym. O comprador (aba aberta) deve receber em segundos."
-            : "Key re-sent over Nym. The buyer (tab open) should receive it shortly.",
+          "Key re-sent over Nym. The buyer (tab open) should receive it shortly.",
         );
       }
     } catch (error) {
@@ -6236,7 +6209,6 @@ function SellerReleasePanel({
   onRelease: () => void;
   disabled: boolean;
 }) {
-  const pt = locale === "pt";
   const released = order.release?.status === "ready";
   const paymentPaid =
     order.payment?.status === "paid" ||
@@ -6244,41 +6216,37 @@ function SellerReleasePanel({
     order.status === "claimed";
 
   const statusLine = released
-    ? formatReleaseStatus("released", locale)
+    ? formatReleaseStatus("released")
     : paymentPaid
-      ? formatReleaseStatus("ready_to_release", locale)
+      ? formatReleaseStatus("ready_to_release")
       : order.payment
-        ? formatReleaseStatus("waiting_for_payment", locale)
-        : formatReleaseStatus("waiting_for_buyer", locale);
+        ? formatReleaseStatus("waiting_for_payment")
+        : formatReleaseStatus("waiting_for_buyer");
 
   return (
     <div className="zectime-key-vault">
       <div>
-        <p className="eyebrow">
-          {pt ? "Custodia do vendedor" : "Seller-held key custody"}
-        </p>
+        <p className="eyebrow">Seller-held key custody</p>
         <p>
-          {pt
-            ? "A chave do arquivo fica neste navegador e e embrulhada para o comprador aqui; o servidor nao a recebe diretamente. Mantenha esta aba aberta: a chave e liberada automaticamente quando o pagamento for confirmado."
-            : "The file key stays in this browser and is wrapped for the buyer here; the server is not given it directly. Keep this tab open: the key is released automatically once payment is confirmed."}
+          The file key stays in this browser and is wrapped for the buyer here;
+          the server is not given it directly. Keep this tab open: the key is
+          released automatically once payment is confirmed.
         </p>
       </div>
       <p className="zk-hub-form-hint">{releaseMessage || statusLine}</p>
       {!released ? (
         <p className="zk-hub-form-hint">
-          {pt
-            ? "Liberacao automatica confia na chave informada pelo servidor; para verificacao forte, libere manualmente conferindo o codigo."
-            : "Auto-release trusts the server-provided buyer key; for strong verification, release manually after confirming the code."}
+          Auto-release trusts the server-provided buyer key; for strong
+          verification, release manually after confirming the code.
         </p>
       ) : null}
       {!released && paymentPaid && buyerCode ? (
         <div className="zectime-verification-code">
-          <p className="eyebrow">{pt ? "Codigo do comprador" : "Buyer code"}</p>
+          <p className="eyebrow">Buyer code</p>
           <code>{buyerCode}</code>
           <p className="zk-hub-form-hint">
-            {pt
-              ? "Codigo do comprador acima. Confirme que e igual ao codigo que o comprador te passou (protege contra um servidor malicioso trocar a chave)."
-              : "Buyer code above. Confirm it matches the code the buyer gave you (protects against a malicious server swapping the key)."}
+            Buyer code above. Confirm it matches the code the buyer gave you
+            (protects against a malicious server swapping the key).
           </p>
           <label className="zectime-key-confirm">
             <input
@@ -6286,11 +6254,7 @@ function SellerReleasePanel({
               checked={codeConfirmed}
               onChange={(event) => onConfirmCodeChange(event.target.checked)}
             />
-            <span>
-              {pt
-                ? "Conferi este codigo com o comprador"
-                : "I verified this code with the buyer"}
-            </span>
+            <span>I verified this code with the buyer</span>
           </label>
         </div>
       ) : null}
@@ -6303,13 +6267,7 @@ function SellerReleasePanel({
               onClick={onRelease}
               disabled={disabled || busy || !paymentPaid || !codeConfirmed}
             >
-              {busy
-                ? pt
-                  ? "Liberando chave..."
-                  : "Releasing key..."
-                : pt
-                  ? "Liberar chave"
-                  : "Release key"}
+              {busy ? "Releasing key..." : "Release key"}
             </button>
           ) : (
             <button
@@ -6318,13 +6276,7 @@ function SellerReleasePanel({
               onClick={onRevealCode}
               disabled={disabled || busy || !paymentPaid}
             >
-              {busy
-                ? pt
-                  ? "Carregando codigo..."
-                  : "Loading code..."
-                : pt
-                  ? "Conferir codigo e liberar"
-                  : "Verify code and release"}
+              {busy ? "Loading code..." : "Verify code and release"}
             </button>
           )}
         </div>
@@ -6373,27 +6325,17 @@ function formatReleaseStatus(
     | "waiting_for_buyer"
     | "ready_to_release"
     | "released",
-  locale: ProductLocale,
 ): string {
-  const pt = locale === "pt";
   switch (status) {
     case "released":
-      return pt
-        ? "Chave liberada. O comprador ja pode abrir o arquivo."
-        : "Key released. The buyer can now open the file.";
+      return "Key released. The buyer can now open the file.";
     case "ready_to_release":
-      return pt
-        ? "Pagamento confirmado. Liberando a chave para o comprador."
-        : "Payment confirmed. Releasing the key to the buyer.";
+      return "Payment confirmed. Releasing the key to the buyer.";
     case "waiting_for_payment":
-      return pt
-        ? "Aguardando confirmacao do pagamento antes de liberar a chave."
-        : "Waiting for payment confirmation before the key can be released.";
+      return "Waiting for payment confirmation before the key can be released.";
     case "waiting_for_buyer":
     default:
-      return pt
-        ? "Aguardando o comprador iniciar o pagamento."
-        : "Waiting for the buyer to start the payment.";
+      return "Waiting for the buyer to start the payment.";
   }
 }
 
