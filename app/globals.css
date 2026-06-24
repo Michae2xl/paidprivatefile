@@ -342,6 +342,63 @@ a {
   font-size: 0.85rem;
 }
 
+/* "How to get your UFVK" — collapsible help next to the viewing-key field on the
+   create-shop form (cream panel, dark text). */
+.ppf-ufvk-help {
+  margin: 10px 0 2px;
+  border: 1px solid rgba(13, 18, 16, 0.14);
+  border-radius: 10px;
+  background: rgba(13, 18, 16, 0.03);
+  font-size: 0.9rem;
+}
+
+.ppf-ufvk-help summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 650;
+  color: var(--ink);
+  list-style: none;
+}
+
+.ppf-ufvk-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.ppf-ufvk-help summary::before {
+  content: "▸ ";
+  color: rgba(13, 18, 16, 0.5);
+}
+
+.ppf-ufvk-help[open] summary::before {
+  content: "▾ ";
+}
+
+.ppf-ufvk-help-steps {
+  margin: 0;
+  padding: 0 14px 6px 30px;
+  display: grid;
+  gap: 8px;
+}
+
+.ppf-ufvk-help-steps li {
+  color: rgba(13, 18, 16, 0.78);
+  line-height: 1.4;
+}
+
+.ppf-ufvk-help-step-title {
+  display: block;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.ppf-ufvk-help-note {
+  margin: 2px 12px 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(13, 18, 16, 0.1);
+  color: rgba(13, 18, 16, 0.7);
+  font-size: 0.85rem;
+}
+
 .zectime-paid-tabs {
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

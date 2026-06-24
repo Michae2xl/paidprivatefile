@@ -58,6 +58,11 @@ export interface PaidPrivateFileCopy {
     ufvkLabel: string;
     ufvkPlaceholder: string;
     ufvkHint: string;
+    ufvkHelp: {
+      summary: string;
+      steps: { title: string; body: string }[];
+      note: string;
+    };
     ufvkWarningTitle: string;
     ufvkWarningBody: string;
     ufvkConfirmedTitle: string;
@@ -453,6 +458,20 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkPlaceholder: "uview1...",
       ufvkHint:
         "A plataforma usa esta chave somente para detectar pagamentos. Ela nao permite gastar.",
+      ufvkHelp: {
+        summary: "Como pegar sua chave de visualizacao (UFVK)",
+        steps: [
+          {
+            title: "Zingo! (recomendado)",
+            body: "Crie uma carteira Zingo nova, dedicada so a vendas, e abra Menu > Privacy & Security > Wallet Viewing Key e copie a string uview1...",
+          },
+          {
+            title: "Zkool",
+            body: "Crie uma conta dedicada (suporta varias) e exporte a viewing key dela. Confirme que comeca com uview1.",
+          },
+        ],
+        note: "Cole a UFVK completa (comeca com uview1...) de uma conta dedicada, nunca da sua carteira principal. Obs.: Zashi / Zodl ainda nao exportam UFVK.",
+      },
       ufvkWarningTitle: "Use uma conta ZEC dedicada",
       ufvkWarningBody:
         "Crie uma conta de carteira separada so para esta loja e cole a UFVK dela. A chave de visualizacao revela todo o historico da conta para a plataforma. NUNCA use a UFVK da sua carteira principal.",
@@ -824,6 +843,20 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       ufvkPlaceholder: "uview1...",
       ufvkHint:
         "The platform uses this key only to detect payments. It cannot spend.",
+      ufvkHelp: {
+        summary: "How to get your view-only key (UFVK)",
+        steps: [
+          {
+            title: "Zingo! (recommended)",
+            body: "Create a new, dedicated Zingo wallet just for sales, then open Menu > Privacy & Security > Wallet Viewing Key and copy the uview1... string.",
+          },
+          {
+            title: "Zkool",
+            body: "Create a dedicated account (it supports multiple), then export its viewing key. Make sure it starts with uview1.",
+          },
+        ],
+        note: "Paste the full UFVK (starts with uview1...) from a dedicated account, never your main wallet. Note: Zashi / Zodl don't export a UFVK yet.",
+      },
       ufvkWarningTitle: "Use a dedicated ZEC account",
       ufvkWarningBody:
         "Create a separate wallet account just for this shop and paste its UFVK. A viewing key reveals the account's full history to the platform. NEVER use your main wallet's UFVK.",

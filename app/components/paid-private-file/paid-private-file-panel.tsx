@@ -4099,6 +4099,22 @@ export function PaidPrivateFilePanel({
                               {copy.seller.ufvkHint}
                             </span>
                           </label>
+                          <details className="ppf-ufvk-help">
+                            <summary>{copy.seller.ufvkHelp.summary}</summary>
+                            <ol className="ppf-ufvk-help-steps">
+                              {copy.seller.ufvkHelp.steps.map((step) => (
+                                <li key={step.title}>
+                                  <span className="ppf-ufvk-help-step-title">
+                                    {step.title}
+                                  </span>
+                                  <span>{step.body}</span>
+                                </li>
+                              ))}
+                            </ol>
+                            <p className="ppf-ufvk-help-note">
+                              {copy.seller.ufvkHelp.note}
+                            </p>
+                          </details>
                           {ufvkPreview.status !== "idle" ? (
                             <div
                               className="zk-hub-ufvk-preview"
