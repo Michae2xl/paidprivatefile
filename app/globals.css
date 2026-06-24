@@ -303,6 +303,45 @@ a {
   line-height: 1.18;
 }
 
+/* "How it works" — clean numbered steps on the logged-out landing's left column
+   (replaces the redundant create-file intro). Dark text on the cream panel. */
+.ppf-how-it-works {
+  list-style: none;
+  margin: 14px 0 18px;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+  counter-reset: ppf-step;
+}
+
+.ppf-how-it-works li {
+  counter-increment: ppf-step;
+  position: relative;
+  padding-left: 40px;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.ppf-how-it-works li::before {
+  content: counter(ppf-step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(20, 232, 140, 0.18);
+  border: 1px solid rgba(20, 232, 140, 0.45);
+  color: #0b3a26;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
 .zectime-paid-tabs {
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2156,8 +2195,17 @@ a {
     padding: 22px 18px;
   }
 
+  .zectime-paid-hero {
+    gap: 10px;
+  }
+
   .zectime-paid-hero h1 {
-    font-size: 2.15rem;
+    font-size: 1.5rem;
+    line-height: 1.18;
+  }
+
+  .zectime-paid-hero .hero-copy {
+    font-size: 0.95rem;
   }
 
   .zectime-paid-panel-copy h2 {

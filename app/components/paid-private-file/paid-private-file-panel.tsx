@@ -3993,9 +3993,12 @@ export function PaidPrivateFilePanel({
         ) : mode === "send" ? (
           <section className="frame zectime-paid-panel surface-reveal">
             <div className="zectime-paid-panel-copy">
-              <p className="eyebrow">{copy.tabs.send}</p>
-              <h2>{copy.send.title}</h2>
-              <p>{copy.send.body}</p>
+              <p className="eyebrow">{copy.howItWorks.eyebrow}</p>
+              <ol className="ppf-how-it-works">
+                {copy.howItWorks.steps.map((step) => (
+                  <li key={step}>{step}</li>
+                ))}
+              </ol>
               <SellerShopArt copy={copy} authMode={sellerAuthMode} />
             </div>
 

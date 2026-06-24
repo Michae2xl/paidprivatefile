@@ -7,6 +7,10 @@ export interface PaidPrivateFileCopy {
     body: string;
     backLabel: string;
   };
+  howItWorks: {
+    eyebrow: string;
+    steps: string[];
+  };
   tabs: {
     send: string;
     receive: string;
@@ -389,6 +393,14 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
       body: "O arquivo e cifrado antes do upload. O pagamento em ZEC desbloqueia uma sessao privada Nym para entregar a chave ao comprador, sem expor o conteudo do arquivo.",
       backLabel: "Paid Private File",
     },
+    howItWorks: {
+      eyebrow: "Como funciona",
+      steps: [
+        "Crie uma loja. Uma rota publica mais uma chave de visualizacao (UFVK) para receber ZEC. Sem e-mail, sem custodia.",
+        "Liste um arquivo, cifrado no seu navegador. Defina um preco em ZEC e compartilhe o link.",
+        "O comprador paga. A chave e o arquivo chegam pela Nym, decifrados so no dispositivo dele.",
+      ],
+    },
     tabs: {
       send: "Painel",
       receive: "Abrir link",
@@ -749,6 +761,14 @@ const COPY: Record<ProductLocale, PaidPrivateFileCopy> = {
         "Pay in ZEC. Key and file delivered over Nym. Decrypted on your device.",
       body: "Encrypted in your browser. Paid in ZEC. The decryption key and the encrypted file reach the buyer browser-to-browser, 100% over the Nym mixnet. Decrypted only on their device. Non-custodial, end to end.",
       backLabel: "Paid Private File",
+    },
+    howItWorks: {
+      eyebrow: "How it works",
+      steps: [
+        "Create a shop. A public route plus a view-only key (UFVK) to receive ZEC. No email, no custody.",
+        "List a file, encrypted in your browser. Set a ZEC price and share the link.",
+        "Buyer pays. The key and file arrive over Nym, decrypted only on their device.",
+      ],
     },
     tabs: {
       send: "Dashboard",
